@@ -1,0 +1,20 @@
+# Protect live trade databases from being overwritten during deployment.
+# Usage: rsync --exclude-from=.rsyncignore ...
+#
+# These files contain live trade history on the VPS.  Overwriting them
+# with stale local copies wipes out all trades recorded since the last sync.
+
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Large / local-only artefacts that should never be pushed
+*.pkl
+*.joblib
+__pycache__/
+.env
+*.log
+*.tar.gz
+db_backups/
