@@ -106,6 +106,7 @@ def _add_change_markers(fig, changes: list, active_strategies: list = None) -> N
 
 
 def _get_color(strategy: str) -> str:
+    """Return the theme color for a strategy, falling back to blue-grey."""
     return STRATEGY_COLORS.get(strategy, "#607D8B")
 
 

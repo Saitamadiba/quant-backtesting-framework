@@ -8,24 +8,29 @@ from config import STRATEGIES
 
 
 def strategy_filter(df: pd.DataFrame, key_prefix: str = "") -> list:
+    """Render a sidebar multiselect for strategy filtering."""
     options = sorted(df["strategy"].dropna().unique()) if not df.empty else list(STRATEGIES.keys())
     return st.sidebar.multiselect("Strategy", options, default=options, key=f"{key_prefix}_strat")
 
 
 def symbol_filter(df: pd.DataFrame, key_prefix: str = "") -> list:
+    """Render a sidebar multiselect for symbol filtering."""
     options = sorted(df["symbol"].dropna().unique()) if not df.empty else ["BTC", "ETH", "NQ"]
     return st.sidebar.multiselect("Symbol", options, default=options, key=f"{key_prefix}_sym")
 
 
 def source_filter(key_prefix: str = "") -> str:
+    """Render a sidebar radio selector for data source (All/Live/Backtest)."""
     return st.sidebar.radio("Source", ["All", "Live", "Backtest"], key=f"{key_prefix}_src")
 
 
 def direction_filter(key_prefix: str = "") -> list:
+    """Render a sidebar multiselect for trade direction (Long/Short)."""
     return st.sidebar.multiselect("Direction", ["Long", "Short"], default=["Long", "Short"], key=f"{key_prefix}_dir")
 
 
 def date_range_filter(df: pd.DataFrame, key_prefix: str = ""):
+    """Render sidebar date-range inputs derived from the DataFrame's entry_time span."""
     if df.empty or "entry_time" not in df.columns or df["entry_time"].isna().all():
         return None, None
     min_d = df["entry_time"].min().date()
@@ -37,6 +42,7 @@ def date_range_filter(df: pd.DataFrame, key_prefix: str = ""):
 
 
 def session_filter(key_prefix: str = "") -> list:
+    """Render a sidebar multiselect for trading session filtering."""
     options = ["Asian", "London", "New York", "Off-Hours", "Unknown"]
     return st.sidebar.multiselect("Session", options, default=options, key=f"{key_prefix}_sess")
 

@@ -33,6 +33,8 @@ DUCKDB_PATH = os.path.join(_BASE, 'duckdb_data', 'trading_data.duckdb')
 
 @dataclass
 class TransactionCosts:
+    """Model round-trip trade costs including spread, commission, and slippage."""
+
     spread_pct: float = 0.0005
     commission_pct: float = 0.001
     slippage_pct: float = 0.0003
@@ -43,6 +45,7 @@ class TransactionCosts:
 
     @classmethod
     def for_asset(cls, symbol: str) -> 'TransactionCosts':
+        """Return asset-specific transaction costs (lower for NQ futures, default otherwise)."""
         if symbol == 'NQ':
             return cls(spread_pct=0.0001, commission_pct=0.0002, slippage_pct=0.0001)
         return cls()
@@ -50,6 +53,8 @@ class TransactionCosts:
 
 @dataclass
 class WFOConfig:
+    """Configuration for walk-forward optimization window sizes, costs, and grid search."""
+
     train_window_bars: int = 500
     test_window_bars: int = 100
     step_bars: int = 100
@@ -125,6 +130,8 @@ class WFOConfig:
 
 @dataclass
 class TradeResult:
+    """Record of a single simulated trade with entry/exit details, R-multiple, and metadata."""
+
     entry_time: Any
     exit_time: Any
     direction: str
@@ -152,9 +159,11 @@ class TradeResult:
 # ================================================================
 
 class IndicatorEngine:
+    """Calculate technical indicators (ATR, RSI, EMAs, ADX, volume, ML features) on OHLCV DataFrames."""
 
     @staticmethod
     def calculate(df: pd.DataFrame) -> pd.DataFrame:
+        """Compute all indicators and return a copy of df with new columns added."""
         df = df.copy()
 
         high_low = df['High'] - df['Low']
@@ -228,6 +237,7 @@ class IndicatorEngine:
 
     @staticmethod
     def _calculate_adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
+        """Compute Average Directional Index (ADX) from High/Low/Close columns."""
         high, low, close = df['High'], df['Low'], df['Close']
         plus_dm = high.diff()
         minus_dm = -low.diff()
@@ -252,9 +262,11 @@ class IndicatorEngine:
 # ================================================================
 
 class RegimeDetector:
+    """Classify market regime (trending_up/down, ranging, volatile) from indicator state."""
 
     @staticmethod
     def classify(df: pd.DataFrame, idx: int) -> str:
+        """Return the regime string for bar at idx using ADX, ATR, and EMA lookback."""
         if idx < 50:
             return 'unknown'
         window = df.iloc[max(0, idx - 50):idx + 1]
@@ -281,6 +293,7 @@ class RegimeDetector:
 # ================================================================
 
 class TradeSimulator:
+    """Simulate trade execution with spread, commission, slippage, and TP/SL logic."""
 
     @staticmethod
     def simulate(
@@ -290,6 +303,11 @@ class TradeSimulator:
         _highs: np.ndarray = None, _lows: np.ndarray = None,
         _closes: np.ndarray = None,
     ) -> Optional[TradeResult]:
+        """Walk forward bar-by-bar from signal entry, applying SL/TP1/TP2 and costs.
+
+        Returns a TradeResult or None if the signal is invalid (zero risk or no bars).
+        Pre-extracted _highs/_lows/_closes arrays can be passed to avoid repeated .values calls.
+        """
         idx = signal['idx']
         direction = signal['direction']
         entry_price = signal['entry_price']
@@ -410,9 +428,14 @@ class TradeSimulator:
 # ================================================================
 
 class StatisticalTests:
+    """Run significance tests (binomial, t-test, serial correlation) on trade results."""
 
     @staticmethod
     def run_all(trades: List[TradeResult]) -> Dict:
+        """Compute full statistical summary: win rate CI, t-test, profit factor, expectancy, etc.
+
+        Returns a dict with 'valid' key; False if fewer than 5 trades.
+        """
         from scipy import stats as scipy_stats
         if len(trades) < 5:
             return {'valid': False, 'reason': f'Insufficient trades: {len(trades)}', 'n_trades': len(trades)}
@@ -484,6 +507,7 @@ class StatisticalTests:
 
     @staticmethod
     def _wilson_ci(wins: int, n: int, confidence: float) -> Tuple[float, float]:
+        """Compute Wilson score confidence interval for a binomial proportion."""
         from scipy import stats as scipy_stats
         if n == 0:
             return (0.0, 1.0)
@@ -663,9 +687,11 @@ class MonteCarloAnalysis:
 # ================================================================
 
 class DataFetcher:
+    """Fetch OHLCV data from the local DuckDB database."""
 
     @staticmethod
     def fetch(symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
+        """Query DuckDB for OHLCV data and return a timestamp-indexed DataFrame, or None on failure."""
         try:
             import duckdb
         except ImportError:
@@ -716,6 +742,7 @@ class WFOEngine:
     """
 
     def __init__(self, adapter: StrategyAdapter, config: WFOConfig):
+        """Initialize WFO engine with a strategy adapter and configuration."""
         self.adapter = adapter
         self.config = config
         self.all_oos_trades: List[TradeResult] = []
@@ -790,6 +817,10 @@ class WFOEngine:
         return result
 
     def _generate_windows(self, df: pd.DataFrame) -> List[Tuple[int, int, int, int]]:
+        """Generate (train_start, train_end, test_start, test_end) index tuples.
+
+        Uses anchored (expanding) or rolling windows based on config.anchored.
+        """
         cfg = self.config
         windows = []
         total_bars = len(df)
@@ -813,6 +844,7 @@ class WFOEngine:
     def _optimize_window(
         self, df, w_id, train_start, train_end, test_start, test_end, param_grid,
     ):
+        """Optimize params on one IS window, then evaluate best params on the OOS window."""
         cfg = self.config
         train_df = df.iloc[train_start:train_end]
         test_df_with_history = df.iloc[train_start:test_end]
@@ -955,6 +987,11 @@ class WFOEngine:
         })
 
     def _score_trades(self, trades: List[TradeResult]) -> float:
+        """Score a set of trades using the configured optimization metric.
+
+        Supports 'expectancy', 'profit_factor', 'sharpe', and 'total_r'.
+        Returns -inf if fewer than 2 trades.
+        """
         if len(trades) < 2:
             return -float('inf')
 
@@ -980,6 +1017,11 @@ class WFOEngine:
             return sum(r_values)
 
     def _compile_results(self, symbol: str, timeframe: str, df: pd.DataFrame) -> Dict:
+        """Compile all OOS results into the final output dict.
+
+        Includes statistical tests, regime/direction breakdowns, equity curve,
+        Monte Carlo analysis, drawdown analysis, and timing analysis.
+        """
         oos = self.all_oos_trades
         is_trades = self.all_is_trades
 
@@ -1103,6 +1145,7 @@ class WFOEngine:
         return result
 
     def _empty_result(self, symbol: str, timeframe: str, reason: str) -> Dict:
+        """Return a skeleton result dict with an error reason and zero trades."""
         return {
             'strategy_name': self.adapter.name,
             'symbol': symbol,
@@ -1138,6 +1181,7 @@ class RegimeAdaptiveWFO(WFOEngine):
 
     def __init__(self, adapter: StrategyAdapter, config: WFOConfig,
                  min_trades_per_regime: int = 5):
+        """Initialize regime-adaptive WFO with per-regime trade minimum threshold."""
         super().__init__(adapter, config)
         self.min_trades_per_regime = min_trades_per_regime
         self.regime_param_history: List[Dict] = []
