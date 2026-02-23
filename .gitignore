@@ -1,0 +1,98 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# .gitignore — Quant Backtesting Framework
+# Protects: secrets, strategy logic, trade data, ML models, deployment files
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Secrets & Credentials ────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+
+# ── Proprietary Strategy Bots (live trading code) ────────────────────────────
+FVG_Strategy/
+Liquidity_Raid/
+Momentum_Mastery/
+SBS/
+iFVG/
+
+# ── Legacy / Archived Code ──────────────────────────────────────────────────
+_OLD_Liquidity_raid_backup/
+February_9th/
+
+# ── Databases & Trade Data ──────────────────────────────────────────────────
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.duckdb
+duckdb_data/
+dashboard/databases/
+
+# ── ML Models & Artifacts ───────────────────────────────────────────────────
+*.pkl
+*.joblib
+*.h5
+*.onnx
+ml_models/
+ml_training_data.db*
+
+# ── Backtest Results (contain optimized parameters) ─────────────────────────
+dashboard/backtest_results/
+backtrader_framework/optimization/results/
+SBS/data/
+
+# ── VPS Deployment ──────────────────────────────────────────────────────────
+vps_deployment/
+*.tar.gz
+deploy_to_vps.sh
+upload_to_vps.sh
+vps_bot_update_*.tar.gz
+
+# ── Pine Scripts (TradingView strategy code) ────────────────────────────────
+dashboard/pine/
+
+# ── Strategy Documents (reveal strategy logic) ──────────────────────────────
+STRATEGY_SUMMARY.md
+BOT_MODIFICATIONS_LOG.md
+STANDALONE_SCRIPTS_SUMMARY.md
+LR_FVG_data_to_record_for_ML_training.odt
+Volatility_based_regime_filter.odt
+Black_Scholes_Implementation.odt
+*.rtf
+
+# ── Root-level ML scripts (reference proprietary training data) ─────────────
+ml_*.py
+backfill_*.py
+gamma_regime.py
+deepseek\ backtest.py
+5min\ breakout\ backtesting.py
+
+# ── Python / Virtual Environments ───────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.venv_new/
+venv/
+*.egg-info/
+
+# ── Node / JS ───────────────────────────────────────────────────────────────
+node_modules/
+package.json
+package-lock.json
+
+# ── OS / IDE ────────────────────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.ipynb_checkpoints/
+
+# ── Logs ────────────────────────────────────────────────────────────────────
+*.log
