@@ -124,6 +124,45 @@ cd dashboard
 streamlit run app.py
 ```
 
+## Live Performance Snapshot
+
+One of the strategies in this framework &mdash; **Liquidity Raid on BTC (15m)** &mdash; has been running live on a VPS since late November 2025. Below are sanitized performance metrics (strategy logic is not disclosed).
+
+| Metric | Value |
+|--------|-------|
+| Period | Nov 2025 &ndash; Feb 2026 (~3 months) |
+| Closed Trades | 88 |
+| Win Rate | 56.8% |
+| Profit Factor | 1.67 |
+| Mean R-Multiple | +0.24R |
+| Annualized Sharpe | 3.41 |
+| Max Drawdown | $556 |
+| Cumulative PnL | +$2,144 |
+
+**Direction split:** Long 59% / Short 41% of trades &mdash; profitable in both directions.
+
+**Exit discipline breakdown:**
+
+| Exit Type | Trades | PnL |
+|-----------|--------|-----|
+| Take Profit | 18 (20%) | +$3,193 |
+| Trailing Stop | 14 (16%) | +$1,532 |
+| Time Exit | 13 (15%) | +$489 |
+| Stop Loss | 43 (49%) | &minus;$3,071 |
+
+Losses are capped by hard stop-losses, while trailing stops and time-based exits contribute significant edge &mdash; a hallmark of disciplined risk management.
+
+**Monthly progression:**
+
+| Month | Trades | Win Rate | PnL |
+|-------|--------|----------|-----|
+| Nov 2025 | 2 | 50% | +$99 |
+| Dec 2025 | 51 | 53% | +$435 |
+| Jan 2026 | 25 | 64% | +$707 |
+| Feb 2026 | 10 | 60% | +$903 |
+
+Win rate and per-trade expectancy have improved over time as the walk-forward optimization framework feeds parameter updates back into the live bot.
+
 ## Project Status
 
 This framework powers live trading bots deployed on a VPS. Strategies run 24/7 on BTC and ETH with automated Telegram reporting. The optimization and analytics infrastructure shown here is the same tooling used for strategy development, validation, and monitoring in production.
