@@ -261,6 +261,21 @@ class IndicatorEngine:
             df['HTF_Bullish'] = df['Bullish_Bias']
             df['HTF_Bearish'] = df['Bearish_Bias']
 
+        # ── 1H OHLCV for cross-TF FVG detection ──────────────────
+        # Resample to 1H and forward-fill back, giving the FVG adapter
+        # access to 1h candle structure when running on 15m data.
+        try:
+            ohlcv_1h = df[['Open', 'High', 'Low', 'Close']].resample('1h').agg({
+                'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last',
+            }).dropna()
+            if len(ohlcv_1h) >= 50:
+                df['HTF_1h_Open'] = ohlcv_1h['Open'].reindex(df.index, method='ffill')
+                df['HTF_1h_High'] = ohlcv_1h['High'].reindex(df.index, method='ffill')
+                df['HTF_1h_Low'] = ohlcv_1h['Low'].reindex(df.index, method='ffill')
+                df['HTF_1h_Close'] = ohlcv_1h['Close'].reindex(df.index, method='ffill')
+        except Exception:
+            pass  # columns won't exist; FVG adapter falls back to native TF
+
         # ── Price Structure Bias (Swing HH/HL/LH/LL) ─────────────
         # Leading indicator: reacts to reversals before EMA cross.
         # +1.0 = LONG, -1.0 = SHORT, 0.0 = NEUTRAL
