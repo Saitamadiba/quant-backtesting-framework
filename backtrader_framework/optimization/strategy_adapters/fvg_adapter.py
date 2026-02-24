@@ -59,6 +59,7 @@ class FVGAdapter(StrategyAdapter):
             ParamSpec("fill_entry_max", 0.70,   0.60,   0.80,   0.10),
             ParamSpec("atr_sl_buffer",  0.5,    0.3,    0.9,    0.3),
             ParamSpec("rr_target",      2.0,    1.5,    3.0,    0.5),
+            ParamSpec("min_confidence", 0.40,   0.25,   0.60,   0.05),
         ]
 
     def generate_signals(
@@ -80,6 +81,7 @@ class FVGAdapter(StrategyAdapter):
         fill_max = params.get('fill_entry_max', 0.70)
         atr_buf = params.get('atr_sl_buffer', 0.5)
         rr_target = params.get('rr_target', 2.0)
+        min_conf = params.get('min_confidence', 0.40)
 
         s = scan_start_idx
         e = min(scan_end_idx, len(df))
@@ -256,6 +258,9 @@ class FVGAdapter(StrategyAdapter):
                         confidence += 0.20
 
                 # Max: 0.25 + 0.20 + 0.20 + 0.15 + 0.20 = 1.0
+
+                if confidence < min_conf:
+                    continue
 
                 # ── Entry / SL / TP ───────────────────────────────
                 entry = closes[i]
