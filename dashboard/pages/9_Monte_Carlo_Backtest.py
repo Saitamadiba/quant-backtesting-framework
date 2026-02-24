@@ -151,15 +151,16 @@ New (correct): Calculate on the window slice only — never pass future data
 
     st.markdown("#### 3. Transaction Cost Modeling")
     st.markdown("""
-Every trade is penalized with realistic execution costs:
+Every trade is penalized with realistic execution costs calibrated per asset class:
 
-| Cost Component | Value | Per Trade |
-|----------------|-------|-----------|
-| Spread (half) | 0.05% | Both entry & exit |
-| Commission | 0.10% | Both entry & exit |
-| Slippage | 0.03% | Both entry & exit |
-| **Total round-trip** | **~0.36%** | **Deducted from every trade** |
+| Cost Component | BTC/ETH (Perp Futures) | NQ (CME Micro) |
+|----------------|----------------------|----------------|
+| Spread (half) | 0.01% | 0.01% |
+| Taker fee | 0.055% | 0.02% |
+| Slippage | 0.01% | 0.01% |
+| **Total round-trip** | **~0.15%** | **~0.08%** |
 
+Costs are based on actual Bybit/Binance perp futures and CME micro futures fee schedules.
 Naive backtests that ignore costs can show a profitable strategy that actually loses money after
 friction. Our implementation deducts costs from **every trade** in R-multiple terms.
 """)
@@ -247,7 +248,7 @@ the edge is in the individual trade quality, not in lucky sequencing.
         "Our Implementation": [
             "Fixed parameters across all windows",
             "Indicators recalculated per window slice only",
-            "0.36% round-trip deducted from every trade",
+            "Asset-calibrated costs (BTC/ETH: 0.15% RT, NQ: 0.08% RT) per trade",
             "Walk-Forward: only OOS results count",
             "10,000 bootstrap permutations",
             "OOS/IS ratio calculated per window",
