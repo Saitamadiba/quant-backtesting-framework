@@ -42,8 +42,8 @@ KILL_ZONES = {
 
 # Default backtesting parameters
 DEFAULT_INITIAL_CASH = 10000.0
-DEFAULT_COMMISSION = 0.001  # 0.1%
-DEFAULT_SLIPPAGE = 0.0005   # 0.05%
+DEFAULT_COMMISSION = 0.00055  # 0.055% taker fee (Bybit/Binance perp)
+DEFAULT_SLIPPAGE = 0.0001    # 0.01% — overridden per-asset in TransactionCosts.for_asset()
 
 # Indicator defaults
 ATR_PERIOD = 14

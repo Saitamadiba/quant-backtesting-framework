@@ -37,6 +37,55 @@ Regime-adaptive walk-forward optimization with rolling or anchored windows:
 - **Transaction cost modeling** &mdash; Configurable spread, commission, and slippage per asset
 - **Statistical validation** &mdash; Overfit ratio, Sharpe significance testing, Monte Carlo permutation tests
 
+### WFO: Practical Lessons and Performance Tuning
+
+Building and running walk-forward optimization on high-frequency data (15m, 180K+ bars) exposed several non-obvious issues. This section documents the problems encountered and the solutions that brought WFO runtime from 18+ hours down to minutes.
+
+#### Problem 1: Inflated Losses
+
+Early WFO runs showed significantly worse loss metrics than the live bot. Root causes:
+
+- **Missing exit logic in the adapter.** The live bot uses trailing stops, partial take-profits, and time-based exits that collectively salvage losing trades or lock in partial gains. The WFO trade simulator initially only modeled hard SL/TP exits, producing inflated average loss sizes.
+- **Transaction costs applied twice.** An early bug deducted costs from both the signal generator's entry price and the trade simulator's fill price, doubling effective friction on every trade.
+- **Overly granular windows.** Stepping every 100 bars on 15m data (~25 hours) created 1,794 overlapping windows. Each IS window's "best" parameters overfitted to noise, producing poor OOS performance that looked like inflated losses. Widening the step size to 1&ndash;4 weeks of bars cut window count to ~60&ndash;120 and stabilized OOS results.
+
+#### Problem 2: Strategy Selectivity Layers Not Captured
+
+The WFO adapter initially implemented only the core signal generation (sweep detection + BOS confirmation) but omitted several selectivity layers present in the live bot:
+
+- **Sweep quality scoring** &mdash; The live bot scores each sweep on depth-to-ATR ratio, wick rejection quality, and volume confirmation. The adapter initially used a flat depth threshold, admitting low-quality sweeps that the live bot would reject.
+- **Multi-timeframe alignment** &mdash; The live bot checks that the signal direction agrees with the higher-timeframe EMA trend (e.g., 4H EMA50 > EMA200 for longs). Without this filter the adapter generated counter-trend signals that inflated the loss count.
+- **Gamma regime gating** &mdash; In production, signals are suppressed during high-gamma (choppy/mean-reverting) regimes. The adapter had no regime filter, so it fired signals into unfavorable conditions.
+- **Session/killzone enforcement** &mdash; The adapter's killzone logic was simplified relative to the live bot's session manager, which tracks Asia/London/NY boundaries with DST-aware timezone handling.
+
+The fix was to progressively add these layers to the adapter as soft-scoring components: sweep depth contributes 0&ndash;0.40, structure bias 0&ndash;0.25, HTF alignment 0&ndash;0.20, and structure confidence 0&ndash;0.15. The `min_confidence` parameter (optimizable) then controls overall selectivity.
+
+#### Problem 3: Runtime &mdash; Making WFO Finish in Minutes
+
+A full grid of 576 parameter combinations across 1,794 windows on 180K bars takes 18+ hours. Four levers bring this down to minutes:
+
+**1. Cut the grid.** 576 combos is large for walk-forward. Use random search (50&ndash;150 samples) or a two-stage approach: coarse grid first, then refine around the top 5&ndash;10 regions. This alone is a 4&ndash;20x speedup. The engine supports this via `grid_mode='random'` and `random_samples=150` in `WFOConfig`.
+
+**2. Widen window / step sizes.** Stepping every 100 bars on 15m means re-optimizing every 25 hours &mdash; far too granular. Pragmatic WFO settings for 15m crypto:
+
+| Parameter | Too Granular | Recommended |
+|-----------|-------------|-------------|
+| Step forward | 100 bars (25h) | 1&ndash;4 weeks of bars |
+| OOS window | 100 bars (25h) | 1&ndash;4 weeks |
+| IS window | 500 bars (5 days) | 3&ndash;12 months |
+
+This produces dozens of windows instead of thousands &mdash; a 10&ndash;50x speedup. `WFOConfig.for_timeframe()` applies these scaling factors automatically.
+
+**3. Precompute indicators once.** If indicators are recalculated per window or per parameter combination, runtime explodes. The correct pattern:
+
+- Compute all indicator columns once in pandas/NumPy over the full dataset
+- Slice arrays per window (zero-copy with NumPy views)
+- Run signal logic cheaply per parameter set on pre-sliced arrays
+
+The engine's `IndicatorEngine.add_all()` runs once before the window loop. Strategy adapters receive a pre-computed DataFrame and should never recalculate indicators internally.
+
+**4. Parallelize parameter combos.** 576 combinations is ideal for `multiprocessing`. If the engine runs single-threaded, most CPU cores sit idle. On an 8-core machine, parallelizing the IS grid search yields a near-8x speedup. Combined with random search (150 combos) and wider windows, total runtime drops from 18 hours to 5&ndash;15 minutes.
+
 ### Strategy Adapter Pattern (`strategy_adapters/`)
 
 Lightweight, stateless signal generators that work on raw pandas DataFrames:

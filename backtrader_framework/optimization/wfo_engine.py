@@ -45,9 +45,15 @@ class TransactionCosts:
 
     @classmethod
     def for_asset(cls, symbol: str) -> 'TransactionCosts':
-        """Return asset-specific transaction costs (lower for NQ futures, default otherwise)."""
+        """Return asset-specific transaction costs calibrated to real exchange fees.
+
+        BTC: Bybit/Binance perpetual futures (taker 0.055%, tight spread).
+        NQ:  CME micro futures.
+        """
         if symbol == 'NQ':
             return cls(spread_pct=0.0001, commission_pct=0.0002, slippage_pct=0.0001)
+        if symbol in ('BTC', 'ETH'):
+            return cls(spread_pct=0.0001, commission_pct=0.00055, slippage_pct=0.0001)
         return cls()
 
 
@@ -233,7 +239,135 @@ class IndicatorEngine:
                 streak[i] = direction[i]
         df['CandleStreak'] = streak
 
+        # ── Higher Timeframe (4H) Indicators ──────────────────────
+        # Resample 15m→4H, compute EMAs, map back to 15m via ffill.
+        # Adds MTF alignment filter: trades must agree with 4H trend.
+        try:
+            ohlcv_4h = df[['Open', 'High', 'Low', 'Close']].resample('4h').agg({
+                'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last',
+            }).dropna()
+            if len(ohlcv_4h) >= 200:
+                htf_ema50 = ohlcv_4h['Close'].ewm(span=50, adjust=False).mean()
+                htf_ema200 = ohlcv_4h['Close'].ewm(span=200, adjust=False).mean()
+                df['HTF_EMA50'] = htf_ema50.reindex(df.index, method='ffill')
+                df['HTF_EMA200'] = htf_ema200.reindex(df.index, method='ffill')
+                df['HTF_Bullish'] = df['HTF_EMA50'] > df['HTF_EMA200']
+                df['HTF_Bearish'] = df['HTF_EMA50'] < df['HTF_EMA200']
+            else:
+                df['HTF_Bullish'] = df['Bullish_Bias']
+                df['HTF_Bearish'] = df['Bearish_Bias']
+        except Exception:
+            df['HTF_Bullish'] = df['Bullish_Bias']
+            df['HTF_Bearish'] = df['Bearish_Bias']
+
+        # ── Price Structure Bias (Swing HH/HL/LH/LL) ─────────────
+        # Leading indicator: reacts to reversals before EMA cross.
+        # +1.0 = LONG, -1.0 = SHORT, 0.0 = NEUTRAL
+        struct_bias, struct_conf = IndicatorEngine._compute_structure_bias(
+            df['High'].values, df['Low'].values
+        )
+        df['StructureBias'] = struct_bias
+        df['StructureConf'] = struct_conf
+
+        # ── DVOL (Deribit Implied Volatility Index) ───────────────
+        # Hourly historical DVOL merged via forward-fill.
+        try:
+            import json as _json
+            _dvol_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.dirname(
+                    os.path.abspath(__file__)
+                ))),
+                'Liquidity_Raid', 'Research', 'btc_dvol_hourly.json',
+            )
+            if os.path.exists(_dvol_path):
+                with open(_dvol_path) as _f:
+                    _dvol_raw = _json.load(_f)
+                _dvol_df = pd.DataFrame(_dvol_raw)
+                _dvol_df['timestamp'] = pd.to_datetime(
+                    _dvol_df['timestamp'], unit='ms', utc=True,
+                ).dt.tz_localize(None)
+                _dvol_df = _dvol_df.set_index('timestamp').sort_index()
+                df['DVOL'] = _dvol_df['dvol'].reindex(df.index, method='ffill')
+            else:
+                df['DVOL'] = np.nan
+        except Exception:
+            df['DVOL'] = np.nan
+
         return df
+
+    @staticmethod
+    def _compute_structure_bias(
+        highs: np.ndarray, lows: np.ndarray,
+    ) -> tuple:
+        """Vectorized price structure bias from swing HH/HL/LH/LL.
+
+        Detects swing points (3-bar lookback = 7-bar centered window),
+        then for each bar computes the bullish/bearish structure score
+        from the 3 most recent swing highs and lows.
+
+        Returns (structure_bias, structure_conf) arrays of length n.
+        """
+        n = len(highs)
+
+        # Swing detection: local max/min in 7-bar centered window
+        h_series = pd.Series(highs)
+        l_series = pd.Series(lows)
+        rolling_max_h = h_series.rolling(window=7, center=True).max().values
+        rolling_min_l = l_series.rolling(window=7, center=True).min().values
+
+        sh_mask = (highs == rolling_max_h) & ~np.isnan(rolling_max_h)
+        sl_mask = (lows == rolling_min_l) & ~np.isnan(rolling_min_l)
+
+        sh_idx = np.where(sh_mask)[0]
+        sh_val = highs[sh_idx]
+        sl_idx = np.where(sl_mask)[0]
+        sl_val = lows[sl_idx]
+
+        if len(sh_idx) < 3 or len(sl_idx) < 3:
+            return np.zeros(n, dtype=np.float32), np.zeros(n, dtype=np.float32)
+
+        # Build per-bar arrays of last 3 swing high/low values via ffill.
+        # At each swing point, record its value; then forward-fill.
+        def _last_k_ffill(indices, values, n_bars, k=3):
+            """For each bar, produce the last k values via forward-fill."""
+            arrays = [np.full(n_bars, np.nan) for _ in range(k)]
+            for j in range(k, len(indices)):
+                idx = indices[j]
+                for offset in range(k):
+                    arrays[offset][idx] = values[j - (k - 1 - offset)]
+            # Forward-fill each array
+            return [pd.Series(a).ffill().values for a in arrays]
+
+        sh_2, sh_1, sh_0 = _last_k_ffill(sh_idx, sh_val, n, 3)
+        sl_2, sl_1, sl_0 = _last_k_ffill(sl_idx, sl_val, n, 3)
+
+        # Vectorized HH/HL/LH/LL counts
+        valid = ~np.isnan(sh_0) & ~np.isnan(sh_2) & ~np.isnan(sl_0) & ~np.isnan(sl_2)
+        hh = ((sh_0 > sh_1).astype(np.int8) + (sh_1 > sh_2).astype(np.int8))
+        hl = ((sl_0 > sl_1).astype(np.int8) + (sl_1 > sl_2).astype(np.int8))
+        lh = ((sh_0 < sh_1).astype(np.int8) + (sh_1 < sh_2).astype(np.int8))
+        ll_c = ((sl_0 < sl_1).astype(np.int8) + (sl_1 < sl_2).astype(np.int8))
+
+        bull = hh + hl  # max 4
+        bear = lh + ll_c
+
+        # Classify: matching live bot logic exactly
+        bias = np.where(
+            ~valid, 0.0,
+            np.where((bull >= 3) & (bear <= 1), 1.0,
+            np.where((bear >= 3) & (bull <= 1), -1.0,
+            np.where(bull > bear, 1.0,
+            np.where(bear > bull, -1.0, 0.0))))
+        ).astype(np.float32)
+
+        conf = np.where(
+            ~valid, 0.0,
+            np.where((bull >= 3) & (bear <= 1), bull / 4.0,
+            np.where((bear >= 3) & (bull <= 1), bear / 4.0,
+            np.abs(bull - bear) / 4.0))
+        ).astype(np.float32)
+
+        return bias, conf
 
     @staticmethod
     def _calculate_adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
@@ -395,9 +529,11 @@ class TradeSimulator:
         else:
             raw_r = (effective_entry - exit_price) / risk
 
+        # Entry spread+slippage already in effective_entry (line 456-457),
+        # so only charge commission for entry to avoid double-counting.
+        entry_comm = entry_price * costs.commission_pct
         exit_cost = exit_price * (costs.spread_pct + costs.commission_pct + costs.slippage_pct)
-        entry_cost_full = entry_price * (costs.spread_pct + costs.commission_pct + costs.slippage_pct)
-        total_cost = (entry_cost_full + exit_cost) / risk if risk > 0 else 0
+        total_cost = (entry_comm + exit_cost) / risk if risk > 0 else 0
 
         return TradeResult(
             entry_time=signal['time'],
