@@ -111,15 +111,16 @@ class WFOConfig:
         base_warmup = kwargs.pop('min_ema_warmup', 250)
         base_max_trade = kwargs.pop('max_trade_bars', 168)
 
-        # For sub-4h TFs, also default to random grid for speed
-        grid_mode = kwargs.pop('grid_mode', 'random' if scale > 1 else 'auto')
+        # Always default to random grid — 'auto' falls through to full grid
+        # which can be 768+ combos.  Random 150 is sufficient for WFO.
+        grid_mode = kwargs.pop('grid_mode', 'random')
 
-        # For sub-4h TFs, use rolling (non-anchored) windows.
-        # Anchored mode creates ever-growing DataFrames (up to 180k rows for 15m)
-        # that slow down pandas operations even with scan capping.
-        # Rolling windows keep each train_df at constant size (8000 bars for 15m
-        # = 83 days — plenty for IS optimization).
-        anchored = kwargs.pop('anchored', scale <= 1)
+        # Always use rolling (non-anchored) windows.  Anchored mode causes the
+        # train window to grow unbounded (11k bars for 4h, 180k for 15m), making
+        # signal generation per combo O(N_bars) instead of constant.  Rolling
+        # windows keep each window at constant size (500 bars for 4h = 83 days,
+        # 8000 bars for 15m = 83 days) — plenty of IS history.
+        anchored = kwargs.pop('anchored', False)
 
         return cls(
             train_window_bars=base_train * scale,
@@ -915,8 +916,12 @@ class WFOEngine:
             param_grid = generate_random_grid(param_specs, cfg.random_samples)
         elif cfg.grid_mode == 'full':
             param_grid = generate_grid(param_specs, cfg.max_param_combos)
-        else:
-            param_grid = generate_grid(param_specs, cfg.max_param_combos)
+        else:  # 'auto': use full grid if small, random if large
+            full = generate_grid(param_specs, cfg.max_param_combos)
+            if len(full) <= cfg.random_samples:
+                param_grid = full
+            else:
+                param_grid = generate_random_grid(param_specs, cfg.random_samples)
 
         if progress_callback:
             progress_callback(0.10, f"Grid: {len(param_grid)} param combos")
@@ -1357,8 +1362,12 @@ class RegimeAdaptiveWFO(WFOEngine):
             param_grid = generate_random_grid(param_specs, cfg.random_samples)
         elif cfg.grid_mode == 'full':
             param_grid = generate_grid(param_specs, cfg.max_param_combos)
-        else:
-            param_grid = generate_grid(param_specs, cfg.max_param_combos)
+        else:  # 'auto': use full grid if small, random if large
+            full = generate_grid(param_specs, cfg.max_param_combos)
+            if len(full) <= cfg.random_samples:
+                param_grid = full
+            else:
+                param_grid = generate_random_grid(param_specs, cfg.random_samples)
 
         if progress_callback:
             progress_callback(0.08, f"Grid: {len(param_grid)} param combos")
