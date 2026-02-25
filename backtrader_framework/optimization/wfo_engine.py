@@ -502,8 +502,9 @@ class TradeSimulator:
 
                 if not tp1_hit and h >= tp1:
                     tp1_hit = True
+                    stop_loss = effective_entry  # Trail to breakeven
                 if lo <= stop_loss:
-                    outcome = 'loss'
+                    outcome = 'breakeven' if tp1_hit else 'loss'
                     exit_price = stop_loss
                     break
                 if h >= tp2:
@@ -520,8 +521,9 @@ class TradeSimulator:
 
                 if not tp1_hit and lo <= tp1:
                     tp1_hit = True
+                    stop_loss = effective_entry  # Trail to breakeven
                 if h >= stop_loss:
-                    outcome = 'loss'
+                    outcome = 'breakeven' if tp1_hit else 'loss'
                     exit_price = stop_loss
                     break
                 if lo <= tp2:

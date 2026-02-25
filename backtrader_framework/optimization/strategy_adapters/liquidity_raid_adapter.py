@@ -1,8 +1,18 @@
 """
-Liquidity Raid adapter for WFO engine.
+Liquidity Raid adapter for WFO engine — v2.
 
 Pure pandas/numpy signal generation, no backtrader dependency.
 Optimized: vectorized sweep detection with numpy boolean masks.
+
+v2 improvements (based on WFO analysis of 4,376 OOS trades):
+    - R:R corrected to 0.5:0.75 (MFE data: 79.6% reach 0.5R, 68.7% reach 0.75R)
+    - Trailing stop to breakeven after TP1 (via TradeSimulator)
+    - Confidence scoring flipped to mean-reversion: rewards COUNTER-trend
+      structure and HTF (WFO showed trend-aligned signals are anti-predictive)
+    - EMA trend removed from hard gate (was forcing trend-aligned signals only)
+    - Volatile regime filter: skip signals when ATR_Pctile20 > 0.80
+    - Displacement filter: require 5-bar opposite directional move before entry
+    - Param space tightened to reduce IS/OOS overfitting (was -0.011 ratio)
 
 Selectivity architecture:
     Hard gates (reject if failed):
@@ -10,12 +20,14 @@ Selectivity architecture:
         - Candle body >= min_body_pct
         - Sweep detection (price crosses session level + closes back)
         - IV-Adaptive min sweep depth (DVOL-based)
+        - Volatile regime filter (ATR_Pctile20 > 0.80)
+        - Displacement: 5-bar counter-directional price move
 
-    Soft scoring (confidence boosters, not gates):
-        - EMA50/200 trend bias (baseline directional filter)
-        - Price Structure Bias (HH/HL/LH/LL swing analysis)
-        - MTF 4H Alignment (higher-timeframe trend agreement)
-        - Volatility-Adaptive SL (ATR percentile scaling)
+    Soft scoring (mean-reversion confidence):
+        - Sweep depth (0-0.50, primary quality signal)
+        - Counter-trend Structure Bias (0-0.20, rewards opposing direction)
+        - Counter-trend HTF Alignment (0-0.15, rewards opposing HTF)
+        - Structure confidence bonus (0-0.15)
 
     Minimum confidence threshold rejects low-quality setups.
 
@@ -23,6 +35,11 @@ Session definitions (Eastern Time, approximated as UTC-5):
     Asia:      19:00-23:59 ET  ->  establishes liquidity pool
     London KZ: 02:00-08:00 ET  ->  trade Asia level sweeps
     NY KZ:     08:00-16:00 ET  ->  trade Asia + London level sweeps
+
+WFO Results (v1 baseline):
+    BTC 15m: -0.010R / 50.5% WR / 899 trades
+    BTC 1h:  -0.243R / 25.6% WR / 1243 trades
+    ETH 15m: -0.324R / 26.8% WR / 2234 trades
 """
 
 from typing import Dict, List, Any, Tuple
@@ -46,18 +63,19 @@ class LiquidityRaidAdapter(StrategyAdapter):
     def get_param_space(self) -> List[ParamSpec]:
         """Parameter space for liquidity sweep detection.
 
-        R:R ranges calibrated from MFE analysis (WFO 2,119 OOS trades).
-        min_confidence threshold controls how many soft-scoring layers
-        must agree before a signal is accepted.
+        R:R calibrated from MFE analysis: 79.6% of trades reach 0.5R,
+        68.7% reach 0.75R, only 58.7% reach 1.0R → 0.5R default target.
+        min_confidence lowered because WFO showed high-confidence signals
+        are anti-predictive (mean-reversion benefits from counter-trend).
         """
         return [
-            ParamSpec("session_lookback",   12,    6,     24,    6,    'int'),
+            ParamSpec("session_lookback",   12,    6,     18,    6,    'int'),
             ParamSpec("atr_sl_multiplier",  2.5,   1.5,   3.5,   0.5),
-            ParamSpec("min_rr",             1.0,   0.5,   1.5,   0.5),
-            ParamSpec("max_rr",             1.5,   1.0,   2.0,   0.5),
+            ParamSpec("min_rr",             0.5,   0.3,   1.0,   0.5),
+            ParamSpec("max_rr",             0.75,  0.5,   1.5,   0.5),
             ParamSpec("min_body_pct",       0.15,  0.10,  0.25,  0.05),
-            ParamSpec("sweep_tolerance",    0.002, 0.001, 0.004, 0.001),
-            ParamSpec("min_confidence",     0.35,  0.20,  0.55,  0.05),
+            ParamSpec("sweep_tolerance",    0.002, 0.001, 0.003, 0.001),
+            ParamSpec("min_confidence",     0.25,  0.15,  0.45,  0.05),
         ]
 
     def generate_signals(
@@ -161,8 +179,11 @@ class LiquidityRaidAdapter(StrategyAdapter):
                 valid_pctile & (atr_pctile >= 0.80), 1.25,
                 np.where(valid_pctile & (atr_pctile <= 0.20), 0.80, 1.0)
             )
+            # HARD GATE: volatile regime filter (top 20% ATR = worst regime)
+            is_volatile = valid_pctile & (atr_pctile > 0.80)
         else:
             sl_vol_mult = np.ones(scan_len)
+            is_volatile = np.zeros(scan_len, dtype=bool)
 
         # ── Vectorized candle properties ────────────────────────────
         candle_range = highs - lows
@@ -172,13 +193,16 @@ class LiquidityRaidAdapter(StrategyAdapter):
         is_bearish = closes < opens
         valid_atr = (atrs > 0) & ~np.isnan(atrs)
 
-        # Hard-gate base: KZ + EMA bias + candle direction + body + ATR
+        # Hard-gate base: KZ + candle direction + body + ATR
+        # EMA trend removed from hard gate — LR is mean-reversion and
+        # counter-trend sweeps have better edge. EMA/HTF remain as
+        # soft confidence layers (rewarding counter-trend setups).
         long_base = (
-            is_kz & is_long_ema & is_bullish
+            is_kz & is_bullish
             & (body_pct >= min_body) & valid_atr
         )
         short_base = (
-            is_kz & is_short_ema & is_bearish
+            is_kz & is_bearish
             & (body_pct >= min_body) & valid_atr
         )
 
@@ -223,11 +247,19 @@ class LiquidityRaidAdapter(StrategyAdapter):
         min_cooldown = 4
         last_sig_rel = -min_cooldown
 
+        # Pre-extract close array for displacement check
+        all_closes = df['Close'].values
+
         for rel_i in sweep_rel_indices:
             if rel_i - last_sig_rel < min_cooldown:
                 continue
 
             abs_i = s + rel_i
+
+            # HARD GATE: volatile regime filter
+            if is_volatile[rel_i]:
+                continue
+
             atr_val = atrs[rel_i]
             cr = candle_range[rel_i]
 
@@ -246,28 +278,47 @@ class LiquidityRaidAdapter(StrategyAdapter):
             if depth_atr < min_depth_arr[rel_i]:
                 continue
 
-            # ── Composite confidence from soft layers ───────────────
-            # Base: sweep depth component (0.0 to 0.40)
-            depth_c = min(depth_atr / 1.0, 1.0) * 0.40
+            # HARD GATE: Displacement check (5-bar directional move)
+            disp_lookback = 5
+            if abs_i >= disp_lookback:
+                ref_close = all_closes[abs_i - disp_lookback]
+                if ref_close > 0:
+                    price_change = (closes[rel_i] - ref_close) / ref_close
+                else:
+                    price_change = 0.0
+                # LR is mean-reversion: LONG after bearish sweep needs
+                # price to have dropped, SHORT after bullish sweep needs
+                # price to have risen — opposite displacement direction
+                min_disp = 0.003
+                if direction == 'LONG' and price_change > -min_disp:
+                    continue
+                if direction == 'SHORT' and price_change < min_disp:
+                    continue
+            # (skip displacement check if insufficient history)
 
-            # SOFT LAYER 1: Structure bias (+0.25 agree, +0.05 neutral, 0 against)
+            # ── Composite confidence (mean-reversion friendly) ──────
+            # Sweep depth: primary quality signal (0.0 to 0.50)
+            depth_c = min(depth_atr / 1.0, 1.0) * 0.50
+
+            # SOFT LAYER 1: Structure bias — COUNTER-trend is better
+            # for mean-reversion. Reward when structure opposes direction.
             sb = structure_bias[rel_i]
             if direction == 'LONG':
-                struct_score = 0.25 if sb > 0 else (0.05 if sb == 0 else 0.0)
+                struct_score = 0.20 if sb < 0 else (0.05 if sb == 0 else 0.0)
             else:
-                struct_score = 0.25 if sb < 0 else (0.05 if sb == 0 else 0.0)
+                struct_score = 0.20 if sb > 0 else (0.05 if sb == 0 else 0.0)
 
-            # SOFT LAYER 2: HTF alignment (+0.20 if agrees, 0 if not)
+            # SOFT LAYER 2: HTF alignment — COUNTER-trend = better setup
             if direction == 'LONG':
-                htf_score = 0.20 if htf_bullish[rel_i] else 0.0
+                htf_score = 0.15 if htf_bearish[rel_i] else 0.0
             else:
-                htf_score = 0.20 if htf_bearish[rel_i] else 0.0
+                htf_score = 0.15 if htf_bullish[rel_i] else 0.0
 
             # SOFT LAYER 3: Structure confidence bonus (0 to 0.15)
             struct_conf_score = float(struct_conf_arr[rel_i]) * 0.15
 
             confidence = depth_c + struct_score + htf_score + struct_conf_score
-            # Max possible: 0.40 + 0.25 + 0.20 + 0.15 = 1.0
+            # Max possible: 0.50 + 0.20 + 0.15 + 0.15 = 1.0
 
             # Soft gate: reject below minimum confidence
             if confidence < min_conf:
@@ -308,7 +359,7 @@ class LiquidityRaidAdapter(StrategyAdapter):
                 take_profit_2=tp2,
                 risk=risk,
                 confidence=confidence,
-                bias='ALIGNED' if (struct_score > 0 and htf_score > 0) else 'PARTIAL',
+                bias='COUNTER' if (struct_score > 0.1 or htf_score > 0) else 'PARTIAL',
                 atr=atr_val,
             ))
             last_sig_rel = rel_i
