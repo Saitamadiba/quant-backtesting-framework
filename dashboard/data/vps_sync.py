@@ -34,9 +34,12 @@ def sync_single_file(local_name: str, remote_path: str) -> Dict:
     VPS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     local_path = VPS_CACHE_DIR / local_name
 
+    # Use --checksum to force content comparison (not just size/mtime)
+    # so that unchanged files still get verified and the local mtime
+    # is updated to reflect a successful sync check.
     remote = f"{VPS_USER}@{VPS_HOST}:{remote_path}"
     cmd = [
-        "rsync", "-az", "--timeout=15",
+        "rsync", "-az", "--checksum", "--timeout=15",
         "-e", f"ssh {' '.join(_ssh_args())}",
         remote, str(local_path),
     ]
@@ -44,7 +47,13 @@ def sync_single_file(local_name: str, remote_path: str) -> Dict:
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode == 0:
-            return {"file": local_name, "status": "ok", "time": datetime.now().isoformat()}
+            # Touch local file so dashboard sees it as freshly synced
+            local_path.touch()
+            size_kb = round(local_path.stat().st_size / 1024, 1)
+            return {
+                "file": local_name, "status": "ok",
+                "time": datetime.now().isoformat(), "size_kb": size_kb,
+            }
         return {"file": local_name, "status": "error", "error": result.stderr.strip()}
     except subprocess.TimeoutExpired:
         return {"file": local_name, "status": "timeout"}

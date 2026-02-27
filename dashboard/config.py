@@ -30,6 +30,7 @@ VPS_DB_FILES = {
     "lr_eth.db":  f"{VPS_REMOTE_BASE}/Liquidity_Raid/ETH_V2/eth_liquidity_raid_v2.db",
     "mm_btc.db":  f"{VPS_REMOTE_BASE}/Momentum_Mastery/BTC/btc_momentum_mastery_v2.db",
     "mm_eth.db":  f"{VPS_REMOTE_BASE}/Momentum_Mastery/ETH/eth_momentum_mastery_v2.db",
+    "sbs.db":     f"{VPS_REMOTE_BASE}/SBS/bots/core/ml_training_data.db",
 }
 
 # ── Remote ML Training DB Mapping ────────────────────────────────────────────
@@ -63,6 +64,7 @@ DB_STRATEGY_MAP = {
     "lr_eth.db":  ("Liquidity Raid", "ETH"),
     "mm_btc.db":  ("Momentum Mastery", "BTC"),
     "mm_eth.db":  ("Momentum Mastery", "ETH"),
+    "sbs.db":     ("SBS", "ALL"),
 }
 
 # ── VPS Systemd Services ──────────────────────────────────────────────────────
@@ -74,6 +76,8 @@ BOT_SERVICES = {
     "lr-eth":  {"strategy": "Liquidity Raid", "symbol": "ETH"},
     "mm-btc":  {"strategy": "Momentum Mastery", "symbol": "BTC"},
     "mm-eth":  {"strategy": "Momentum Mastery", "symbol": "ETH"},
+    "sbs-btc": {"strategy": "SBS", "symbol": "BTC"},
+    "sbs-eth": {"strategy": "SBS", "symbol": "ETH"},
 }
 
 SERVICE_WORK_DIRS = {
@@ -84,6 +88,8 @@ SERVICE_WORK_DIRS = {
     "lr-eth":  f"{VPS_REMOTE_BASE}/Liquidity_Raid/ETH_V2",
     "mm-btc":  f"{VPS_REMOTE_BASE}/Momentum_Mastery/BTC",
     "mm-eth":  f"{VPS_REMOTE_BASE}/Momentum_Mastery/ETH",
+    "sbs-btc": f"{VPS_REMOTE_BASE}/SBS/bots/btc",
+    "sbs-eth": f"{VPS_REMOTE_BASE}/SBS/bots/eth",
 }
 
 VPS_BACKUP_SCRIPT = f"{VPS_REMOTE_BASE}/backup_dbs.sh"
@@ -108,6 +114,8 @@ ML_TRAINING_DATA = BASE_DIR / "SBS" / "data" / "training" / "ml_training_data.cs
 ML_MODELS_DIR = BASE_DIR / "SBS" / "research" / "ml" / "models"
 ML_TRAINING_DB = BASE_DIR / "ml_training_data.db"
 ML_ROOT_TRAINING_SCRIPT = BASE_DIR / "ml_model_training.py"
+ML_PREDICTIONS_DB = VPS_CACHE_DIR / "ml_predictions.db"
+ML_PERFORMANCE_SCORER = BASE_DIR / "ml_performance_scorer.py"
 
 # ── Monte Carlo ───────────────────────────────────────────────────────────────
 MC_ANALYSIS_SCRIPT = (
@@ -165,24 +173,24 @@ SESSION_COLORS = {
 # ── Bot Deploy Mapping (local file -> VPS remote path) ───────────────────────
 DEPLOY_BOT_FILES = {
     "FVG BTC": (
-        BASE_DIR / "FVG_Strategy" / "BTC" / "enhanced_btc_bot_v3_corrected.py",
-        f"{VPS_REMOTE_BASE}/FVG_Strategy/BTC/enhanced_btc_bot_v3_corrected.py",
+        BASE_DIR / "FVG_Strategy" / "BTC" / "fvg_btc.py",
+        f"{VPS_REMOTE_BASE}/FVG_Strategy/BTC/fvg_btc.py",
     ),
     "FVG ETH": (
-        BASE_DIR / "FVG_Strategy" / "ETH" / "enhanced_eth_bot_v3_corrected.py",
-        f"{VPS_REMOTE_BASE}/FVG_Strategy/ETH/enhanced_eth_bot_v3_corrected.py",
+        BASE_DIR / "FVG_Strategy" / "ETH" / "fvg_eth.py",
+        f"{VPS_REMOTE_BASE}/FVG_Strategy/ETH/fvg_eth.py",
     ),
     "FVG NQ": (
-        BASE_DIR / "FVG_Strategy" / "NQ" / "enhanced_nq_bot_v3_corrected.py",
-        f"{VPS_REMOTE_BASE}/FVG_Strategy/NQ/enhanced_nq_bot_v3_corrected.py",
+        BASE_DIR / "FVG_Strategy" / "NQ" / "fvg_nq.py",
+        f"{VPS_REMOTE_BASE}/FVG_Strategy/NQ/fvg_nq.py",
     ),
     "LR BTC": (
-        BASE_DIR / "Liquidity_Raid" / "BTC_V2" / "btc_liquidity_raid_v2.py",
-        f"{VPS_REMOTE_BASE}/Liquidity_Raid/BTC_V2/btc_liquidity_raid_v2.py",
+        BASE_DIR / "Liquidity_Raid" / "BTC_V2" / "lr_btc.py",
+        f"{VPS_REMOTE_BASE}/Liquidity_Raid/BTC_V2/lr_btc.py",
     ),
     "LR ETH": (
-        BASE_DIR / "Liquidity_Raid" / "ETH_V2" / "eth_liquidity_raid_v2.py",
-        f"{VPS_REMOTE_BASE}/Liquidity_Raid/ETH_V2/eth_liquidity_raid_v2.py",
+        BASE_DIR / "Liquidity_Raid" / "ETH_V2" / "lr_eth.py",
+        f"{VPS_REMOTE_BASE}/Liquidity_Raid/ETH_V2/lr_eth.py",
     ),
     "MM BTC": (
         BASE_DIR / "Momentum_Mastery" / "BTC" / "btc_momentum_mastery_v2.py",
@@ -191,6 +199,14 @@ DEPLOY_BOT_FILES = {
     "MM ETH": (
         BASE_DIR / "Momentum_Mastery" / "ETH" / "eth_momentum_mastery_v2.py",
         f"{VPS_REMOTE_BASE}/Momentum_Mastery/ETH/eth_momentum_mastery_v2.py",
+    ),
+    "SBS BTC": (
+        BASE_DIR / "SBS" / "bots" / "btc" / "sbs_btc.py",
+        f"{VPS_REMOTE_BASE}/SBS/bots/btc/sbs_btc.py",
+    ),
+    "SBS ETH": (
+        BASE_DIR / "SBS" / "bots" / "eth" / "sbs_eth.py",
+        f"{VPS_REMOTE_BASE}/SBS/bots/eth/sbs_eth.py",
     ),
 }
 
@@ -202,6 +218,8 @@ DEPLOY_SERVICE_MAP = {
     "LR ETH":  "lr-eth",
     "MM BTC":  "mm-btc",
     "MM ETH":  "mm-eth",
+    "SBS BTC": "sbs-btc",
+    "SBS ETH": "sbs-eth",
 }
 
 # ── Account Settings ─────────────────────────────────────────────────────────

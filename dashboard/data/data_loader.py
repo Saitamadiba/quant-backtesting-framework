@@ -37,7 +37,13 @@ def get_all_trades(source_filter: str = "All") -> pd.DataFrame:
     if not frames:
         return pd.DataFrame(columns=TRADE_SCHEMA_COLS)
 
-    df = pd.concat(frames, ignore_index=True)
+    # Drop all-NA columns before concat to avoid FutureWarning
+    cleaned = [f.dropna(axis=1, how="all") for f in frames]
+    df = pd.concat(cleaned, ignore_index=True)
+    # Re-add any schema columns that were dropped
+    for col in TRADE_SCHEMA_COLS:
+        if col not in df.columns:
+            df[col] = None
 
     # Dedup: prefer Live over Backtest for same (strategy, symbol, entry_time, entry_price)
     dedup_cols = ["strategy", "symbol", "entry_time", "entry_price"]
