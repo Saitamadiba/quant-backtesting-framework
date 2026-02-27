@@ -4,13 +4,9 @@ Generalized Walk-Forward Optimization Engine.
 Optimizes strategy parameters per in-sample window and validates on
 out-of-sample windows. Strategy-agnostic via the StrategyAdapter interface.
 
-Data classes (TransactionCosts, WFOConfig, TradeResult) are defined here.
-Component classes have been extracted into separate modules:
-- indicators.py  -> IndicatorEngine
-- regime.py      -> RegimeDetector
-- simulator.py   -> TradeSimulator
-- statistics.py  -> StatisticalTests, MonteCarloAnalysis
-- data_fetcher.py -> DataFetcher
+Components copied from SBS/research/analysis/wfa_backtest.py to avoid
+cross-package dependency:
+- IndicatorEngine, RegimeDetector, TradeSimulator, StatisticalTests
 """
 
 import logging
@@ -28,7 +24,7 @@ from .timing_analysis import TimingAnalyzer
 
 logger = logging.getLogger(__name__)
 
-# DuckDB path (kept for backward compatibility; also in data_fetcher.py)
+# DuckDB path
 _BASE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DUCKDB_PATH = os.path.join(_BASE, 'duckdb_data', 'trading_data.duckdb')
 
@@ -168,17 +164,728 @@ class TradeResult:
 
 
 # ================================================================
-#  IMPORTS FROM EXTRACTED MODULES
+#  INDICATOR ENGINE (copied from wfa_backtest.py)
 # ================================================================
-# These are imported AFTER data classes are defined to avoid circular
-# import issues (the extracted modules import TransactionCosts/TradeResult
-# from this file).
 
-from .indicators import IndicatorEngine
-from .regime import RegimeDetector
-from .simulator import TradeSimulator
-from .statistics import StatisticalTests, MonteCarloAnalysis
-from .data_fetcher import DataFetcher
+class IndicatorEngine:
+    """Calculate technical indicators (ATR, RSI, EMAs, ADX, volume, ML features) on OHLCV DataFrames."""
+
+    @staticmethod
+    def calculate(df: pd.DataFrame) -> pd.DataFrame:
+        """Compute all indicators and return a copy of df with new columns added."""
+        df = df.copy()
+
+        # ATR with Wilder's EMA (alpha=1/14) — matches institutional standard
+        high_low = df['High'] - df['Low']
+        high_close = np.abs(df['High'] - df['Close'].shift())
+        low_close = np.abs(df['Low'] - df['Close'].shift())
+        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        df['ATR'] = tr.ewm(alpha=1.0/14, adjust=False).mean()
+
+        # RSI with Wilder's EMA (alpha=1/14) — avoids SMA bias
+        delta = df['Close'].diff()
+        gain = delta.where(delta > 0, 0.0)
+        loss = -delta.where(delta < 0, 0.0)
+        avg_gain = gain.ewm(alpha=1.0/14, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=1.0/14, adjust=False).mean()
+        rs = avg_gain / (avg_loss + 1e-10)
+        df['RSI'] = 100 - (100 / (1 + rs))
+
+        df['EMA20'] = df['Close'].ewm(span=20, adjust=False).mean()
+        df['EMA50'] = df['Close'].ewm(span=50, adjust=False).mean()
+        df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
+
+        df['Bullish_Bias'] = df['EMA50'] > df['EMA200']
+        df['Bearish_Bias'] = df['EMA50'] < df['EMA200']
+
+        df['Volume_SMA'] = df['Volume'].rolling(window=20).mean()
+        df['High_Volume'] = df['Volume'] > df['Volume_SMA'] * 1.5
+
+        df['ADX'] = IndicatorEngine._calculate_adx(df)
+
+        df['Manip_Score'] = 0
+        daily_range = (df['High'] - df['Low']) / df['Close']
+        avg_range = daily_range.rolling(window=20).mean()
+        df.loc[daily_range > avg_range * 2, 'Manip_Score'] = 2
+        df.loc[(daily_range > avg_range * 1.5) & (daily_range <= avg_range * 2), 'Manip_Score'] = 1
+
+        # ── ML Feature Support Columns ──────────────────────────
+        df['LogReturn'] = np.log(df['Close'] / df['Close'].shift(1))
+        df['RealizedVol20'] = df['LogReturn'].rolling(window=20).std(ddof=1)
+
+        # ATR percentile ranks (rolling rank / window)
+        atr_series = df['ATR']
+        df['ATR_Pctile20'] = atr_series.rolling(window=20).apply(
+            lambda w: np.sum(w <= w.iloc[-1]) / len(w), raw=False
+        )
+        df['ATR_Pctile100'] = atr_series.rolling(window=100).apply(
+            lambda w: np.sum(w <= w.iloc[-1]) / len(w), raw=False
+        )
+
+        # Momentum: 5-bar rate of change
+        df['Momentum5'] = df['Close'] / df['Close'].shift(5) - 1
+
+        # Close vs Range: buying pressure (0 = closed at low, 1 = closed at high)
+        bar_range = df['High'] - df['Low']
+        df['CloseVsRange'] = np.where(
+            bar_range > 0, (df['Close'] - df['Low']) / bar_range, 0.5
+        )
+
+        # Candle streak: consecutive same-direction closes
+        direction = np.sign(df['Close'].values - np.roll(df['Close'].values, 1))
+        direction[0] = 0
+        streak = np.zeros(len(direction), dtype=float)
+        for i in range(1, len(direction)):
+            if direction[i] == 0:
+                streak[i] = 0
+            elif direction[i] == np.sign(streak[i - 1]) or streak[i - 1] == 0:
+                streak[i] = streak[i - 1] + direction[i]
+            else:
+                streak[i] = direction[i]
+        df['CandleStreak'] = streak
+
+        # ── Higher Timeframe (4H) Indicators ──────────────────────
+        # Resample 15m→4H, compute EMAs, map back to 15m via ffill.
+        # Adds MTF alignment filter: trades must agree with 4H trend.
+        try:
+            ohlcv_4h = df[['Open', 'High', 'Low', 'Close']].resample('4h').agg({
+                'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last',
+            }).dropna()
+            if len(ohlcv_4h) >= 200:
+                htf_ema50 = ohlcv_4h['Close'].ewm(span=50, adjust=False).mean()
+                htf_ema200 = ohlcv_4h['Close'].ewm(span=200, adjust=False).mean()
+                df['HTF_EMA50'] = htf_ema50.reindex(df.index, method='ffill')
+                df['HTF_EMA200'] = htf_ema200.reindex(df.index, method='ffill')
+                df['HTF_Bullish'] = df['HTF_EMA50'] > df['HTF_EMA200']
+                df['HTF_Bearish'] = df['HTF_EMA50'] < df['HTF_EMA200']
+            else:
+                df['HTF_Bullish'] = df['Bullish_Bias']
+                df['HTF_Bearish'] = df['Bearish_Bias']
+        except Exception:
+            df['HTF_Bullish'] = df['Bullish_Bias']
+            df['HTF_Bearish'] = df['Bearish_Bias']
+
+        # ── 1H OHLCV for cross-TF FVG detection ──────────────────
+        # Resample to 1H and forward-fill back, giving the FVG adapter
+        # access to 1h candle structure when running on 15m data.
+        try:
+            ohlcv_1h = df[['Open', 'High', 'Low', 'Close']].resample('1h').agg({
+                'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last',
+            }).dropna()
+            if len(ohlcv_1h) >= 50:
+                df['HTF_1h_Open'] = ohlcv_1h['Open'].reindex(df.index, method='ffill')
+                df['HTF_1h_High'] = ohlcv_1h['High'].reindex(df.index, method='ffill')
+                df['HTF_1h_Low'] = ohlcv_1h['Low'].reindex(df.index, method='ffill')
+                df['HTF_1h_Close'] = ohlcv_1h['Close'].reindex(df.index, method='ffill')
+        except Exception:
+            pass  # columns won't exist; FVG adapter falls back to native TF
+
+        # ── Price Structure Bias (Swing HH/HL/LH/LL) ─────────────
+        # Leading indicator: reacts to reversals before EMA cross.
+        # +1.0 = LONG, -1.0 = SHORT, 0.0 = NEUTRAL
+        struct_bias, struct_conf = IndicatorEngine._compute_structure_bias(
+            df['High'].values, df['Low'].values
+        )
+        df['StructureBias'] = struct_bias
+        df['StructureConf'] = struct_conf
+
+        # ── DVOL (Deribit Implied Volatility Index) ───────────────
+        # Hourly historical DVOL merged via forward-fill.
+        try:
+            import json as _json
+            _dvol_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.dirname(
+                    os.path.abspath(__file__)
+                ))),
+                'Liquidity_Raid', 'Research', 'btc_dvol_hourly.json',
+            )
+            if os.path.exists(_dvol_path):
+                with open(_dvol_path) as _f:
+                    _dvol_raw = _json.load(_f)
+                _dvol_df = pd.DataFrame(_dvol_raw)
+                _dvol_df['timestamp'] = pd.to_datetime(
+                    _dvol_df['timestamp'], unit='ms', utc=True,
+                ).dt.tz_localize(None)
+                _dvol_df = _dvol_df.set_index('timestamp').sort_index()
+                df['DVOL'] = _dvol_df['dvol'].reindex(df.index, method='ffill')
+            else:
+                df['DVOL'] = np.nan
+        except Exception:
+            df['DVOL'] = np.nan
+
+        return df
+
+    @staticmethod
+    def _compute_structure_bias(
+        highs: np.ndarray, lows: np.ndarray,
+    ) -> tuple:
+        """Vectorized price structure bias from swing HH/HL/LH/LL.
+
+        Detects swing points (3-bar lookback = 7-bar centered window),
+        then for each bar computes the bullish/bearish structure score
+        from the 3 most recent swing highs and lows.
+
+        Returns (structure_bias, structure_conf) arrays of length n.
+        """
+        n = len(highs)
+
+        # Swing detection: local max/min in 7-bar centered window
+        h_series = pd.Series(highs)
+        l_series = pd.Series(lows)
+        rolling_max_h = h_series.rolling(window=7, center=True).max().values
+        rolling_min_l = l_series.rolling(window=7, center=True).min().values
+
+        sh_mask = (highs == rolling_max_h) & ~np.isnan(rolling_max_h)
+        sl_mask = (lows == rolling_min_l) & ~np.isnan(rolling_min_l)
+
+        sh_idx = np.where(sh_mask)[0]
+        sh_val = highs[sh_idx]
+        sl_idx = np.where(sl_mask)[0]
+        sl_val = lows[sl_idx]
+
+        if len(sh_idx) < 3 or len(sl_idx) < 3:
+            return np.zeros(n, dtype=np.float32), np.zeros(n, dtype=np.float32)
+
+        # Build per-bar arrays of last 3 swing high/low values via ffill.
+        # At each swing point, record its value; then forward-fill.
+        def _last_k_ffill(indices, values, n_bars, k=3):
+            """For each bar, produce the last k values via forward-fill."""
+            arrays = [np.full(n_bars, np.nan) for _ in range(k)]
+            for j in range(k, len(indices)):
+                idx = indices[j]
+                for offset in range(k):
+                    arrays[offset][idx] = values[j - (k - 1 - offset)]
+            # Forward-fill each array
+            return [pd.Series(a).ffill().values for a in arrays]
+
+        sh_2, sh_1, sh_0 = _last_k_ffill(sh_idx, sh_val, n, 3)
+        sl_2, sl_1, sl_0 = _last_k_ffill(sl_idx, sl_val, n, 3)
+
+        # Vectorized HH/HL/LH/LL counts
+        valid = ~np.isnan(sh_0) & ~np.isnan(sh_2) & ~np.isnan(sl_0) & ~np.isnan(sl_2)
+        hh = ((sh_0 > sh_1).astype(np.int8) + (sh_1 > sh_2).astype(np.int8))
+        hl = ((sl_0 > sl_1).astype(np.int8) + (sl_1 > sl_2).astype(np.int8))
+        lh = ((sh_0 < sh_1).astype(np.int8) + (sh_1 < sh_2).astype(np.int8))
+        ll_c = ((sl_0 < sl_1).astype(np.int8) + (sl_1 < sl_2).astype(np.int8))
+
+        bull = hh + hl  # max 4
+        bear = lh + ll_c
+
+        # Classify: matching live bot logic exactly
+        bias = np.where(
+            ~valid, 0.0,
+            np.where((bull >= 3) & (bear <= 1), 1.0,
+            np.where((bear >= 3) & (bull <= 1), -1.0,
+            np.where(bull > bear, 1.0,
+            np.where(bear > bull, -1.0, 0.0))))
+        ).astype(np.float32)
+
+        conf = np.where(
+            ~valid, 0.0,
+            np.where((bull >= 3) & (bear <= 1), bull / 4.0,
+            np.where((bear >= 3) & (bull <= 1), bear / 4.0,
+            np.abs(bull - bear) / 4.0))
+        ).astype(np.float32)
+
+        return bias, conf
+
+    @staticmethod
+    def _calculate_adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
+        """Compute ADX using Wilder's EMA (alpha=1/period) for institutional accuracy."""
+        high, low, close = df['High'], df['Low'], df['Close']
+        plus_dm = high.diff()
+        minus_dm = -low.diff()
+        plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+        minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+
+        tr = pd.concat([
+            high - low,
+            np.abs(high - close.shift()),
+            np.abs(low - close.shift())
+        ], axis=1).max(axis=1)
+
+        alpha = 1.0 / period
+        atr = tr.ewm(alpha=alpha, adjust=False).mean()
+        plus_di = 100 * (plus_dm.ewm(alpha=alpha, adjust=False).mean() / (atr + 1e-10))
+        minus_di = 100 * (minus_dm.ewm(alpha=alpha, adjust=False).mean() / (atr + 1e-10))
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+        return dx.ewm(alpha=alpha, adjust=False).mean()
+
+
+# ================================================================
+#  REGIME DETECTOR
+# ================================================================
+
+class RegimeDetector:
+    """Classify market regime (trending_up/down, ranging, volatile) from indicator state."""
+
+    @staticmethod
+    def classify(df: pd.DataFrame, idx: int) -> str:
+        """Return the regime string for bar at idx using ADX, ATR, and EMA lookback."""
+        if idx < 50:
+            return 'unknown'
+        window = df.iloc[max(0, idx - 50):idx + 1]
+        adx = window['ADX'].iloc[-1] if 'ADX' in window.columns else 20
+        atr = window['ATR'].iloc[-1] if 'ATR' in window.columns else 0
+        price = window['Close'].iloc[-1]
+
+        atr_pct = atr / price if price > 0 else 0
+        avg_atr_pct = (window['ATR'] / window['Close']).mean() if 'ATR' in window.columns else atr_pct
+
+        if atr_pct > avg_atr_pct * 1.8:
+            return 'volatile'
+        elif adx > 30:
+            if 'EMA50' in window.columns and window['Close'].iloc[-1] > window['EMA50'].iloc[-1]:
+                return 'trending_up'
+            else:
+                return 'trending_down'
+        else:
+            return 'ranging'
+
+
+# ================================================================
+#  TRADE SIMULATOR
+# ================================================================
+
+class TradeSimulator:
+    """Simulate trade execution with spread, commission, slippage, and TP/SL logic."""
+
+    @staticmethod
+    def simulate(
+        signal: Dict, df: pd.DataFrame, costs: TransactionCosts,
+        max_bars: int = 168, window_id: int = 0,
+        is_oos: bool = True, regime: str = 'unknown',
+        _highs: np.ndarray = None, _lows: np.ndarray = None,
+        _closes: np.ndarray = None,
+    ) -> Optional[TradeResult]:
+        """Walk forward bar-by-bar from signal entry, applying SL/TP1/TP2 and costs.
+
+        Returns a TradeResult or None if the signal is invalid (zero risk or no bars).
+        Pre-extracted _highs/_lows/_closes arrays can be passed to avoid repeated .values calls.
+        """
+        idx = signal['idx']
+        direction = signal['direction']
+        entry_price = signal['entry_price']
+        stop_loss = signal['stop_loss']
+        tp1 = signal['take_profit_1']
+        tp2 = signal.get('take_profit_2') or tp1
+        risk = signal['risk']
+
+        n = len(df)
+        if risk <= 0 or idx + 1 >= n:
+            return None
+
+        # Use pre-extracted arrays if provided, else extract
+        highs = _highs if _highs is not None else df['High'].values
+        lows = _lows if _lows is not None else df['Low'].values
+        closes = _closes if _closes is not None else df['Close'].values
+
+        entry_cost = entry_price * (costs.spread_pct + costs.slippage_pct)
+        effective_entry = entry_price + entry_cost if direction == 'LONG' else entry_price - entry_cost
+
+        outcome = 'timeout'
+        exit_price = None
+        bars_held = 0
+        mfe = 0.0
+        mae = 0.0
+        tp1_hit = False
+        is_long = direction == 'LONG'
+
+        end_bar = min(idx + max_bars, n)
+        for i in range(idx + 1, end_bar):
+            h = highs[i]
+            lo = lows[i]
+            bars_held += 1
+
+            if is_long:
+                favorable = (h - effective_entry) / risk
+                adverse = (effective_entry - lo) / risk
+                if favorable > mfe:
+                    mfe = favorable
+                if adverse > mae:
+                    mae = adverse
+
+                if not tp1_hit and h >= tp1:
+                    tp1_hit = True
+                    stop_loss = effective_entry  # Trail to breakeven
+                if lo <= stop_loss:
+                    outcome = 'breakeven' if tp1_hit else 'loss'
+                    exit_price = stop_loss
+                    break
+                if h >= tp2:
+                    outcome = 'win_tp2'
+                    exit_price = tp2
+                    break
+            else:
+                favorable = (effective_entry - lo) / risk
+                adverse = (h - effective_entry) / risk
+                if favorable > mfe:
+                    mfe = favorable
+                if adverse > mae:
+                    mae = adverse
+
+                if not tp1_hit and lo <= tp1:
+                    tp1_hit = True
+                    stop_loss = effective_entry  # Trail to breakeven
+                if h >= stop_loss:
+                    outcome = 'breakeven' if tp1_hit else 'loss'
+                    exit_price = stop_loss
+                    break
+                if lo <= tp2:
+                    outcome = 'win_tp2'
+                    exit_price = tp2
+                    break
+
+        if outcome == 'timeout':
+            if tp1_hit:
+                outcome = 'win_tp1'
+                exit_price = tp1
+            else:
+                last_idx = min(idx + max_bars - 1, n - 1)
+                exit_price = closes[last_idx]
+
+        if exit_price is None:
+            return None
+
+        if is_long:
+            raw_r = (exit_price - effective_entry) / risk
+        else:
+            raw_r = (effective_entry - exit_price) / risk
+
+        # Entry spread+slippage already in effective_entry (line 456-457),
+        # so only charge commission for entry to avoid double-counting.
+        entry_comm = entry_price * costs.commission_pct
+        exit_cost = exit_price * (costs.spread_pct + costs.commission_pct + costs.slippage_pct)
+        total_cost = (entry_comm + exit_cost) / risk if risk > 0 else 0
+
+        return TradeResult(
+            entry_time=signal['time'],
+            exit_time=df.index[min(idx + bars_held, n - 1)],
+            direction=direction,
+            entry_price=entry_price,
+            exit_price=exit_price,
+            stop_loss=stop_loss,
+            take_profit_1=tp1,
+            take_profit_2=tp2,
+            outcome=outcome,
+            r_multiple=raw_r,
+            r_multiple_after_costs=raw_r - total_cost,
+            bars_held=bars_held,
+            confidence=signal.get('confidence', 0.5),
+            bias=signal.get('bias', 'COUNTER'),
+            mfe=mfe,
+            mae=mae,
+            window_id=window_id,
+            is_oos=is_oos,
+            regime=regime,
+            cost_deducted=total_cost,
+        )
+
+
+# ================================================================
+#  STATISTICAL TESTS
+# ================================================================
+
+class StatisticalTests:
+    """Run significance tests (binomial, t-test, serial correlation) on trade results."""
+
+    @staticmethod
+    def run_all(trades: List[TradeResult]) -> Dict:
+        """Compute full statistical summary: win rate CI, t-test, profit factor, expectancy, etc.
+
+        Returns a dict with 'valid' key; False if fewer than 5 trades.
+        """
+        from scipy import stats as scipy_stats
+        if len(trades) < 5:
+            return {'valid': False, 'reason': f'Insufficient trades: {len(trades)}', 'n_trades': len(trades)}
+
+        r_values = [t.r_multiple_after_costs for t in trades]
+        wins = [t for t in trades if 'win' in t.outcome]
+        n = len(trades)
+        n_wins = len(wins)
+
+        results = {'valid': True, 'n_trades': n, 'n_wins': n_wins, 'n_losses': n - n_wins}
+
+        win_rate = n_wins / n
+        results['win_rate'] = win_rate
+        results['win_rate_ci_95'] = StatisticalTests._wilson_ci(n_wins, n, 0.95)
+
+        try:
+            binom_p = scipy_stats.binomtest(n_wins, n, 0.5, alternative='greater').pvalue
+        except AttributeError:
+            binom_p = 1.0
+        results['binomial_p_value'] = binom_p
+        results['win_rate_significant'] = binom_p < 0.05
+
+        mean_r = float(np.mean(r_values))
+        std_r = float(np.std(r_values, ddof=1))
+        se_r = std_r / np.sqrt(n)
+        ci_r = scipy_stats.t.interval(0.95, n - 1, loc=mean_r, scale=se_r) if se_r > 0 else (mean_r, mean_r)
+        results['mean_r'] = mean_r
+        results['std_r'] = std_r
+        results['mean_r_ci_95'] = (float(ci_r[0]), float(ci_r[1]))
+
+        t_stat, t_p = scipy_stats.ttest_1samp(r_values, 0)
+        results['t_statistic'] = float(t_stat)
+        results['t_p_value'] = float(t_p / 2)
+        results['mean_r_significant'] = (t_p / 2) < 0.05 and mean_r > 0
+
+        results['sharpe_per_trade'] = mean_r / std_r if std_r > 0 else 0
+
+        gross_profit = sum(r for r in r_values if r > 0)
+        gross_loss = abs(sum(r for r in r_values if r < 0))
+        results['profit_factor'] = gross_profit / gross_loss if gross_loss > 0 else float('inf')
+
+        cumulative_r = np.cumsum(r_values)
+        running_max = np.maximum.accumulate(cumulative_r)
+        drawdowns = running_max - cumulative_r
+        results['max_drawdown_r'] = float(np.max(drawdowns)) if len(drawdowns) > 0 else 0
+
+        avg_win = float(np.mean([r for r in r_values if r > 0])) if any(r > 0 for r in r_values) else 0
+        avg_loss = float(np.mean([r for r in r_values if r <= 0])) if any(r <= 0 for r in r_values) else 0
+        results['avg_win_r'] = avg_win
+        results['avg_loss_r'] = avg_loss
+        results['expectancy'] = win_rate * avg_win + (1 - win_rate) * avg_loss
+
+        if std_r > 0 and mean_r != 0:
+            effect_size = abs(mean_r) / std_r
+            results['min_n_for_significance'] = int(np.ceil((2.8 / effect_size) ** 2))
+        else:
+            results['min_n_for_significance'] = 999
+
+        if n > 10:
+            binary = [1 if r > 0 else 0 for r in r_values]
+            autocorr = float(np.corrcoef(binary[:-1], binary[1:])[0, 1])
+            results['serial_correlation'] = autocorr
+            results['trades_independent'] = abs(autocorr) < 0.2
+        else:
+            results['serial_correlation'] = None
+            results['trades_independent'] = None
+
+        return results
+
+    @staticmethod
+    def _wilson_ci(wins: int, n: int, confidence: float) -> Tuple[float, float]:
+        """Compute Wilson score confidence interval for a binomial proportion."""
+        from scipy import stats as scipy_stats
+        if n == 0:
+            return (0.0, 1.0)
+        z = scipy_stats.norm.ppf(1 - (1 - confidence) / 2)
+        p_hat = wins / n
+        denom = 1 + z ** 2 / n
+        center = (p_hat + z ** 2 / (2 * n)) / denom
+        margin = z * np.sqrt((p_hat * (1 - p_hat) + z ** 2 / (4 * n)) / n) / denom
+        return (max(0, center - margin), min(1, center + margin))
+
+
+# ================================================================
+#  MONTE CARLO ANALYSIS
+# ================================================================
+
+class MonteCarloAnalysis:
+    """Bootstrap-based confidence intervals and equity path simulation."""
+
+    @staticmethod
+    def bootstrap_ci(
+        trades: List[TradeResult],
+        n_resamples: int = 10000,
+        block_size: int = 1,
+        confidence: float = 0.95,
+    ) -> Dict:
+        """
+        Compute bootstrap CIs on key metrics by resampling trades.
+
+        Returns dict with percentile-based CIs for mean_r, win_rate,
+        expectancy, profit_factor, sharpe, max_drawdown, plus p_profitable.
+        """
+        r_values = np.array([t.r_multiple_after_costs for t in trades])
+        n = len(r_values)
+        if n < 5:
+            return {'valid': False, 'reason': f'Insufficient trades: {n}'}
+
+        alpha = 1 - confidence
+        lo_pct = 100 * alpha / 2
+        hi_pct = 100 * (1 - alpha / 2)
+
+        # Pre-allocate metric arrays
+        mean_rs = np.empty(n_resamples)
+        win_rates = np.empty(n_resamples)
+        expectancies = np.empty(n_resamples)
+        profit_factors = np.empty(n_resamples)
+        sharpes = np.empty(n_resamples)
+        max_dds = np.empty(n_resamples)
+
+        max_block_start = max(1, n - block_size + 1)
+
+        for i in range(n_resamples):
+            # Resample
+            if block_size <= 1:
+                sample = r_values[np.random.randint(0, n, size=n)]
+            else:
+                n_blocks = int(np.ceil(n / block_size))
+                blocks = []
+                for _ in range(n_blocks):
+                    start = np.random.randint(0, max_block_start)
+                    blocks.extend(r_values[start:start + block_size].tolist())
+                sample = np.array(blocks[:n])
+
+            # Compute metrics on this resample
+            mean_rs[i] = np.mean(sample)
+            wins = sample > 0
+            wr = np.sum(wins) / n
+            win_rates[i] = wr
+
+            win_vals = sample[wins]
+            loss_vals = sample[~wins]
+            avg_w = np.mean(win_vals) if len(win_vals) > 0 else 0.0
+            avg_l = np.mean(loss_vals) if len(loss_vals) > 0 else 0.0
+            expectancies[i] = wr * avg_w + (1 - wr) * avg_l
+
+            gp = np.sum(sample[sample > 0])
+            gl = abs(np.sum(sample[sample < 0]))
+            profit_factors[i] = gp / gl if gl > 0 else 0.0
+
+            std = np.std(sample, ddof=1)
+            sharpes[i] = mean_rs[i] / std if std > 0 else 0.0
+
+            cum = np.cumsum(sample)
+            running_max = np.maximum.accumulate(cum)
+            dd = running_max - cum
+            max_dds[i] = np.max(dd) if len(dd) > 0 else 0.0
+
+        p_profitable = float(np.mean(mean_rs > 0))
+
+        return {
+            'valid': True,
+            'n_resamples': n_resamples,
+            'confidence': confidence,
+            'p_profitable': p_profitable,
+            'mean_r_ci': (float(np.percentile(mean_rs, lo_pct)), float(np.percentile(mean_rs, hi_pct))),
+            'win_rate_ci': (float(np.percentile(win_rates, lo_pct)), float(np.percentile(win_rates, hi_pct))),
+            'expectancy_ci': (float(np.percentile(expectancies, lo_pct)), float(np.percentile(expectancies, hi_pct))),
+            'profit_factor_ci': (float(np.percentile(profit_factors, lo_pct)), float(np.percentile(profit_factors, hi_pct))),
+            'sharpe_ci': (float(np.percentile(sharpes, lo_pct)), float(np.percentile(sharpes, hi_pct))),
+            'max_drawdown_ci': (float(np.percentile(max_dds, lo_pct)), float(np.percentile(max_dds, hi_pct))),
+        }
+
+    @staticmethod
+    def equity_fan(
+        trades: List[TradeResult],
+        n_paths: int = 1000,
+        block_size: int = 1,
+    ) -> Dict:
+        """
+        Generate resampled equity paths for fan chart visualization.
+
+        Returns percentile bands at each trade index, plus summary stats.
+        """
+        r_values = np.array([t.r_multiple_after_costs for t in trades])
+        n = len(r_values)
+        if n < 5:
+            return {'valid': False}
+
+        max_block_start = max(1, n - block_size + 1)
+
+        # Generate paths
+        all_paths = np.empty((n_paths, n))
+        for i in range(n_paths):
+            if block_size <= 1:
+                sample = r_values[np.random.randint(0, n, size=n)]
+            else:
+                n_blocks = int(np.ceil(n / block_size))
+                blocks = []
+                for _ in range(n_blocks):
+                    start = np.random.randint(0, max_block_start)
+                    blocks.extend(r_values[start:start + block_size].tolist())
+                sample = np.array(blocks[:n])
+            all_paths[i] = np.cumsum(sample)
+
+        # Compute percentile bands at each trade index
+        pct_5 = np.percentile(all_paths, 5, axis=0).tolist()
+        pct_25 = np.percentile(all_paths, 25, axis=0).tolist()
+        pct_50 = np.percentile(all_paths, 50, axis=0).tolist()
+        pct_75 = np.percentile(all_paths, 75, axis=0).tolist()
+        pct_95 = np.percentile(all_paths, 95, axis=0).tolist()
+
+        # Final R values across all paths
+        final_rs = all_paths[:, -1]
+
+        # Max drawdowns across all paths
+        max_dds = []
+        for path in all_paths:
+            running_max = np.maximum.accumulate(path)
+            dd = running_max - path
+            max_dds.append(float(np.max(dd)))
+
+        # Actual OOS equity for overlay
+        actual_equity = np.cumsum(r_values).tolist()
+
+        # Store up to 200 raw paths for spaghetti overlay
+        raw_paths = all_paths[:min(200, n_paths)].tolist()
+
+        return {
+            'valid': True,
+            'n_trades': n,
+            'n_paths': n_paths,
+            'percentiles': {
+                '5': pct_5, '25': pct_25, '50': pct_50,
+                '75': pct_75, '95': pct_95,
+            },
+            'actual_equity': actual_equity,
+            'pct_5_final_r': float(np.percentile(final_rs, 5)),
+            'median_final_r': float(np.median(final_rs)),
+            'pct_95_final_r': float(np.percentile(final_rs, 95)),
+            'pct_95_max_dd': float(np.percentile(max_dds, 95)),
+            'median_max_dd': float(np.median(max_dds)),
+            'paths': raw_paths,
+        }
+
+
+# ================================================================
+#  DATA FETCHER (DuckDB only)
+# ================================================================
+
+class DataFetcher:
+    """Fetch OHLCV data from the local DuckDB database."""
+
+    @staticmethod
+    def fetch(symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
+        """Query DuckDB for OHLCV data and return a timestamp-indexed DataFrame, or None on failure."""
+        try:
+            import duckdb
+        except ImportError:
+            logger.error("duckdb not installed")
+            return None
+
+        if not os.path.exists(DUCKDB_PATH):
+            logger.error(f"DuckDB not found at {DUCKDB_PATH}")
+            return None
+
+        db_symbol = symbol.replace('-USD', '').replace('-', '')
+
+        try:
+            conn = duckdb.connect(DUCKDB_PATH, read_only=True)
+            df = conn.execute(
+                "SELECT timestamp, open as Open, high as High, "
+                "low as Low, close as Close, volume as Volume "
+                "FROM ohlcv_data WHERE symbol = ? AND timeframe = ? "
+                "ORDER BY timestamp",
+                [db_symbol, timeframe]
+            ).fetchdf()
+            conn.close()
+
+            if df.empty:
+                return None
+
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            df.set_index('timestamp', inplace=True)
+            for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                df[col] = df[col].astype(float)
+
+            return df
+        except Exception as e:
+            logger.error(f"DuckDB fetch error: {e}")
+            return None
 
 
 # ================================================================
@@ -219,6 +926,18 @@ class WFOEngine:
         raw_df = DataFetcher.fetch(symbol, timeframe)
         if raw_df is None or len(raw_df) < cfg.min_train_bars + cfg.test_window_bars:
             return self._empty_result(symbol, timeframe, 'insufficient_data')
+
+        # 1b. Validate OHLCV data quality
+        try:
+            from ..data.validation import validate_ohlcv
+            validation = validate_ohlcv(raw_df)
+            if not validation['valid']:
+                logger.warning(f"OHLCV validation issues: {validation.get('errors', [])}")
+            if validation.get('warnings'):
+                for w in validation['warnings']:
+                    logger.info(f"OHLCV: {w}")
+        except ImportError:
+            pass  # validation module not available — proceed without
 
         # 2. Calculate indicators
         if progress_callback:
@@ -486,7 +1205,8 @@ class WFOEngine:
         """Compile all OOS results into the final output dict.
 
         Includes statistical tests, regime/direction breakdowns, equity curve,
-        Monte Carlo analysis, drawdown analysis, and timing analysis.
+        Monte Carlo analysis, drawdown analysis, timing analysis, and
+        Deflated Sharpe Ratio.
         """
         # Deduplicate overlapping OOS trades.  When step_bars < test_window_bars
         # adjacent OOS windows overlap and the same trade can appear in multiple
@@ -498,6 +1218,9 @@ class WFOEngine:
             if entry_key not in seen_entries:
                 seen_entries.add(entry_key)
                 unique_oos_trades.append(trade)
+        dedup_removed = len(self.all_oos_trades) - len(unique_oos_trades)
+        if dedup_removed > 0:
+            logger.info(f"OOS dedup: removed {dedup_removed} duplicate trades")
         self.all_oos_trades = unique_oos_trades
 
         oos = self.all_oos_trades
@@ -512,6 +1235,26 @@ class WFOEngine:
             oos_mean = oos_stats.get('mean_r', 0)
             if is_mean != 0:
                 overfit_ratio = oos_mean / is_mean
+
+        # Deflated Sharpe Ratio — adjusts for multiple testing (param combos tried)
+        deflated_sharpe = None
+        if oos_stats.get('valid') and len(oos) >= 10:
+            try:
+                from .cpcv import deflated_sharpe_ratio
+                n_combos = self.config.max_param_combos
+                if self.config.grid_mode == 'random':
+                    n_combos = self.config.random_samples
+                r_vals = [t.r_multiple_after_costs for t in oos]
+                dsr = deflated_sharpe_ratio(
+                    observed_sharpe=oos_stats.get('sharpe_per_trade', 0),
+                    n_trades=len(oos),
+                    n_trials=n_combos * max(len(self.window_results), 1),
+                    returns=r_vals,
+                )
+                deflated_sharpe = dsr
+                logger.info(f"Deflated Sharpe Ratio: {dsr:.4f}")
+            except Exception as e:
+                logger.warning(f"Deflated Sharpe calculation failed: {e}")
 
         # Regime breakdown
         regime_analysis = {}
@@ -602,6 +1345,7 @@ class WFOEngine:
             'oos_stats': oos_stats,
             'is_stats': is_stats,
             'overfit_ratio': overfit_ratio,
+            'deflated_sharpe': deflated_sharpe,
             'regime_analysis': regime_summary,
             'direction_analysis': direction_analysis,
             'windows': self.window_results,
