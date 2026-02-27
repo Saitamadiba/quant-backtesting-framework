@@ -4,13 +4,10 @@ Provides common functionality for all trading strategies.
 """
 
 import backtrader as bt
+import logging
 from datetime import datetime
 import pytz
 from typing import Optional, Dict, Any, List
-
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from backtrader_framework.config.settings import (
     ATR_PERIOD, SESSIONS, KILL_ZONES, COOLDOWN_BARS
@@ -40,10 +37,16 @@ class BaseStrategy(bt.Strategy):
         ('cooldown_bars', COOLDOWN_BARS),
         ('max_hold_bars', 100),
         ('risk_per_trade', 0.01),  # 1% risk
+        ('max_position_pct', 0.25),  # Max 25% of NAV per position
+        ('max_drawdown_pct', 0.20),  # 20% drawdown circuit breaker
+        ('max_daily_loss_pct', 0.05),  # 5% daily loss limit
     )
 
     def __init__(self):
         """Initialize base strategy components."""
+        # Logger setup
+        self.logger = logging.getLogger(self.__class__.__name__)
+
         # ATR indicator (used by all strategies)
         self.atr = bt.indicators.ATR(self.data, period=self.p.atr_period)
 
@@ -64,6 +67,14 @@ class BaseStrategy(bt.Strategy):
         self.pending_order = None
         self.stop_order = None
         self.profit_order = None
+
+        # Drawdown circuit breaker
+        self.peak_value = self.broker.getvalue()
+        self.trading_halted = False
+
+        # Daily loss limit tracking
+        self.daily_start_value = self.broker.getvalue()
+        self.last_trading_date = None
 
     # ==========================================================================
     # Timezone and Session Methods
@@ -242,6 +253,12 @@ class BaseStrategy(bt.Strategy):
 
         self.trades_history.append(trade)
 
+        # Clean up MFE/MAE trackers to prevent memory leak
+        if trade_id in self.mfe_tracker:
+            del self.mfe_tracker[trade_id]
+        if trade_id in self.mae_tracker:
+            del self.mae_tracker[trade_id]
+
         self.log(f"EXIT {trade['direction']}: {exit_price:.2f}, P&L: {trade['pnl_percent']:.2f}%, R: {trade['r_multiple']:.2f}")
 
         self.active_trade = None
@@ -260,23 +277,58 @@ class BaseStrategy(bt.Strategy):
             self.profit_order = None
 
     def notify_order(self, order):
-        """Handle order notifications."""
+        """Handle order notifications with proper order reference tracking."""
         if order.status in [order.Submitted, order.Accepted]:
             return
 
         if order.status == order.Completed:
             if order.isbuy():
-                self.log(f"BUY EXECUTED: {order.executed.price:.2f}")
+                self.log(f"BUY EXECUTED: {order.executed.price:.2f}, Size: {order.executed.size:.4f}")
             else:
-                self.log(f"SELL EXECUTED: {order.executed.price:.2f}")
+                self.log(f"SELL EXECUTED: {order.executed.price:.2f}, Size: {order.executed.size:.4f}")
+
+            # Track which order completed and clear its reference
+            if order == self.pending_order:
+                self.pending_order = None
+            elif order == self.stop_order:
+                self.stop_order = None
+                # Stop was hit — cancel the take profit order
+                if self.profit_order:
+                    self.cancel(self.profit_order)
+                    self.profit_order = None
+            elif order == self.profit_order:
+                self.profit_order = None
+                # TP was hit — cancel the stop loss order
+                if self.stop_order:
+                    self.cancel(self.stop_order)
+                    self.stop_order = None
 
         elif order.status in [order.Canceled, order.Margin, order.Rejected]:
             self.log(f"Order Canceled/Margin/Rejected: {order.status}")
+            # Clear reference for the failed order
+            if order == self.pending_order:
+                self.pending_order = None
+            elif order == self.stop_order:
+                self.stop_order = None
+            elif order == self.profit_order:
+                self.profit_order = None
 
     def notify_trade(self, trade):
-        """Handle trade notifications."""
+        """Handle trade notifications and capture actual close price."""
         if trade.isclosed:
-            self.log(f"Trade P&L: Gross={trade.pnl:.2f}, Net={trade.pnlcomm:.2f}")
+            actual_close_price = trade.price
+            self.log(f"Trade P&L: Gross={trade.pnl:.2f}, Net={trade.pnlcomm:.2f}, ClosePrice={actual_close_price:.2f}")
+
+            # Determine exit reason from which order triggered the close
+            if self.active_trade:
+                # Infer exit reason based on trade outcome
+                if self.stop_order is None and self.profit_order is not None:
+                    exit_reason = 'STOP_LOSS'
+                elif self.profit_order is None and self.stop_order is not None:
+                    exit_reason = 'TAKE_PROFIT'
+                else:
+                    exit_reason = 'CLOSE'
+                self.log_trade_exit(actual_close_price, exit_reason)
 
     # ==========================================================================
     # Utility Methods
@@ -285,11 +337,11 @@ class BaseStrategy(bt.Strategy):
     def log(self, txt: str):
         """Log message with timestamp."""
         dt = self.data.datetime.datetime(0)
-        print(f"{dt.isoformat()} - {txt}")
+        self.logger.info(f"{dt.isoformat()} - {txt}")
 
     def get_position_size(self, entry_price: float, stop_loss: float) -> float:
         """
-        Calculate position size based on risk.
+        Calculate position size based on risk using portfolio NAV.
 
         Args:
             entry_price: Intended entry price
@@ -298,13 +350,19 @@ class BaseStrategy(bt.Strategy):
         Returns:
             Position size in units
         """
-        risk_amount = self.broker.get_cash() * self.p.risk_per_trade
+        nav = self.broker.getvalue()
+        risk_amount = nav * self.p.risk_per_trade
         risk_per_unit = abs(entry_price - stop_loss)
 
         if risk_per_unit <= 0:
             return 0
 
         size = risk_amount / risk_per_unit
+
+        # Cap position size to max_position_pct of NAV
+        max_size = nav * self.p.max_position_pct / entry_price
+        size = min(size, max_size)
+
         return size
 
     # ==========================================================================
@@ -316,23 +374,47 @@ class BaseStrategy(bt.Strategy):
         Main strategy loop - called for each bar.
         Override in subclass to implement strategy logic.
         """
+        # --- Drawdown circuit breaker (FIX 4) ---
+        current_value = self.broker.getvalue()
+        self.peak_value = max(self.peak_value, current_value)
+        drawdown = (self.peak_value - current_value) / self.peak_value
+        if drawdown >= self.p.max_drawdown_pct:
+            if not self.trading_halted:
+                self.log(f"CIRCUIT BREAKER: {drawdown:.1%} drawdown exceeds {self.p.max_drawdown_pct:.1%} limit")
+                self.trading_halted = True
+            if self.position:
+                self.close()
+            return
+
+        # --- Daily loss limit (FIX 5) ---
+        current_date = self.data.datetime.date(0)
+        if self.last_trading_date is None or current_date != self.last_trading_date:
+            # New trading day — reset daily tracking
+            self.daily_start_value = current_value
+            self.last_trading_date = current_date
+
+        daily_loss = (self.daily_start_value - current_value) / self.daily_start_value
+        if daily_loss >= self.p.max_daily_loss_pct:
+            if self.position:
+                self.close()
+            return
+
         # Update MFE/MAE for active trades
         if self.position:
             self.update_mfe_mae()
 
-            # Check for time-based exit
+            # Check for time-based exit (exit logged in notify_trade)
             if self.active_trade:
                 bars_held = len(self) - self.active_trade['entry_bar']
                 if bars_held >= self.p.max_hold_bars:
                     self.close()
-                    self.log_trade_exit(self.data.close[0], 'TIME_EXIT')
 
     def stop(self):
         """Called when backtest ends."""
-        # Print summary
+        # Log summary
         total_trades = len(self.trades_history)
         if total_trades == 0:
-            print(f"\n{self.__class__.__name__}: No trades executed")
+            self.logger.info(f"{self.__class__.__name__}: No trades executed")
             return
 
         wins = sum(1 for t in self.trades_history if t['r_multiple'] > 0)
@@ -340,12 +422,12 @@ class BaseStrategy(bt.Strategy):
         total_r = sum(t['r_multiple'] for t in self.trades_history)
         win_rate = (wins / total_trades) * 100
 
-        print(f"\n{'=' * 50}")
-        print(f"{self.__class__.__name__} Summary:")
-        print(f"{'=' * 50}")
-        print(f"Total Trades: {total_trades}")
-        print(f"Wins: {wins}, Losses: {losses}")
-        print(f"Win Rate: {win_rate:.1f}%")
-        print(f"Total R: {total_r:.2f}")
-        print(f"Average R: {total_r / total_trades:.3f}")
-        print(f"{'=' * 50}")
+        self.logger.info(f"{'=' * 50}")
+        self.logger.info(f"{self.__class__.__name__} Summary:")
+        self.logger.info(f"{'=' * 50}")
+        self.logger.info(f"Total Trades: {total_trades}")
+        self.logger.info(f"Wins: {wins}, Losses: {losses}")
+        self.logger.info(f"Win Rate: {win_rate:.1f}%")
+        self.logger.info(f"Total R: {total_r:.2f}")
+        self.logger.info(f"Average R: {total_r / total_trades:.3f}")
+        self.logger.info(f"{'=' * 50}")

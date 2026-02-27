@@ -5,13 +5,10 @@ Provides data feeds from DuckDB and other sources.
 
 import backtrader as bt
 import pandas as pd
-from pathlib import Path
 from typing import Optional
 
-import sys
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-
 from backtrader_framework.data.duckdb_manager import DuckDBManager
+from backtrader_framework.data.validation import validate_ohlcv
 
 
 class DuckDBData(bt.feeds.PandasData):
@@ -45,20 +42,17 @@ class DuckDBData(bt.feeds.PandasData):
         todate = kwargs.get('todate')
 
         # Load data from DuckDB
-        db = DuckDBManager()
-
         start_date = fromdate.strftime('%Y-%m-%d') if fromdate else None
         end_date = todate.strftime('%Y-%m-%d') if todate else None
 
-        df = db.get_ohlcv(
-            symbol=symbol,
-            timeframe=timeframe,
-            start_date=start_date,
-            end_date=end_date,
-            include_indicators=include_indicators
-        )
-
-        db.close()
+        with DuckDBManager() as db:
+            df = db.get_ohlcv(
+                symbol=symbol,
+                timeframe=timeframe,
+                start_date=start_date,
+                end_date=end_date,
+                include_indicators=include_indicators
+            )
 
         if df.empty:
             raise ValueError(f"No data found for {symbol} {timeframe}")
@@ -66,6 +60,9 @@ class DuckDBData(bt.feeds.PandasData):
         # Prepare DataFrame for Backtrader
         df = df.set_index('timestamp')
         df.index = pd.to_datetime(df.index)
+
+        # Validate OHLCV data integrity
+        df = validate_ohlcv(df)
 
         # Store metadata
         self._symbol = symbol
@@ -94,15 +91,14 @@ def load_duckdb_data(
     Returns:
         Backtrader PandasData feed
     """
-    db = DuckDBManager()
-    df = db.get_ohlcv(
-        symbol=symbol,
-        timeframe=timeframe,
-        start_date=start_date,
-        end_date=end_date,
-        include_indicators=True
-    )
-    db.close()
+    with DuckDBManager() as db:
+        df = db.get_ohlcv(
+            symbol=symbol,
+            timeframe=timeframe,
+            start_date=start_date,
+            end_date=end_date,
+            include_indicators=True
+        )
 
     if df.empty:
         raise ValueError(f"No data found for {symbol} {timeframe}")
@@ -110,6 +106,9 @@ def load_duckdb_data(
     # Prepare DataFrame
     df = df.set_index('timestamp')
     df.index = pd.to_datetime(df.index)
+
+    # Validate OHLCV data integrity
+    df = validate_ohlcv(df)
 
     # Create data feed
     data = bt.feeds.PandasData(
@@ -137,19 +136,17 @@ def get_available_data() -> pd.DataFrame:
     Returns:
         DataFrame with symbol, timeframe, start_date, end_date, row_count
     """
-    db = DuckDBManager()
+    with DuckDBManager() as db:
+        result = db.execute("""
+            SELECT
+                symbol,
+                timeframe,
+                MIN(timestamp) as start_date,
+                MAX(timestamp) as end_date,
+                COUNT(*) as row_count
+            FROM ohlcv_data
+            GROUP BY symbol, timeframe
+            ORDER BY symbol, timeframe
+        """).fetchdf()
 
-    result = db.execute("""
-        SELECT
-            symbol,
-            timeframe,
-            MIN(timestamp) as start_date,
-            MAX(timestamp) as end_date,
-            COUNT(*) as row_count
-        FROM ohlcv_data
-        GROUP BY symbol, timeframe
-        ORDER BY symbol, timeframe
-    """).fetchdf()
-
-    db.close()
     return result

@@ -88,7 +88,10 @@ SERVICE_WORK_DIRS = {
 
 VPS_BACKUP_SCRIPT = f"{VPS_REMOTE_BASE}/backup_dbs.sh"
 
-# ── Session Time Ranges (ET / UTC-5) ─────────────────────────────────────────
+# ── Session Time Ranges (Eastern Time — America/New_York, DST-aware) ─────────
+# Hours are in ET.  Callers must convert UTC timestamps to ET via
+# zoneinfo.ZoneInfo("America/New_York") before comparing — do NOT use a
+# hardcoded UTC-5 offset (ET is UTC-4 during daylight saving time).
 SESSIONS = {
     "Asian":    {"start": 19, "end": 3},
     "London":   {"start": 3,  "end": 8},

@@ -1,8 +1,5 @@
 """Page 15: Synthetic Stress Testing."""
 
-import sys
-from pathlib import Path
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -15,11 +12,6 @@ st.caption(
     "Generate crash paths at 1x-3x magnitude and measure drawdown, "
     "consecutive losses, and recovery."
 )
-
-# Ensure imports work
-_BASE = Path(__file__).resolve().parent.parent.parent
-if str(_BASE) not in sys.path:
-    sys.path.insert(0, str(_BASE))
 
 from backtrader_framework.optimization.persistence import list_wfo_results
 from backtrader_framework.optimization.synthetic_scenarios import (

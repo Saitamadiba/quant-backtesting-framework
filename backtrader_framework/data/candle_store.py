@@ -13,7 +13,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Optional, Dict, List
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 
 # Default path for candle storage
@@ -57,7 +57,7 @@ class CandleStore:
 
         # Write buffer for batching
         self._write_buffer: List[Dict] = []
-        self._buffer_lock = threading.Lock()
+        self._buffer_lock = threading.RLock()
         self._last_flush = time.time()
         self._flush_interval = 30  # Flush every 30 seconds
         self._max_buffer_size = 100  # Or when buffer reaches 100 candles
@@ -262,7 +262,7 @@ class CandleStore:
             days: Number of days to keep (default: self._retention_days)
         """
         days = days or self._retention_days
-        cutoff = datetime.now() - timedelta(days=days)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
         try:
             result = self.conn.execute("""

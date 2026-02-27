@@ -177,10 +177,17 @@ class PortfolioOptimizer:
             return {k: v / total for k, v in inv_vols.items()}
         return self.equal_weight_allocation()
 
-    def kelly_allocation(self) -> Dict[str, float]:
+    def kelly_allocation(self, risk_per_trade: float = 0.01) -> Dict[str, float]:
         """
-        Kelly criterion: f* = mean_r / var_r per component.
-        Apply fractional Kelly for safety. Negative Kelly → 0.
+        Kelly criterion: f* = mean(capital_returns) / var(capital_returns).
+
+        Kelly requires capital-based returns, not raw R-multiples.
+        If R-multiples are available, convert via:
+            capital_return = r_multiple * risk_per_trade
+        where risk_per_trade is the fraction of capital risked per trade
+        (default 1% = 0.01).
+
+        Apply fractional Kelly for safety. Negative Kelly -> 0.
         Normalize to sum to 1.
         """
         raw_kelly = {}
@@ -189,10 +196,14 @@ class PortfolioOptimizer:
             if not r_values:
                 raw_kelly[comp.label] = 0.0
                 continue
-            mean_r = np.mean(r_values)
-            var_r = np.var(r_values, ddof=1)
-            if var_r > 0 and mean_r > 0:
-                f_star = mean_r / var_r
+
+            # Convert R-multiples to capital returns
+            capital_returns = np.array(r_values) * risk_per_trade
+
+            mean_ret = np.mean(capital_returns)
+            var_ret = np.var(capital_returns, ddof=1)
+            if var_ret > 0 and mean_ret > 0:
+                f_star = mean_ret / var_ret
                 raw_kelly[comp.label] = f_star * self.fractional_kelly
             else:
                 raw_kelly[comp.label] = 0.0
@@ -207,17 +218,27 @@ class PortfolioOptimizer:
         self, target_return: Optional[float] = None
     ) -> Dict[str, float]:
         """
-        Mean-variance optimization (Markowitz).
+        Mean-variance optimization (Markowitz) with Ledoit-Wolf shrinkage.
+
+        Uses Ledoit-Wolf shrinkage covariance estimator for better
+        conditioning of the covariance matrix, especially with limited
+        samples or many components.
 
         If target_return is None, maximize Sharpe ratio (tangent portfolio).
         Constraints: sum(w) = 1, w_i >= 0 (long-only).
         """
+        from sklearn.covariance import LedoitWolf
+
         df = self._daily_returns_df
         n = len(self.components)
         labels = [c.label for c in self.components]
 
         mu = df.mean().values
-        cov = df.cov().values
+        # Ledoit-Wolf shrinkage covariance estimator
+        lw = LedoitWolf().fit(df.dropna().values)
+        cov = pd.DataFrame(
+            lw.covariance_, index=df.columns, columns=df.columns,
+        ).values
         # Regularize for numerical stability
         cov += np.eye(n) * 1e-6
 

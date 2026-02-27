@@ -1,134 +1,15 @@
-To address the issues in the original code, we'll implement several key fixes to ensure the backtest runs correctly. The main issues were incorrect exit conditions, improper stop loss/take profit settings, and misaligned exit times. Here's the corrected code:
-
-```python
-import warnings
-from urllib3.exceptions import NotOpenSSLWarning
-warnings.filterwarnings('ignore', category=NotOpenSSLWarning)
-
-import yfinance as yf
-import pandas as pd
-import numpy as np
-import pandas_ta as ta
-import pytz
-from datetime import time as dt_time
-from fpdf import FPDF
-import matplotlib.pyplot as plt
-import vectorbt as vbt
-
-# Constants
-TICKER = "NQ=F"  # Continuous Nasdaq 100 futures ticker
-START = "2024-01-01"
-END = "2025-03-31"
-NY_TZ = pytz.timezone("America/New_York")
-
-# 1. Fetch and prepare data
-def fetch_data(ticker, start, end):
-    df = yf.download(ticker, start=start, end=end, interval="1h", progress=False)
-    # Timezone handling: localize if naive, then convert
-    if df.index.tz is None:
-        df.index = df.index.tz_localize('UTC').tz_convert(NY_TZ)
-    else:
-        df.index = df.index.tz_convert(NY_TZ)
-    return df.dropna()
-
-# 2. Compute indicators & generate signals based on Pine logic
-def generate_signals(df):
-    df = df.copy()
-    df['date'] = df.index.date
-    times = df.index.time
-    df['in_open']        = (times >= dt_time(9, 30)) & (times < dt_time(10, 30))
-    df['after1030']      = (times >= dt_time(10, 30))
-    df['session_cutoff'] = (times >= dt_time(15, 30))  # Adjusted to >= for clarity
-    df['hard_exit']      = (times >= dt_time(15, 30))  # Exit at 15:30 bar due to hourly data
-
-    # Opening-range high and low per day
-    df['oH'] = df['High'].where(df['in_open'])
-    df['oL'] = df['Low'].where(df['in_open'])
-    df['oH'] = df.groupby('date')['oH'].cummax().ffill()
-    df['oL'] = df.groupby('date')['oL'].cummin().ffill()
-    df['sz'] = df['oH'] - df['oL']
-
-    # Volume imbalance filter
-    df['av'] = df['Volume'].rolling(20).mean().fillna(0)
-    df['bd'] = (df['Close'] - df['Open']).abs() / (df['High'] - df['Low'].replace(0, 1e-5))  # Avoid division by zero
-    df['vol_imb'] = (df['bd'] > 0.6) & (df['Volume'] > df['av'] * 1.2)
-
-    # Fixed tick size for NQ=F (0.25 points * 4 = 1.0 point)
-    tick = 1.0
-
-    # Breakout signals
-    df['long_signal'] = (
-        (df['Close'] > df['oH'] + tick) &
-        (df['sz'] >= 5) &
-        df['vol_imb'] &
-        df['after1030'] &
-        (~df['session_cutoff'])
-    )
-    df['short_signal'] = (
-        (df['Close'] < df['oL'] - tick) &
-        (df['sz'] >= 5) &
-        df['vol_imb'] &
-        df['after1030'] &
-        (~df['session_cutoff'])
-    )
-
-    # First breakout per day only
-    df['long_first'] = df['long_signal'] & ~df.groupby('date')['long_signal'].cummax().shift(fill_value=False)
-    df['short_first'] = df['short_signal'] & ~df.groupby('date')['short_signal'].cummax().shift(fill_value=False)
-    df['entry'] = df['long_first'] | df['short_first']
-
-    return df
-
-# 3. Backtest via vectorbt
-def run_backtest(df):
-    price = df['Close']
-    entries = df['entry']
-    # Exit only at hard exit or via SL/TP
-    exits = df['hard_exit']
-    pf = vbt.Portfolio.from_signals(
-        price,
-        entries,
-        exits,
-        freq='1H',
-        init_cash=100000,
-        fees=0.0,
-        sl_stop=0.015,  # 1.5% SL from entry price
-        tp_stop=0.025,  # 2.5% TP from entry price
-        trust_entries=True,
-        trust_exits=True
-    )
-    return pf
-
-# 4. Generate PDF report (unchanged)
-def build_report(pf):
-    # [Same as original code]
-    # ... (rest of the report generation code)
-
-# Main
-if __name__ == '__main__':
-    df = fetch_data(TICKER, START, END)
-    df = generate_signals(df)
-    pf = run_backtest(df)
-    build_report(pf)
-```
-
-**Key Changes:**
-
-1. **Exit Conditions:**
-   - Removed exit triggers based on subsequent signals to prevent premature exits
-   - Simplified exits to only use `hard_exit` (now aligned with 15:30 bar due to hourly data limitations)
-
-2. **Stop Loss/Take Profit:**
-   - Changed to percentage-based stops relative to entry price using `sl_stop=0.015` and `tp_stop=0.025`
-
-3. **Tick Size:**
-   - Hard-coded to 1.0 point (4x NQ's minimum 0.25 tick size) for reliable breakout detection
-
-4. **Session Handling:**
-   - Adjusted `session_cutoff` and `hard_exit` to use >= comparisons
-   - Added error handling for division by zero in volume imbalance calculation
-
-5. **Data Alignment:**
-   - Acknowledged hourly data limitations for precise 15:45 exits, now exiting at 15:30 bar
-
-This revised version should produce more accurate backtest results by addressing the core issues in signal generation and trade management.
+backtrader>=1.9.78
+duckdb>=0.9.0
+pandas>=2.0.0
+numpy>=1.24.0
+pytz>=2023.3
+requests>=2.31.0
+streamlit>=1.30.0
+plotly>=5.18.0
+optuna>=3.4.0
+scikit-learn>=1.3.0
+xgboost>=1.7.0
+shap>=0.43.0
+scipy>=1.10.0
+streamlit-autorefresh>=1.0.1
+python-dotenv>=1.0.0

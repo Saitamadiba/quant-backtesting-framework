@@ -10,11 +10,9 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
 import logging
 
-import sys
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from backtrader_framework.config.settings import DUCKDB_PATH, DUCKDB_DIR
+from backtrader_framework.data.validation import validate_ohlcv
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -27,6 +25,14 @@ class DuckDBManager:
     - Bulk data insertion with pre-computed indicators
     - Analytical query helpers
     """
+
+    VALID_TABLES = {'ohlcv_data', 'backtest_trades', 'wfo_results', 'backtest_sessions'}
+
+    def _validate_table_name(self, table_name: str) -> str:
+        """Validate table name against whitelist to prevent SQL injection."""
+        if table_name not in self.VALID_TABLES:
+            raise ValueError(f"Invalid table name: {table_name}. Must be one of: {self.VALID_TABLES}")
+        return table_name
 
     def __init__(self, db_path: Optional[Path] = None):
         """
@@ -311,7 +317,16 @@ class DuckDBManager:
 
         query += " ORDER BY timestamp"
 
-        return self.conn.execute(query, params).fetchdf()
+        df = self.conn.execute(query, params).fetchdf()
+
+        # Validate OHLCV data integrity before returning
+        if not df.empty:
+            # Set timestamp as index for validation, then reset
+            df = df.set_index('timestamp')
+            df = validate_ohlcv(df)
+            df = df.reset_index()
+
+        return df
 
     def get_data_range(self, symbol: str, timeframe: str) -> Dict[str, Any]:
         """Get the date range of available data."""
@@ -350,10 +365,29 @@ class DuckDBManager:
         if not trades:
             return
 
+        # Explicit column ordering to match backtest_trades schema
+        trade_columns = [
+            'trade_id', 'strategy_name', 'symbol', 'timeframe', 'direction',
+            'entry_time', 'entry_price', 'entry_reason', 'exit_time', 'exit_price',
+            'exit_reason', 'stop_loss', 'take_profit_1', 'take_profit_2',
+            'pnl_percent', 'r_multiple', 'mfe_price', 'mfe_percent', 'mfe_r',
+            'mae_price', 'mae_percent', 'mae_r', 'session', 'bars_held',
+            'atr_at_entry', 'strategy_params', 'created_at',
+        ]
+
         df = pd.DataFrame(trades)
-        self.conn.execute("""
-            INSERT OR REPLACE INTO backtest_trades
-            SELECT * FROM df
+
+        # Add missing columns as None
+        for col in trade_columns:
+            if col not in df.columns:
+                df[col] = None
+
+        df = df[trade_columns]
+
+        col_list = ', '.join(trade_columns)
+        self.conn.execute(f"""
+            INSERT OR REPLACE INTO backtest_trades ({col_list})
+            SELECT {col_list} FROM df
         """)
         logger.info(f"Inserted {len(trades)} trades")
 
@@ -430,11 +464,13 @@ class DuckDBManager:
 
     def get_table_count(self, table_name: str) -> int:
         """Get row count for a table."""
+        table_name = self._validate_table_name(table_name)
         result = self.conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()
         return result[0]
 
     def clear_table(self, table_name: str):
         """Clear all data from a table."""
+        table_name = self._validate_table_name(table_name)
         self.conn.execute(f"DELETE FROM {table_name}")
         logger.info(f"Cleared table: {table_name}")
 
@@ -443,7 +479,7 @@ def initialize_database():
     """Initialize the DuckDB database with schema."""
     with DuckDBManager() as db:
         db.initialize_schema()
-        print(f"Database initialized at: {db.db_path}")
+        logger.info(f"Database initialized at: {db.db_path}")
 
 
 if __name__ == "__main__":

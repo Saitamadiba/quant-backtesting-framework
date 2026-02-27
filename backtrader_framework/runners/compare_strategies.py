@@ -5,11 +5,7 @@ Runs all strategies and compares their performance.
 
 import pandas as pd
 from datetime import datetime
-from pathlib import Path
 from typing import List, Optional, Dict, Any
-import sys
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from backtrader_framework.runners.single_backtest import (
     run_backtest, STRATEGIES, STRATEGY_TIMEFRAMES, print_summary

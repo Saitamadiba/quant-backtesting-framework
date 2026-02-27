@@ -31,7 +31,7 @@ Selectivity architecture:
 
     Minimum confidence threshold rejects low-quality setups.
 
-Session definitions (Eastern Time, approximated as UTC-5):
+Session definitions (Eastern Time, via zoneinfo):
     Asia:      19:00-23:59 ET  ->  establishes liquidity pool
     London KZ: 02:00-08:00 ET  ->  trade Asia level sweeps
     NY KZ:     08:00-16:00 ET  ->  trade Asia + London level sweeps
@@ -43,9 +43,12 @@ WFO Results (v1 baseline):
 """
 
 from typing import Dict, List, Any, Tuple
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
+
+_ET = ZoneInfo("America/New_York")
 
 from .base_adapter import StrategyAdapter, ParamSpec, Signal
 
@@ -261,7 +264,6 @@ class LiquidityRaidAdapter(StrategyAdapter):
                 continue
 
             atr_val = atrs[rel_i]
-            cr = candle_range[rel_i]
 
             # Direction and sweep depth
             if long_sweep[rel_i]:
@@ -331,9 +333,9 @@ class LiquidityRaidAdapter(StrategyAdapter):
             # Volatility-adaptive SL distance
             vol_adjusted_mult = atr_mult * sl_vol_mult[rel_i]
 
-            # Entry at 50% pullback of confirmation candle
+            # Entry at close of signal bar (no intra-bar look-ahead)
+            entry = closes[rel_i]
             if direction == 'LONG':
-                entry = lows[rel_i] + cr * 0.5
                 stop_loss = entry - atr_val * vol_adjusted_mult
                 if stop_loss >= entry:
                     continue
@@ -341,7 +343,6 @@ class LiquidityRaidAdapter(StrategyAdapter):
                 tp1 = entry + risk * eff_min_rr
                 tp2 = entry + risk * eff_max_rr
             else:
-                entry = highs[rel_i] - cr * 0.5
                 stop_loss = entry + atr_val * vol_adjusted_mult
                 if stop_loss <= entry:
                     continue
@@ -371,6 +372,20 @@ class LiquidityRaidAdapter(StrategyAdapter):
 #  Module-level helpers (no instance state)
 # ────────────────────────────────────────────────────────────────────
 
+def _utc_to_et_hours(index: pd.DatetimeIndex) -> np.ndarray:
+    """Convert a UTC DatetimeIndex to Eastern Time hours (DST-aware).
+
+    If the index is already tz-aware (non-UTC), it is converted to UTC first.
+    If the index is tz-naive, it is assumed to be UTC.
+    """
+    if index.tz is None:
+        utc_index = index.tz_localize('UTC')
+    else:
+        utc_index = index.tz_convert('UTC')
+    et_index = utc_index.tz_convert(_ET)
+    return np.asarray(et_index.hour, dtype=np.int32)
+
+
 def _compute_session_levels(
     df: pd.DataFrame, lookback_bars: int,
 ) -> Dict[str, np.ndarray]:
@@ -382,7 +397,7 @@ def _compute_session_levels(
     highs_arr = df['High'].values
     lows_arr  = df['Low'].values
 
-    et_hours = (np.asarray(df.index.hour, dtype=np.int32) - 5) % 24
+    et_hours = _utc_to_et_hours(df.index)
 
     is_asia   = et_hours >= 19
     is_london = (et_hours >= 2) & (et_hours < 8)
