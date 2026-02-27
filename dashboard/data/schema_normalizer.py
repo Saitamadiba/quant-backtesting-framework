@@ -78,6 +78,30 @@ def _safe_float(val, default=0.0):
         return default
 
 
+def _load_mfe_mae_from_ml_db(trade_db_path: Path) -> dict:
+    """Load MFE/MAE from companion ml_training DB for LR/MM strategies.
+
+    Derives the ml_training DB path from the trade DB path:
+        lr_btc.db  -> lr_btc_ml_training.db  (same directory)
+        mm_eth.db  -> mm_eth_ml_training.db
+    Returns {str(trade_id): (mfe_dollars, mae_dollars)} or empty dict.
+    """
+    stem = trade_db_path.stem  # e.g. "lr_btc"
+    ml_db = trade_db_path.parent / f"{stem}_ml_training.db"
+    if not ml_db.exists():
+        return {}
+    try:
+        conn = sqlite3.connect(str(ml_db))
+        rows = conn.execute(
+            "SELECT trade_id, mfe_dollars, mae_dollars FROM ml_training_data"
+            " WHERE mfe_dollars IS NOT NULL OR mae_dollars IS NOT NULL"
+        ).fetchall()
+        conn.close()
+        return {str(r[0]): (r[1], r[2]) for r in rows}
+    except Exception:
+        return {}
+
+
 def _ensure_schema(df: pd.DataFrame) -> pd.DataFrame:
     """Ensure DataFrame has all columns from TRADE_SCHEMA_COLS."""
     for col in TRADE_SCHEMA_COLS:
@@ -229,8 +253,15 @@ def normalize_lr_mm(db_path: Path, strategy: str, symbol: str) -> pd.DataFrame:
     else:
         df["duration_minutes"] = None
     df["running_balance"] = None
-    df["mfe"] = None
-    df["mae"] = None
+
+    # Load MFE/MAE from companion ml_training DB (e.g. lr_btc_ml_training.db)
+    mfe_mae = _load_mfe_mae_from_ml_db(db_path)
+    if mfe_mae:
+        df["mfe"] = df["trade_id"].map(lambda tid: mfe_mae.get(str(tid), (None, None))[0])
+        df["mae"] = df["trade_id"].map(lambda tid: mfe_mae.get(str(tid), (None, None))[1])
+    else:
+        df["mfe"] = None
+        df["mae"] = None
 
     # Detect open positions from status column or missing exit
     if "status" in raw.columns:
@@ -311,6 +342,72 @@ def normalize_sbs_csv(csv_path: Path = None) -> pd.DataFrame:
     return _ensure_schema(df)
 
 
+# ── SBS Live SQLite (ml_training_data table) ─────────────────────────────────
+
+def normalize_sbs_live(db_path: Path, strategy: str, symbol: str) -> pd.DataFrame:
+    """Normalize SBS live ml_training_data SQLite to unified schema.
+
+    SBS bots write both BTC and ETH trades to a shared ml_training_data.db.
+    The symbol column in the DB distinguishes them.
+    """
+    try:
+        conn = sqlite3.connect(str(db_path))
+        raw = pd.read_sql_query(
+            "SELECT * FROM ml_training_data WHERE exit_time IS NOT NULL", conn,
+        )
+        conn.close()
+    except Exception:
+        return pd.DataFrame(columns=TRADE_SCHEMA_COLS)
+
+    if raw.empty:
+        return pd.DataFrame(columns=TRADE_SCHEMA_COLS)
+
+    df = pd.DataFrame()
+    df["trade_id"] = raw.get("trade_id", raw.index.astype(str))
+    df["strategy"] = strategy
+    # Use per-row symbol from DB (e.g. "BTC-USD" -> "BTC")
+    if "symbol" in raw.columns:
+        df["symbol"] = raw["symbol"].str.replace("-USD", "").str.strip()
+    else:
+        df["symbol"] = symbol
+    df["timeframe"] = raw.get("timeframe", "4H")
+    df["source"] = "Live"
+
+    # Direction
+    dir_map = {"LONG": "Long", "SHORT": "Short", "long": "Long", "short": "Short"}
+    df["direction"] = raw["direction"].str.strip().map(dir_map).fillna("Unknown")
+
+    df["entry_time"] = pd.to_datetime(raw["entry_time"], errors="coerce")
+    df["exit_time"] = pd.to_datetime(raw["exit_time"], errors="coerce")
+    df["entry_price"] = raw["entry_price"].astype(float)
+    df["exit_price"] = raw.get("exit_price", pd.Series(dtype=float)).astype(float)
+    df["stop_loss"] = raw.get("stop_loss", pd.Series(dtype=float)).astype(float)
+    df["take_profit"] = raw.get("take_profit", pd.Series(dtype=float)).astype(float)
+    df["pnl_usd"] = raw.get("pnl_dollars", pd.Series(0.0)).astype(float)
+    df["pnl_pct"] = raw.get("pnl_percent", pd.Series(dtype=float)).astype(float)
+    df["r_multiple"] = raw.get("risk_reward_actual", pd.Series(dtype=float)).astype(float)
+
+    # Session
+    if "session" in raw.columns:
+        sess_map = {
+            "asian": "Asian", "london": "London", "ny": "New York",
+            "new_york": "New York", "overlap": "Off-Hours",
+        }
+        df["session"] = raw["session"].str.strip().str.lower().map(sess_map).fillna("Unknown")
+    else:
+        df["session"] = df["entry_time"].dt.hour.apply(_classify_session)
+
+    df["exit_reason"] = raw.get("exit_reason", "Unknown")
+    duration_s = raw.get("duration_seconds", pd.Series(dtype=float)).astype(float)
+    df["duration_minutes"] = duration_s / 60
+    df["running_balance"] = None
+    df["mfe"] = raw.get("mfe_dollars", pd.Series(dtype=float)).astype(float)
+    df["mae"] = raw.get("mae_dollars", pd.Series(dtype=float)).astype(float)
+    df["is_open"] = False  # query already filters to exit_time IS NOT NULL
+
+    return _ensure_schema(df)
+
+
 # ── Load all VPS cached DBs ──────────────────────────────────────────────────
 
 def load_all_live_trades() -> pd.DataFrame:
@@ -323,6 +420,8 @@ def load_all_live_trades() -> pd.DataFrame:
 
         if strategy == "FVG":
             df = normalize_fvg(db_path, strategy, symbol)
+        elif strategy == "SBS":
+            df = normalize_sbs_live(db_path, strategy, symbol)
         else:
             df = normalize_lr_mm(db_path, strategy, symbol)
 
@@ -331,7 +430,10 @@ def load_all_live_trades() -> pd.DataFrame:
 
     if not frames:
         return pd.DataFrame(columns=TRADE_SCHEMA_COLS)
-    return pd.concat(frames, ignore_index=True)
+    # Drop all-NA columns before concat to avoid FutureWarning
+    cleaned = [f.dropna(axis=1, how="all") for f in frames]
+    result = pd.concat(cleaned, ignore_index=True)
+    return _ensure_schema(result)
 
 
 def load_all_backtest_trades() -> pd.DataFrame:
@@ -345,4 +447,7 @@ def load_all_backtest_trades() -> pd.DataFrame:
 
     if not frames:
         return pd.DataFrame(columns=TRADE_SCHEMA_COLS)
-    return pd.concat(frames, ignore_index=True)
+    # Drop all-NA columns before concat to avoid FutureWarning
+    cleaned = [f.dropna(axis=1, how="all") for f in frames]
+    result = pd.concat(cleaned, ignore_index=True)
+    return _ensure_schema(result)
