@@ -2,12 +2,19 @@
 Session Tracker Indicator for Backtrader.
 
 Tracks trading session highs and lows for ICT-style strategies.
-Sessions are defined in Eastern Time (ET).
+Sessions are defined in Eastern Time (ET), with DST-aware conversion
+using zoneinfo (no hardcoded UTC-5 offset).
 """
 
 import backtrader as bt
-import pytz
 from collections import deque
+from datetime import timezone
+from zoneinfo import ZoneInfo
+
+
+# Shared timezone constants
+UTC = ZoneInfo("UTC")
+ET = ZoneInfo("America/New_York")
 
 
 class SessionTracker(bt.Indicator):
@@ -20,13 +27,15 @@ class SessionTracker(bt.Indicator):
         - New York: 8am - 4pm ET (08:00 - 16:00)
 
     Lines:
-        - asia_high: Highest price during Asia session
-        - asia_low: Lowest price during Asia session
-        - london_high: Highest price during London session
-        - london_low: Lowest price during London session
-        - ny_high: Highest price during NY session
-        - ny_low: Lowest price during NY session
+        - asia_high: Highest price during most recent completed Asia session
+        - asia_low: Lowest price during most recent completed Asia session
+        - london_high: Highest price during most recent completed London session
+        - london_low: Lowest price during most recent completed London session
+        - ny_high: Highest price during most recent completed NY session
+        - ny_low: Lowest price during most recent completed NY session
         - current_session: Current session (1=Asia, 2=London, 3=NY, 0=Off)
+        - prev_day_high: Yesterday's high
+        - prev_day_low: Yesterday's low
     """
 
     lines = (
@@ -38,7 +47,8 @@ class SessionTracker(bt.Indicator):
     )
 
     params = (
-        ('lookback_hours', 48),  # Hours to look back for session levels
+        ('lookback_hours', 48),       # Hours to look back for session levels
+        ('timeframe_minutes', 15),    # Timeframe in minutes (15, 60, 240, etc.)
     )
 
     plotinfo = dict(
@@ -47,17 +57,35 @@ class SessionTracker(bt.Indicator):
     )
 
     def __init__(self):
-        self.utc_tz = pytz.UTC
-        self.et_tz = pytz.timezone('America/New_York')
+        # Compute bars per hour from timeframe_minutes (no hardcoded assumption)
+        bars_per_hour = 60 / self.p.timeframe_minutes
+        max_lookback_bars = int(self.p.lookback_hours * bars_per_hour)
 
         # Store recent bars for session calculation
-        self.bar_cache = deque(maxlen=500)
+        self.bar_cache = deque(maxlen=max(max_lookback_bars, 500))
+
+        # Cache for the most recent completed session levels
+        self._last_completed = {
+            1: {'high': 0, 'low': float('inf')},   # Asia
+            2: {'high': 0, 'low': float('inf')},   # London
+            3: {'high': 0, 'low': float('inf')},   # NY
+        }
+        # Track the session code of the previous bar to detect transitions
+        self._prev_session = None
+        # Accumulate bars for the *current* (in-progress) session
+        self._current_session_highs = []
+        self._current_session_lows = []
+        self._current_session_code = None
+
+    def _to_et(self, dt):
+        """Convert a datetime to Eastern Time (DST-aware)."""
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return dt.astimezone(ET)
 
     def get_et_hour(self, dt) -> int:
-        """Get hour in ET timezone."""
-        if dt.tzinfo is None:
-            dt = self.utc_tz.localize(dt)
-        return dt.astimezone(self.et_tz).hour
+        """Get hour in ET timezone (DST-aware)."""
+        return self._to_et(dt).hour
 
     def get_session_code(self, dt) -> int:
         """
@@ -90,46 +118,57 @@ class SessionTracker(bt.Indicator):
             'session': current_session
         })
 
-        # Calculate session levels from lookback
-        lookback_bars = int(self.p.lookback_hours * 4)  # Assuming 15m bars
+        # --- Session transition detection ---
+        # When the session code changes, finalize the previous in-progress session
+        if self._prev_session is not None and current_session != self._prev_session:
+            prev_code = self._prev_session
+            if prev_code in (1, 2, 3) and self._current_session_highs:
+                self._last_completed[prev_code] = {
+                    'high': max(self._current_session_highs),
+                    'low': min(self._current_session_lows),
+                }
+            # Reset accumulation for the new session
+            self._current_session_highs = []
+            self._current_session_lows = []
+
+        # Accumulate bars for the current active session
+        if current_session in (1, 2, 3):
+            self._current_session_highs.append(self.data.high[0])
+            self._current_session_lows.append(self.data.low[0])
+
+        self._prev_session = current_session
+
+        # --- Set session levels from most recent COMPLETED sessions ---
+        self.lines.asia_high[0] = self._last_completed[1]['high']
+        self.lines.asia_low[0] = self._last_completed[1]['low']
+        self.lines.london_high[0] = self._last_completed[2]['high']
+        self.lines.london_low[0] = self._last_completed[2]['low']
+        self.lines.ny_high[0] = self._last_completed[3]['high']
+        self.lines.ny_low[0] = self._last_completed[3]['low']
+
+        # --- Previous day high/low (only yesterday's bars) ---
+        current_et = self._to_et(dt)
+        current_date_et = current_et.date()
+
+        bars_per_hour = 60 / self.p.timeframe_minutes
+        lookback_bars = int(self.p.lookback_hours * bars_per_hour)
         lookback_bars = min(lookback_bars, len(self.bar_cache))
 
-        asia_highs, asia_lows = [], []
-        london_highs, london_lows = [], []
-        ny_highs, ny_lows = [], []
-        day_highs, day_lows = [], []
-
-        # Get today's date for prev day calculation
-        current_date = dt.date()
+        yesterday_highs = []
+        yesterday_lows = []
 
         for bar in list(self.bar_cache)[-lookback_bars:]:
-            session = bar['session']
-            bar_date = bar['datetime'].date()
+            bar_et = self._to_et(bar['datetime'])
+            bar_date_et = bar_et.date()
 
-            if session == 1:  # ASIA
-                asia_highs.append(bar['high'])
-                asia_lows.append(bar['low'])
-            elif session == 2:  # LONDON
-                london_highs.append(bar['high'])
-                london_lows.append(bar['low'])
-            elif session == 3:  # NY
-                ny_highs.append(bar['high'])
-                ny_lows.append(bar['low'])
+            # Only include bars from exactly yesterday (ET date)
+            day_diff = (current_date_et - bar_date_et).days
+            if day_diff == 1:
+                yesterday_highs.append(bar['high'])
+                yesterday_lows.append(bar['low'])
 
-            # Previous day levels (any bar from yesterday)
-            if bar_date < current_date:
-                day_highs.append(bar['high'])
-                day_lows.append(bar['low'])
-
-        # Set session levels
-        self.lines.asia_high[0] = max(asia_highs) if asia_highs else 0
-        self.lines.asia_low[0] = min(asia_lows) if asia_lows else float('inf')
-        self.lines.london_high[0] = max(london_highs) if london_highs else 0
-        self.lines.london_low[0] = min(london_lows) if london_lows else float('inf')
-        self.lines.ny_high[0] = max(ny_highs) if ny_highs else 0
-        self.lines.ny_low[0] = min(ny_lows) if ny_lows else float('inf')
-        self.lines.prev_day_high[0] = max(day_highs) if day_highs else 0
-        self.lines.prev_day_low[0] = min(day_lows) if day_lows else float('inf')
+        self.lines.prev_day_high[0] = max(yesterday_highs) if yesterday_highs else 0
+        self.lines.prev_day_low[0] = min(yesterday_lows) if yesterday_lows else float('inf')
 
 
 class SessionLevel:

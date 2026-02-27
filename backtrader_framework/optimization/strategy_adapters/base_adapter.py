@@ -16,6 +16,7 @@ class ParamSpec:
     max_val: float
     step: float
     param_type: str = 'float'  # 'float', 'int'
+    log_scale: bool = False     # Sample in log space (for parameters spanning orders of magnitude)
 
 
 @dataclass

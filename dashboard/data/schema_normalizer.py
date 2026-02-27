@@ -1,9 +1,11 @@
 """Normalize per-source trade data to the unified dashboard schema."""
 
+import logging
 import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -12,11 +14,49 @@ from config import (
     SBS_TRAINING_CSV,
 )
 
+logger = logging.getLogger(__name__)
+
+
+# DST-aware Eastern Time zone
+_ET = ZoneInfo("America/New_York")
+_UTC = ZoneInfo("UTC")
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _classify_session(hour: Optional[int]) -> str:
-    """Classify hour (ET, 0-23) into trading session name."""
+def _utc_to_et_hour(ts) -> Optional[int]:
+    """Convert a UTC-naive or UTC-aware timestamp to its ET hour (DST-aware).
+
+    Args:
+        ts: A datetime or pd.Timestamp (assumed UTC if naive).
+
+    Returns:
+        Hour (0-23) in Eastern Time, or None if ts is NaT/None.
+    """
+    if ts is None or (isinstance(ts, float) and pd.isna(ts)):
+        return None
+    if isinstance(ts, pd.Timestamp) and pd.isna(ts):
+        return None
+    try:
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=_UTC)
+        return ts.astimezone(_ET).hour
+    except Exception:
+        return None
+
+
+def _classify_session(hour_or_ts) -> str:
+    """Classify into trading session name.
+
+    Accepts either:
+      - An integer hour already in ET (0-23), or
+      - A datetime/Timestamp (assumed UTC) which will be converted to ET first.
+    """
+    if isinstance(hour_or_ts, (int, float)) and not isinstance(hour_or_ts, bool):
+        hour = int(hour_or_ts) if pd.notna(hour_or_ts) else None
+    else:
+        hour = _utc_to_et_hour(hour_or_ts)
+
     if hour is None:
         return "Unknown"
     for name, times in SESSIONS.items():
@@ -57,10 +97,10 @@ def normalize_fvg(db_path: Path, strategy: str, symbol: str) -> pd.DataFrame:
     with realistic position sizing are kept.
     """
     try:
-        conn = sqlite3.connect(str(db_path))
-        raw = pd.read_sql_query("SELECT * FROM enhanced_trades", conn)
-        conn.close()
-    except Exception:
+        with sqlite3.connect(str(db_path)) as conn:
+            raw = pd.read_sql_query("SELECT * FROM enhanced_trades", conn)
+    except Exception as e:
+        logger.error(f"Failed to normalize FVG ({db_path}): {e}", exc_info=True)
         return pd.DataFrame(columns=TRADE_SCHEMA_COLS)
 
     if raw.empty:
@@ -77,8 +117,7 @@ def normalize_fvg(db_path: Path, strategy: str, symbol: str) -> pd.DataFrame:
         raw = raw[~raw["trade_id"].str.startswith("FIXED", na=False)]
         dropped = before - len(raw)
         if dropped > 0:
-            import logging
-            logging.getLogger(__name__).info(
+            logger.info(
                 f"FVG {symbol}: dropped {dropped} bogus FIXED-prefix trades"
             )
 
@@ -135,10 +174,10 @@ def normalize_fvg(db_path: Path, strategy: str, symbol: str) -> pd.DataFrame:
 def normalize_lr_mm(db_path: Path, strategy: str, symbol: str) -> pd.DataFrame:
     """Normalize LR / MM trades SQLite to unified schema."""
     try:
-        conn = sqlite3.connect(str(db_path))
-        raw = pd.read_sql_query("SELECT * FROM trades", conn)
-        conn.close()
-    except Exception:
+        with sqlite3.connect(str(db_path)) as conn:
+            raw = pd.read_sql_query("SELECT * FROM trades", conn)
+    except Exception as e:
+        logger.error(f"Failed to normalize LR/MM ({db_path}): {e}", exc_info=True)
         return pd.DataFrame(columns=TRADE_SCHEMA_COLS)
 
     if raw.empty:
@@ -214,7 +253,8 @@ def normalize_sbs_csv(csv_path: Path = None) -> pd.DataFrame:
 
     try:
         raw = pd.read_csv(str(csv_path))
-    except Exception:
+    except Exception as e:
+        logger.error(f"Failed to normalize SBS CSV ({csv_path}): {e}", exc_info=True)
         return pd.DataFrame(columns=TRADE_SCHEMA_COLS)
 
     if raw.empty:

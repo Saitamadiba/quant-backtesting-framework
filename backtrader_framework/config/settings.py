@@ -27,14 +27,20 @@ BINANCE_SYMBOLS = {
     'ETH': 'ETHUSDT',
 }
 
-# Session times (ET)
+# Session times (Eastern Time — America/New_York)
+# Hours are in ET (DST-aware).  Consumers must convert UTC timestamps
+# to ET via zoneinfo.ZoneInfo("America/New_York") before comparing.
+# During EST (winter) ET = UTC-5; during EDT (summer) ET = UTC-4.
+# Do NOT use a hardcoded UTC offset for session classification.
+SESSION_TIMEZONE = "America/New_York"
+
 SESSIONS = {
     'ASIA': {'start': 19, 'end': 3},      # 7pm - 3am ET
     'LONDON': {'start': 3, 'end': 8},      # 3am - 8am ET
     'NEW_YORK': {'start': 8, 'end': 16},   # 8am - 4pm ET
 }
 
-# Kill zones for trading
+# Kill zones for trading (Eastern Time — same DST caveat as SESSIONS)
 KILL_ZONES = {
     'LONDON': {'start': 3, 'end': 5},      # 3am - 5am ET
     'NEW_YORK': {'start': 8, 'end': 16},   # 8am - 4pm ET

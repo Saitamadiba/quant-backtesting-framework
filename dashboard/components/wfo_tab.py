@@ -1,19 +1,12 @@
 """Walk-Forward Optimization tab for the ML Training dashboard page."""
 
-import sys
 import time
-from pathlib import Path
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-
-# Ensure the backtrader_framework package is importable
-_BASE = Path(__file__).resolve().parent.parent.parent  # /Backtesting
-if str(_BASE) not in sys.path:
-    sys.path.insert(0, str(_BASE))
 
 
 def _get_adapter(strategy_name: str):

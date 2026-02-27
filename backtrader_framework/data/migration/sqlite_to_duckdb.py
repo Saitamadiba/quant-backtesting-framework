@@ -11,7 +11,7 @@ import numpy as np
 import sqlite3
 import time
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, List, Dict
 
@@ -96,8 +96,8 @@ class BinanceDataFetcher:
         binance_symbol = BINANCE_SYMBOLS.get(symbol, f"{symbol}USDT")
         binance_interval = self.INTERVAL_MAP.get(interval, interval)
 
-        end_time = int(datetime.now().timestamp() * 1000)
-        start_time = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
+        end_time = int(datetime.now(timezone.utc).timestamp() * 1000)
+        start_time = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp() * 1000)
 
         all_data = []
         current_start = start_time
@@ -177,7 +177,7 @@ class IndicatorCalculator:
         tr3 = abs(low - close.shift(1))
 
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        atr = tr.rolling(window=period).mean()
+        atr = tr.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
 
         return atr
 
@@ -194,8 +194,8 @@ class IndicatorCalculator:
         gain = delta.where(delta > 0, 0)
         loss = -delta.where(delta < 0, 0)
 
-        avg_gain = gain.rolling(window=period).mean()
-        avg_loss = loss.rolling(window=period).mean()
+        avg_gain = gain.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
 
         rs = avg_gain / avg_loss
         rsi = 100 - (100 / (1 + rs))

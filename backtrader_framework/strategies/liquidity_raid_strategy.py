@@ -6,10 +6,6 @@ Strategy logic removed — this stub shows the class structure.
 """
 
 import backtrader as bt
-from pathlib import Path
-import sys
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from backtrader_framework.strategies.base_strategy import BaseStrategy
 

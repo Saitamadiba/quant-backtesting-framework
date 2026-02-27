@@ -16,7 +16,7 @@ from config import (
 
 def _ssh_opts() -> list:
     """Common SSH options shared by ssh, scp, and rsync."""
-    return ["-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10"]
+    return ["-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10"]
 
 
 def _ssh_args() -> list:
