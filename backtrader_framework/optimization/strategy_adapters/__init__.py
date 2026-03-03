@@ -4,6 +4,7 @@ from .sbs_adapter import SBSAdapter
 from .fvg_adapter import FVGAdapter
 from .liquidity_raid_adapter import LiquidityRaidAdapter
 from .liquidity_raid_v3_adapter import LiquidityRaidV3Adapter
+from .liquidity_raid_live_adapter import LiquidityRaidLiveAdapter
 from .mm_adapter import MomentumMasteryAdapter
 
 ADAPTER_REGISTRY = {
@@ -11,5 +12,6 @@ ADAPTER_REGISTRY = {
     'FVG': FVGAdapter,
     'LiquidityRaid': LiquidityRaidAdapter,
     'LiquidityRaidV3': LiquidityRaidV3Adapter,
+    'LiquidityRaidLive': LiquidityRaidLiveAdapter,
     'MomentumMastery': MomentumMasteryAdapter,
 }
