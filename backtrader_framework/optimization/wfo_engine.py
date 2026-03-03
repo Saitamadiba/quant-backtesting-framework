@@ -1092,19 +1092,25 @@ class WFOEngine:
                 from .bayesian_tuner import OptunaTuner, TunerConfig
 
                 def _bayesian_objective(params):
-                    signals = self.adapter.generate_signals(
+                    # Try execute_signals (stateful adapter) first
+                    trades = self.adapter.execute_signals(
                         train_df, params, scan_start, scan_end,
+                        cfg.costs, cfg.max_trade_bars, w_id, is_oos=False, regime=regime,
                     )
-                    trades = []
-                    for sig in signals:
-                        trade = TradeSimulator.simulate(
-                            sig.to_dict(), train_df, cfg.costs,
-                            cfg.max_trade_bars, w_id, is_oos=False, regime=regime,
-                            _highs=train_highs, _lows=train_lows, _closes=train_closes,
-                            _atrs=train_atrs,
+                    if trades is None:
+                        signals = self.adapter.generate_signals(
+                            train_df, params, scan_start, scan_end,
                         )
-                        if trade:
-                            trades.append(trade)
+                        trades = []
+                        for sig in signals:
+                            trade = TradeSimulator.simulate(
+                                sig.to_dict(), train_df, cfg.costs,
+                                cfg.max_trade_bars, w_id, is_oos=False, regime=regime,
+                                _highs=train_highs, _lows=train_lows, _closes=train_closes,
+                                _atrs=train_atrs,
+                            )
+                            if trade:
+                                trades.append(trade)
                     if len(trades) < cfg.min_trades_per_window:
                         return -float('inf')
                     return self._score_trades(trades)
@@ -1120,18 +1126,25 @@ class WFOEngine:
                 best_score = bay_result['best_score']
 
                 # Regenerate IS trades with best params
-                best_signals = self.adapter.generate_signals(
+                best_is_trades_exec = self.adapter.execute_signals(
                     train_df, best_params, scan_start, scan_end,
+                    cfg.costs, cfg.max_trade_bars, w_id, is_oos=False, regime=regime,
                 )
-                for sig in best_signals:
-                    trade = TradeSimulator.simulate(
-                        sig.to_dict(), train_df, cfg.costs,
-                        cfg.max_trade_bars, w_id, is_oos=False, regime=regime,
-                        _highs=train_highs, _lows=train_lows, _closes=train_closes,
-                        _atrs=train_atrs,
+                if best_is_trades_exec is not None:
+                    best_is_trades = best_is_trades_exec
+                else:
+                    best_signals = self.adapter.generate_signals(
+                        train_df, best_params, scan_start, scan_end,
                     )
-                    if trade:
-                        best_is_trades.append(trade)
+                    for sig in best_signals:
+                        trade = TradeSimulator.simulate(
+                            sig.to_dict(), train_df, cfg.costs,
+                            cfg.max_trade_bars, w_id, is_oos=False, regime=regime,
+                            _highs=train_highs, _lows=train_lows, _closes=train_closes,
+                            _atrs=train_atrs,
+                        )
+                        if trade:
+                            best_is_trades.append(trade)
             except ImportError:
                 cfg.use_bayesian = False  # Fall through to grid search
 
@@ -1140,18 +1153,23 @@ class WFOEngine:
         if not cfg.use_bayesian:
             # Standard grid/random search
             for params in param_grid:
-                signals = self.adapter.generate_signals(train_df, params, scan_start, scan_end)
-
-                trades = []
-                for sig in signals:
-                    trade = TradeSimulator.simulate(
-                        sig.to_dict(), train_df, cfg.costs,
-                        cfg.max_trade_bars, w_id, is_oos=False, regime=regime,
-                        _highs=train_highs, _lows=train_lows, _closes=train_closes,
-                        _atrs=train_atrs,
-                    )
-                    if trade:
-                        trades.append(trade)
+                # Try execute_signals (stateful adapter) first
+                trades = self.adapter.execute_signals(
+                    train_df, params, scan_start, scan_end,
+                    cfg.costs, cfg.max_trade_bars, w_id, is_oos=False, regime=regime,
+                )
+                if trades is None:
+                    signals = self.adapter.generate_signals(train_df, params, scan_start, scan_end)
+                    trades = []
+                    for sig in signals:
+                        trade = TradeSimulator.simulate(
+                            sig.to_dict(), train_df, cfg.costs,
+                            cfg.max_trade_bars, w_id, is_oos=False, regime=regime,
+                            _highs=train_highs, _lows=train_lows, _closes=train_closes,
+                            _atrs=train_atrs,
+                        )
+                        if trade:
+                            trades.append(trade)
 
                 score = self._score_trades(trades)
                 all_combo_scores.append((params, score))
@@ -1177,25 +1195,33 @@ class WFOEngine:
         if oos_scan_end <= oos_scan_start:
             return
 
-        oos_signals = self.adapter.generate_signals(
+        # Try execute_signals (stateful adapter) first for OOS
+        oos_trades_exec = self.adapter.execute_signals(
             test_df_with_history, best_params, oos_scan_start, oos_scan_end,
+            cfg.costs, cfg.max_trade_bars, w_id, is_oos=True, regime=regime,
         )
-
-        oos_highs = test_df_with_history['High'].values
-        oos_lows = test_df_with_history['Low'].values
-        oos_closes = test_df_with_history['Close'].values
-        oos_atrs = test_df_with_history['ATR'].values if 'ATR' in test_df_with_history.columns else None
-
-        oos_trades = []
-        for sig in oos_signals:
-            trade = TradeSimulator.simulate(
-                sig.to_dict(), test_df_with_history, cfg.costs,
-                cfg.max_trade_bars, w_id, is_oos=True, regime=regime,
-                _highs=oos_highs, _lows=oos_lows, _closes=oos_closes,
-                _atrs=oos_atrs,
+        if oos_trades_exec is not None:
+            oos_trades = oos_trades_exec
+        else:
+            oos_signals = self.adapter.generate_signals(
+                test_df_with_history, best_params, oos_scan_start, oos_scan_end,
             )
-            if trade:
-                oos_trades.append(trade)
+
+            oos_highs = test_df_with_history['High'].values
+            oos_lows = test_df_with_history['Low'].values
+            oos_closes = test_df_with_history['Close'].values
+            oos_atrs = test_df_with_history['ATR'].values if 'ATR' in test_df_with_history.columns else None
+
+            oos_trades = []
+            for sig in oos_signals:
+                trade = TradeSimulator.simulate(
+                    sig.to_dict(), test_df_with_history, cfg.costs,
+                    cfg.max_trade_bars, w_id, is_oos=True, regime=regime,
+                    _highs=oos_highs, _lows=oos_lows, _closes=oos_closes,
+                    _atrs=oos_atrs,
+                )
+                if trade:
+                    oos_trades.append(trade)
 
         # HMM regime assessment (if enabled)
         hmm_assessment = None
@@ -1740,19 +1766,24 @@ class RegimeAdaptiveWFO(WFOEngine):
         all_combo_scores = []  # Collect (params, score) for stability analysis
 
         for params in param_grid:
-            signals = self.adapter.generate_signals(train_df, params, scan_start, scan_end)
-
-            trades = []
-            for sig in signals:
-                regime = RegimeDetector.classify(df, train_start + sig.idx)
-                trade = TradeSimulator.simulate(
-                    sig.to_dict(), train_df, cfg.costs,
-                    cfg.max_trade_bars, w_id, is_oos=False, regime=regime,
-                    _highs=train_highs, _lows=train_lows, _closes=train_closes,
-                    _atrs=train_atrs,
-                )
-                if trade:
-                    trades.append(trade)
+            # Try execute_signals (stateful adapter) first
+            trades = self.adapter.execute_signals(
+                train_df, params, scan_start, scan_end,
+                cfg.costs, cfg.max_trade_bars, w_id, is_oos=False, regime='unknown',
+            )
+            if trades is None:
+                signals = self.adapter.generate_signals(train_df, params, scan_start, scan_end)
+                trades = []
+                for sig in signals:
+                    regime = RegimeDetector.classify(df, train_start + sig.idx)
+                    trade = TradeSimulator.simulate(
+                        sig.to_dict(), train_df, cfg.costs,
+                        cfg.max_trade_bars, w_id, is_oos=False, regime=regime,
+                        _highs=train_highs, _lows=train_lows, _closes=train_closes,
+                        _atrs=train_atrs,
+                    )
+                    if trade:
+                        trades.append(trade)
 
             # Overall score (for fallback)
             overall_score = self._score_trades(trades)
@@ -1834,18 +1865,26 @@ class RegimeAdaptiveWFO(WFOEngine):
         oos_trades = []
         for seg_start_idx, seg_end_idx, seg_regime in segments:
             seg_params = params_by_regime.get(seg_regime, overall_best_params)
-            seg_signals = self.adapter.generate_signals(
+            # Try execute_signals (stateful adapter) first
+            seg_trades = self.adapter.execute_signals(
                 test_df_with_history, seg_params, seg_start_idx, seg_end_idx,
+                cfg.costs, cfg.max_trade_bars, w_id, is_oos=True, regime=seg_regime,
             )
-            for sig in seg_signals:
-                trade = TradeSimulator.simulate(
-                    sig.to_dict(), test_df_with_history, cfg.costs,
-                    cfg.max_trade_bars, w_id, is_oos=True, regime=seg_regime,
-                    _highs=oos_highs, _lows=oos_lows, _closes=oos_closes,
-                    _atrs=oos_atrs,
+            if seg_trades is not None:
+                oos_trades.extend(seg_trades)
+            else:
+                seg_signals = self.adapter.generate_signals(
+                    test_df_with_history, seg_params, seg_start_idx, seg_end_idx,
                 )
-                if trade:
-                    oos_trades.append(trade)
+                for sig in seg_signals:
+                    trade = TradeSimulator.simulate(
+                        sig.to_dict(), test_df_with_history, cfg.costs,
+                        cfg.max_trade_bars, w_id, is_oos=True, regime=seg_regime,
+                        _highs=oos_highs, _lows=oos_lows, _closes=oos_closes,
+                        _atrs=oos_atrs,
+                    )
+                    if trade:
+                        oos_trades.append(trade)
 
         self.all_oos_trades.extend(oos_trades)
 

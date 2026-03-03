@@ -94,5 +94,28 @@ class StrategyAdapter(ABC):
         """
         ...
 
+    def execute_signals(
+        self,
+        df: pd.DataFrame,
+        params: Dict[str, Any],
+        scan_start_idx: int,
+        scan_end_idx: int,
+        costs: Any,
+        max_bars: int = 168,
+        window_id: int = 0,
+        is_oos: bool = True,
+        regime: str = 'unknown',
+    ) -> Optional[List[Any]]:
+        """Override to handle signal generation + trade simulation together.
+
+        When implemented, the engine calls this INSTEAD of generate_signals()
+        + TradeSimulator.simulate(). This allows stateful processing:
+        single-position constraint, re-entries, sequential execution.
+
+        Returns None -> engine falls back to generate_signals() + simulate().
+        Returns List[TradeResult] -> engine uses these directly.
+        """
+        return None
+
     def get_default_params(self) -> Dict[str, Any]:
         return {p.name: p.default for p in self.get_param_space()}
