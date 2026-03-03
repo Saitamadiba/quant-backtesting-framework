@@ -26,12 +26,16 @@ class TradeSimulator:
         max_bars: int = 168, window_id: int = 0,
         is_oos: bool = True, regime: str = 'unknown',
         _highs: np.ndarray = None, _lows: np.ndarray = None,
-        _closes: np.ndarray = None,
+        _closes: np.ndarray = None, _atrs: np.ndarray = None,
     ) -> Optional[TradeResult]:
         """Walk forward bar-by-bar from signal entry, applying SL/TP1/TP2 and costs.
 
         Returns a TradeResult or None if the signal is invalid (zero risk or no bars).
-        Pre-extracted _highs/_lows/_closes arrays can be passed to avoid repeated .values calls.
+        Pre-extracted _highs/_lows/_closes/_atrs arrays can be passed to avoid repeated .values calls.
+
+        ATR trailing: when signal metadata contains ``trail_atr_mult > 0`` and
+        ``_atrs`` is provided, the stop-loss trails at ``trail_atr_mult × ATR``
+        from the high/low water mark after TP1 is hit (instead of simple breakeven).
         """
         idx = signal['idx']
         direction = signal['direction']
@@ -49,6 +53,11 @@ class TradeSimulator:
         highs = _highs if _highs is not None else df['High'].values
         lows = _lows if _lows is not None else df['Low'].values
         closes = _closes if _closes is not None else df['Close'].values
+        atrs = _atrs if _atrs is not None else (df['ATR'].values if 'ATR' in df.columns else None)
+
+        # ATR trailing config from signal metadata (backward-compatible)
+        meta = signal.get('metadata', {}) or {}
+        trail_atr_mult = meta.get('trail_atr_mult', 0)
 
         entry_cost = entry_price * (costs.spread_pct + costs.slippage_pct)
         effective_entry = entry_price + entry_cost if direction == 'LONG' else entry_price - entry_cost
@@ -60,6 +69,8 @@ class TradeSimulator:
         mae = 0.0
         tp1_hit = False
         is_long = direction == 'LONG'
+        high_water = 0.0
+        low_water = float('inf')
 
         end_bar = min(idx + max_bars, n)
         for i in range(idx + 1, end_bar):
@@ -87,7 +98,16 @@ class TradeSimulator:
                     break
                 if not tp1_hit and h >= tp1:
                     tp1_hit = True
-                    stop_loss = effective_entry  # Trail to breakeven
+                    stop_loss = effective_entry  # Breakeven floor
+                    high_water = h
+                if tp1_hit:
+                    if h > high_water:
+                        high_water = h
+                    # ATR trailing: ratchet SL up from high water mark
+                    if trail_atr_mult > 0 and atrs is not None and i < len(atrs):
+                        trail_level = high_water - trail_atr_mult * atrs[i]
+                        if trail_level > stop_loss:
+                            stop_loss = trail_level
                 if h >= tp2:
                     outcome = 'win_tp2'
                     exit_price = tp2
@@ -107,7 +127,16 @@ class TradeSimulator:
                     break
                 if not tp1_hit and lo <= tp1:
                     tp1_hit = True
-                    stop_loss = effective_entry  # Trail to breakeven
+                    stop_loss = effective_entry  # Breakeven floor
+                    low_water = lo
+                if tp1_hit:
+                    if lo < low_water:
+                        low_water = lo
+                    # ATR trailing: ratchet SL down from low water mark
+                    if trail_atr_mult > 0 and atrs is not None and i < len(atrs):
+                        trail_level = low_water + trail_atr_mult * atrs[i]
+                        if trail_level < stop_loss:
+                            stop_loss = trail_level
                 if lo <= tp2:
                     outcome = 'win_tp2'
                     exit_price = tp2
@@ -129,7 +158,7 @@ class TradeSimulator:
         else:
             raw_r = (effective_entry - exit_price) / risk
 
-        # Entry spread+slippage already in effective_entry (line 456-457),
+        # Entry spread+slippage already in effective_entry,
         # so only charge commission for entry to avoid double-counting.
         entry_comm = entry_price * costs.commission_pct
         exit_cost = exit_price * (costs.spread_pct + costs.commission_pct + costs.slippage_pct)

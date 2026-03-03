@@ -36,7 +36,7 @@ class Signal:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        d = {
             'idx': self.idx,
             'time': self.time,
             'direction': self.direction,
@@ -49,6 +49,9 @@ class Signal:
             'bias': self.bias,
             'atr': self.atr,
         }
+        if self.metadata:
+            d['metadata'] = self.metadata
+        return d
 
 
 class StrategyAdapter(ABC):

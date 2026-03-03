@@ -127,6 +127,79 @@ def _copy_spec(s: ParamSpec) -> ParamSpec:
     )
 
 
+def get_param_neighbors(
+    params: Dict[str, Any],
+    param_specs: List[ParamSpec],
+    steps: int = 1,
+) -> List[Dict[str, Any]]:
+    """Generate neighbor parameter sets by varying each param by ±steps.
+
+    For each parameter, generates up to 2 neighbors (one step up, one step down)
+    keeping all other params fixed.  Clips to [min_val, max_val].
+    Returns list of neighbor param dicts (excludes the center point).
+    """
+    neighbors = []
+    spec_map = {s.name: s for s in param_specs}
+
+    for name, center_val in params.items():
+        spec = spec_map.get(name)
+        if spec is None or spec.step <= 0:
+            continue
+        for direction in (-steps, steps):
+            new_val = center_val + direction * spec.step
+            new_val = max(spec.min_val, min(new_val, spec.max_val))
+            if abs(new_val - center_val) < 1e-9:
+                continue
+            neighbor = dict(params)
+            if spec.param_type == 'int':
+                neighbor[name] = int(round(new_val))
+            else:
+                neighbor[name] = round(new_val, 6)
+            neighbors.append(neighbor)
+
+    return neighbors
+
+
+def compute_stability_ratio(
+    best_score: float,
+    combo_scores: list,
+    param_specs: List[ParamSpec],
+) -> Dict[str, Any]:
+    """Compute parameter stability from the score landscape.
+
+    stability_ratio = mean(neighbor_scores) / best_score.
+    ~1.0 = flat/stable optimum (robust).  <0.5 = spike (fragile/overfit).
+    """
+    if best_score <= 0 or not combo_scores:
+        return {'stability_ratio': 0.0, 'n_neighbors_found': 0, 'neighbor_mean_score': None}
+
+    best_params = max(combo_scores, key=lambda x: x[1])[0]
+    neighbors = get_param_neighbors(best_params, param_specs)
+
+    def _key(p):
+        return tuple(sorted(p.items()))
+
+    score_map = {_key(p): s for p, s in combo_scores}
+
+    neighbor_scores = []
+    for nb in neighbors:
+        k = _key(nb)
+        if k in score_map:
+            neighbor_scores.append(score_map[k])
+
+    if not neighbor_scores:
+        return {'stability_ratio': 0.0, 'n_neighbors_found': 0, 'neighbor_mean_score': None}
+
+    neighbor_mean = float(np.mean(neighbor_scores))
+    stability_ratio = neighbor_mean / best_score if best_score > 0 else 0.0
+
+    return {
+        'stability_ratio': round(stability_ratio, 4),
+        'n_neighbors_found': len(neighbor_scores),
+        'neighbor_mean_score': round(neighbor_mean, 6),
+    }
+
+
 def suggest_from_param_spec(trial, spec: ParamSpec):
     """Convert a ParamSpec into an Optuna trial suggestion."""
     if spec.param_type == 'int':

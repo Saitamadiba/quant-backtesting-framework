@@ -3,11 +3,13 @@
 from .sbs_adapter import SBSAdapter
 from .fvg_adapter import FVGAdapter
 from .liquidity_raid_adapter import LiquidityRaidAdapter
+from .liquidity_raid_v3_adapter import LiquidityRaidV3Adapter
 from .mm_adapter import MomentumMasteryAdapter
 
 ADAPTER_REGISTRY = {
     'SBS': SBSAdapter,
     'FVG': FVGAdapter,
     'LiquidityRaid': LiquidityRaidAdapter,
+    'LiquidityRaidV3': LiquidityRaidV3Adapter,
     'MomentumMastery': MomentumMasteryAdapter,
 }

@@ -23,6 +23,7 @@ from .regime import RegimeDetector
 from .simulator import TradeSimulator
 from .statistics import StatisticalTests, MonteCarloAnalysis
 from .data_fetcher import DataFetcher
+from .hmm_regime import HMMRegimeAssessor
 
 __all__ = [
     'WFOEngine',
@@ -37,4 +38,5 @@ __all__ = [
     'StatisticalTests',
     'MonteCarloAnalysis',
     'DataFetcher',
+    'HMMRegimeAssessor',
 ]

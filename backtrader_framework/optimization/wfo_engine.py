@@ -85,6 +85,9 @@ class WFOConfig:
     use_bayesian: bool = False       # Use Optuna instead of grid search
     bayesian_n_trials: int = 100     # Number of Optuna trials per window
     bayesian_timeout: int = 60       # Timeout per window in seconds
+    use_hmm_regime: bool = False     # Run HMM regime assessment per window
+    hmm_n_states: int = 2            # Number of HMM states
+    hmm_position_sizing: bool = False  # Scale OOS R-multiples by HMM sizing
 
     @classmethod
     def for_timeframe(cls, timeframe: str, **kwargs) -> 'WFOConfig':
@@ -456,12 +459,16 @@ class TradeSimulator:
         max_bars: int = 168, window_id: int = 0,
         is_oos: bool = True, regime: str = 'unknown',
         _highs: np.ndarray = None, _lows: np.ndarray = None,
-        _closes: np.ndarray = None,
+        _closes: np.ndarray = None, _atrs: np.ndarray = None,
     ) -> Optional[TradeResult]:
         """Walk forward bar-by-bar from signal entry, applying SL/TP1/TP2 and costs.
 
         Returns a TradeResult or None if the signal is invalid (zero risk or no bars).
-        Pre-extracted _highs/_lows/_closes arrays can be passed to avoid repeated .values calls.
+        Pre-extracted _highs/_lows/_closes/_atrs arrays can be passed to avoid repeated .values calls.
+
+        ATR trailing: when signal metadata contains ``trail_atr_mult > 0`` and
+        ``_atrs`` is provided, the stop-loss trails at ``trail_atr_mult × ATR``
+        from the high/low water mark after TP1 is hit (instead of simple breakeven).
         """
         idx = signal['idx']
         direction = signal['direction']
@@ -479,6 +486,11 @@ class TradeSimulator:
         highs = _highs if _highs is not None else df['High'].values
         lows = _lows if _lows is not None else df['Low'].values
         closes = _closes if _closes is not None else df['Close'].values
+        atrs = _atrs if _atrs is not None else (df['ATR'].values if 'ATR' in df.columns else None)
+
+        # ATR trailing config from signal metadata (backward-compatible)
+        meta = signal.get('metadata', {}) or {}
+        trail_atr_mult = meta.get('trail_atr_mult', 0)
 
         entry_cost = entry_price * (costs.spread_pct + costs.slippage_pct)
         effective_entry = entry_price + entry_cost if direction == 'LONG' else entry_price - entry_cost
@@ -490,6 +502,8 @@ class TradeSimulator:
         mae = 0.0
         tp1_hit = False
         is_long = direction == 'LONG'
+        high_water = 0.0
+        low_water = float('inf')
 
         end_bar = min(idx + max_bars, n)
         for i in range(idx + 1, end_bar):
@@ -507,7 +521,16 @@ class TradeSimulator:
 
                 if not tp1_hit and h >= tp1:
                     tp1_hit = True
-                    stop_loss = effective_entry  # Trail to breakeven
+                    stop_loss = effective_entry  # Breakeven floor
+                    high_water = h
+                if tp1_hit:
+                    if h > high_water:
+                        high_water = h
+                    # ATR trailing: ratchet SL up from high water mark
+                    if trail_atr_mult > 0 and atrs is not None and i < len(atrs):
+                        trail_level = high_water - trail_atr_mult * atrs[i]
+                        if trail_level > stop_loss:
+                            stop_loss = trail_level
                 if lo <= stop_loss:
                     outcome = 'breakeven' if tp1_hit else 'loss'
                     exit_price = stop_loss
@@ -526,7 +549,16 @@ class TradeSimulator:
 
                 if not tp1_hit and lo <= tp1:
                     tp1_hit = True
-                    stop_loss = effective_entry  # Trail to breakeven
+                    stop_loss = effective_entry  # Breakeven floor
+                    low_water = lo
+                if tp1_hit:
+                    if lo < low_water:
+                        low_water = lo
+                    # ATR trailing: ratchet SL down from low water mark
+                    if trail_atr_mult > 0 and atrs is not None and i < len(atrs):
+                        trail_level = low_water + trail_atr_mult * atrs[i]
+                        if trail_level < stop_loss:
+                            stop_loss = trail_level
                 if h >= stop_loss:
                     outcome = 'breakeven' if tp1_hit else 'loss'
                     exit_price = stop_loss
@@ -912,6 +944,7 @@ class WFOEngine:
         self.all_is_trades: List[TradeResult] = []
         self.param_history: List[Dict] = []
         self.window_results: List[Dict] = []
+        self._all_window_combo_scores: List = []
 
     def run(
         self, symbol: str, timeframe: str,
@@ -930,14 +963,9 @@ class WFOEngine:
         # 1b. Validate OHLCV data quality
         try:
             from ..data.validation import validate_ohlcv
-            validation = validate_ohlcv(raw_df)
-            if not validation['valid']:
-                logger.warning(f"OHLCV validation issues: {validation.get('errors', [])}")
-            if validation.get('warnings'):
-                for w in validation['warnings']:
-                    logger.info(f"OHLCV: {w}")
-        except ImportError:
-            pass  # validation module not available — proceed without
+            raw_df = validate_ohlcv(raw_df, fix=True)
+        except (ImportError, Exception) as e:
+            logger.debug(f"OHLCV validation skipped: {e}")
 
         # 2. Calculate indicators
         if progress_callback:
@@ -974,6 +1002,7 @@ class WFOEngine:
         self.all_is_trades = []
         self.param_history = []
         self.window_results = []
+        self._all_window_combo_scores = []
 
         for w_idx, (train_start, train_end, test_start, test_end) in enumerate(windows):
             pct = 0.10 + 0.80 * (w_idx / len(windows))
@@ -1040,6 +1069,7 @@ class WFOEngine:
         train_highs = train_df['High'].values
         train_lows = train_df['Low'].values
         train_closes = train_df['Close'].values
+        train_atrs = train_df['ATR'].values if 'ATR' in train_df.columns else None
 
         # --- IS Optimization ---
         best_score = -float('inf')
@@ -1071,6 +1101,7 @@ class WFOEngine:
                             sig.to_dict(), train_df, cfg.costs,
                             cfg.max_trade_bars, w_id, is_oos=False, regime=regime,
                             _highs=train_highs, _lows=train_lows, _closes=train_closes,
+                            _atrs=train_atrs,
                         )
                         if trade:
                             trades.append(trade)
@@ -1097,11 +1128,14 @@ class WFOEngine:
                         sig.to_dict(), train_df, cfg.costs,
                         cfg.max_trade_bars, w_id, is_oos=False, regime=regime,
                         _highs=train_highs, _lows=train_lows, _closes=train_closes,
+                        _atrs=train_atrs,
                     )
                     if trade:
                         best_is_trades.append(trade)
             except ImportError:
                 cfg.use_bayesian = False  # Fall through to grid search
+
+        all_combo_scores = []  # Collect (params, score) for stability analysis
 
         if not cfg.use_bayesian:
             # Standard grid/random search
@@ -1114,15 +1148,27 @@ class WFOEngine:
                         sig.to_dict(), train_df, cfg.costs,
                         cfg.max_trade_bars, w_id, is_oos=False, regime=regime,
                         _highs=train_highs, _lows=train_lows, _closes=train_closes,
+                        _atrs=train_atrs,
                     )
                     if trade:
                         trades.append(trade)
 
                 score = self._score_trades(trades)
+                all_combo_scores.append((params, score))
                 if score > best_score and len(trades) >= cfg.min_trades_per_window:
                     best_score = score
                     best_params = params
                     best_is_trades = trades
+
+        # Parameter stability analysis
+        param_stability = None
+        if all_combo_scores and best_score > -float('inf'):
+            from .param_grid import compute_stability_ratio
+            param_stability = compute_stability_ratio(
+                best_score, all_combo_scores, self.adapter.get_param_space(),
+            )
+
+        self._all_window_combo_scores.append(all_combo_scores)
 
         # --- OOS Evaluation with best params ---
         oos_scan_start = test_start - train_start
@@ -1138,6 +1184,7 @@ class WFOEngine:
         oos_highs = test_df_with_history['High'].values
         oos_lows = test_df_with_history['Low'].values
         oos_closes = test_df_with_history['Close'].values
+        oos_atrs = test_df_with_history['ATR'].values if 'ATR' in test_df_with_history.columns else None
 
         oos_trades = []
         for sig in oos_signals:
@@ -1145,9 +1192,34 @@ class WFOEngine:
                 sig.to_dict(), test_df_with_history, cfg.costs,
                 cfg.max_trade_bars, w_id, is_oos=True, regime=regime,
                 _highs=oos_highs, _lows=oos_lows, _closes=oos_closes,
+                _atrs=oos_atrs,
             )
             if trade:
                 oos_trades.append(trade)
+
+        # HMM regime assessment (if enabled)
+        hmm_assessment = None
+        if cfg.use_hmm_regime:
+            try:
+                from .hmm_regime import HMMRegimeAssessor
+                assessor = HMMRegimeAssessor(n_states=cfg.hmm_n_states)
+                hmm_assessment = assessor.get_assessment(train_df, test_df_with_history)
+
+                # HMM position sizing: scale OOS R-multiples by bar-level multiplier
+                if cfg.hmm_position_sizing and hmm_assessment.get('oos_filtered'):
+                    probs = assessor.filter_oos(test_df_with_history)
+                    if probs is not None:
+                        for trade in oos_trades:
+                            try:
+                                bar_idx = test_df_with_history.index.get_loc(trade.entry_time)
+                                if 0 <= bar_idx < len(probs):
+                                    mult = assessor.get_size_multiplier(probs[bar_idx])
+                                    trade.r_multiple *= mult
+                                    trade.r_multiple_after_costs *= mult
+                            except (KeyError, IndexError):
+                                pass
+            except Exception as e:
+                logger.warning(f"HMM assessment failed for window {w_id}: {e}")
 
         self.all_oos_trades.extend(oos_trades)
         self.all_is_trades.extend(best_is_trades)
@@ -1157,6 +1229,8 @@ class WFOEngine:
             'best_params': best_params,
             'best_score': best_score,
             'n_is_trades': len(best_is_trades),
+            'param_stability': param_stability,
+            'n_combos_evaluated': len(all_combo_scores),
         })
 
         self.window_results.append({
@@ -1169,6 +1243,8 @@ class WFOEngine:
             'oos_total_r': sum(t.r_multiple_after_costs for t in oos_trades),
             'is_trades': len(best_is_trades),
             'is_total_r': sum(t.r_multiple_after_costs for t in best_is_trades),
+            'param_stability': param_stability,
+            'hmm_regime': hmm_assessment,
         })
 
     def _score_trades(self, trades: List[TradeResult]) -> float:
@@ -1223,6 +1299,18 @@ class WFOEngine:
             logger.info(f"OOS dedup: removed {dedup_removed} duplicate trades")
         self.all_oos_trades = unique_oos_trades
 
+        # Enforce minimum total OOS trade count
+        if len(unique_oos_trades) < self.config.min_total_oos_trades:
+            logger.warning(
+                f"Only {len(unique_oos_trades)} OOS trades "
+                f"(min={self.config.min_total_oos_trades}). Results unreliable."
+            )
+            result = self._empty_result(symbol, timeframe, 'insufficient_oos_trades')
+            result['oos_n_trades'] = len(unique_oos_trades)
+            result['windows'] = self.window_results
+            result['param_history'] = self.param_history
+            return result
+
         oos = self.all_oos_trades
         is_trades = self.all_is_trades
 
@@ -1241,20 +1329,72 @@ class WFOEngine:
         if oos_stats.get('valid') and len(oos) >= 10:
             try:
                 from .cpcv import deflated_sharpe_ratio
+                from scipy import stats as _sp_stats
                 n_combos = self.config.max_param_combos
                 if self.config.grid_mode == 'random':
                     n_combos = self.config.random_samples
-                r_vals = [t.r_multiple_after_costs for t in oos]
+                r_vals = np.array([t.r_multiple_after_costs for t in oos])
+                skew_val = float(_sp_stats.skew(r_vals))
+                kurt_val = float(_sp_stats.kurtosis(r_vals, fisher=False))
                 dsr = deflated_sharpe_ratio(
-                    observed_sharpe=oos_stats.get('sharpe_per_trade', 0),
-                    n_trades=len(oos),
-                    n_trials=n_combos * max(len(self.window_results), 1),
-                    returns=r_vals,
+                    observed_sr=oos_stats.get('sharpe_per_trade', 0),
+                    num_trials=n_combos * max(len(self.window_results), 1),
+                    n_returns=len(oos),
+                    skewness=skew_val,
+                    kurtosis=kurt_val,
                 )
                 deflated_sharpe = dsr
-                logger.info(f"Deflated Sharpe Ratio: {dsr:.4f}")
+                logger.info(
+                    f"Deflated Sharpe: {dsr['deflated_sr']:.4f} "
+                    f"(p={dsr['p_value']:.4f}, significant={dsr['is_significant']})"
+                )
             except Exception as e:
                 logger.warning(f"Deflated Sharpe calculation failed: {e}")
+
+        # Probability of Backtest Overfitting (PBO) via CPCV
+        pbo_result = None
+        if len(self._all_window_combo_scores) >= 4:
+            try:
+                from .cpcv import CPCV
+
+                # Build unified param key set across windows
+                all_keys = set()
+                for wcs in self._all_window_combo_scores:
+                    for params, _ in wcs:
+                        all_keys.add(tuple(sorted(params.items())))
+
+                shared_keys = list(all_keys)
+                if len(shared_keys) >= 3:
+                    # Build score matrix: rows=windows, cols=param combos
+                    n_windows = len(self._all_window_combo_scores)
+                    n_strats = len(shared_keys)
+                    key_to_col = {k: i for i, k in enumerate(shared_keys)}
+
+                    score_matrix = np.full((n_windows, n_strats), np.nan)
+                    for w_idx, wcs in enumerate(self._all_window_combo_scores):
+                        for params, score in wcs:
+                            k = tuple(sorted(params.items()))
+                            if k in key_to_col:
+                                score_matrix[w_idx, key_to_col[k]] = score
+
+                    # Drop columns (strategies) with any NaN
+                    valid_cols = ~np.isnan(score_matrix).any(axis=0)
+                    score_matrix = score_matrix[:, valid_cols]
+
+                    if score_matrix.shape[1] >= 3 and score_matrix.shape[0] >= 4:
+                        # Split first half as IS, second half as OOS
+                        mid = score_matrix.shape[0] // 2
+                        is_perf = score_matrix[:mid]
+                        oos_perf = score_matrix[mid:]
+
+                        cpcv = CPCV(n_groups=min(6, min(is_perf.shape[0], oos_perf.shape[0])))
+                        pbo_result = cpcv.compute_pbo(is_perf, oos_perf)
+                        logger.info(
+                            f"PBO: {pbo_result['pbo_pct']:.1f}% "
+                            f"(splits={pbo_result['n_splits']}, reliable={pbo_result['is_reliable']})"
+                        )
+            except Exception as e:
+                logger.warning(f"PBO calculation failed: {e}")
 
         # Regime breakdown
         regime_analysis = {}
@@ -1324,6 +1464,36 @@ class WFOEngine:
         if len(oos) >= 10:
             timing_analysis = TimingAnalyzer.analyze(oos, symbol)
 
+        # Aggregate HMM regime assessments across windows
+        hmm_summary = None
+        hmm_windows = [
+            w.get('hmm_regime') for w in self.window_results
+            if w.get('hmm_regime') and w['hmm_regime'].get('fitted')
+        ]
+        if hmm_windows:
+            size_mults = [w['mean_size_mult'] for w in hmm_windows if 'mean_size_mult' in w]
+            calm_pcts = [w['oos_pct_calm'] for w in hmm_windows if 'oos_pct_calm' in w]
+            hmm_summary = {
+                'n_windows_fitted': len(hmm_windows),
+                'mean_size_mult': round(float(np.mean(size_mults)), 4) if size_mults else None,
+                'mean_pct_calm': round(float(np.mean(calm_pcts)), 1) if calm_pcts else None,
+            }
+
+        # Aggregate parameter stability across windows
+        param_stability_summary = None
+        stability_ratios = [
+            ph.get('param_stability', {}).get('stability_ratio')
+            for ph in self.param_history
+            if ph.get('param_stability') and ph['param_stability'].get('stability_ratio') is not None
+        ]
+        if stability_ratios:
+            param_stability_summary = {
+                'mean_stability': round(float(np.mean(stability_ratios)), 4),
+                'min_stability': round(float(np.min(stability_ratios)), 4),
+                'n_windows': len(stability_ratios),
+                'fragile_windows': sum(1 for s in stability_ratios if s < 0.5),
+            }
+
         result = {
             'strategy_name': self.adapter.name,
             'symbol': symbol,
@@ -1346,6 +1516,9 @@ class WFOEngine:
             'is_stats': is_stats,
             'overfit_ratio': overfit_ratio,
             'deflated_sharpe': deflated_sharpe,
+            'pbo': pbo_result,
+            'hmm_regime': hmm_summary,
+            'param_stability': param_stability_summary,
             'regime_analysis': regime_summary,
             'direction_analysis': direction_analysis,
             'windows': self.window_results,
@@ -1473,6 +1646,7 @@ class RegimeAdaptiveWFO(WFOEngine):
         self.param_history = []
         self.window_results = []
         self.regime_param_history = []
+        self._all_window_combo_scores = []
 
         total_steps = len(windows)
         base_pct = 0.50 if run_standard else 0.10
@@ -1545,6 +1719,7 @@ class RegimeAdaptiveWFO(WFOEngine):
         train_highs = train_df['High'].values
         train_lows = train_df['Low'].values
         train_closes = train_df['Close'].values
+        train_atrs = train_df['ATR'].values if 'ATR' in train_df.columns else None
 
         scan_start = max(cfg.min_ema_warmup, 50)
         scan_end = len(train_df) - 20
@@ -1562,6 +1737,7 @@ class RegimeAdaptiveWFO(WFOEngine):
         overall_best_score = -float('inf')
         overall_best_params = self.adapter.get_default_params()
         overall_best_trades = []
+        all_combo_scores = []  # Collect (params, score) for stability analysis
 
         for params in param_grid:
             signals = self.adapter.generate_signals(train_df, params, scan_start, scan_end)
@@ -1573,12 +1749,14 @@ class RegimeAdaptiveWFO(WFOEngine):
                     sig.to_dict(), train_df, cfg.costs,
                     cfg.max_trade_bars, w_id, is_oos=False, regime=regime,
                     _highs=train_highs, _lows=train_lows, _closes=train_closes,
+                    _atrs=train_atrs,
                 )
                 if trade:
                     trades.append(trade)
 
             # Overall score (for fallback)
             overall_score = self._score_trades(trades)
+            all_combo_scores.append((params, overall_score))
             if overall_score > overall_best_score and len(trades) >= cfg.min_trades_per_window:
                 overall_best_score = overall_score
                 overall_best_params = params
@@ -1607,6 +1785,15 @@ class RegimeAdaptiveWFO(WFOEngine):
             else:
                 # Fallback to overall best
                 params_by_regime[regime] = overall_best_params
+
+        # Parameter stability analysis
+        param_stability = None
+        if all_combo_scores and overall_best_score > -float('inf'):
+            from .param_grid import compute_stability_ratio
+            param_stability = compute_stability_ratio(
+                overall_best_score, all_combo_scores, self.adapter.get_param_space(),
+            )
+        self._all_window_combo_scores.append(all_combo_scores)
 
         # Record IS trades
         self.all_is_trades.extend(overall_best_trades)
@@ -1642,6 +1829,7 @@ class RegimeAdaptiveWFO(WFOEngine):
         oos_highs = test_df_with_history['High'].values
         oos_lows = test_df_with_history['Low'].values
         oos_closes = test_df_with_history['Close'].values
+        oos_atrs = test_df_with_history['ATR'].values if 'ATR' in test_df_with_history.columns else None
 
         oos_trades = []
         for seg_start_idx, seg_end_idx, seg_regime in segments:
@@ -1654,6 +1842,7 @@ class RegimeAdaptiveWFO(WFOEngine):
                     sig.to_dict(), test_df_with_history, cfg.costs,
                     cfg.max_trade_bars, w_id, is_oos=True, regime=seg_regime,
                     _highs=oos_highs, _lows=oos_lows, _closes=oos_closes,
+                    _atrs=oos_atrs,
                 )
                 if trade:
                     oos_trades.append(trade)
@@ -1671,6 +1860,8 @@ class RegimeAdaptiveWFO(WFOEngine):
             'best_params': overall_best_params,  # fallback / overall
             'best_score': overall_best_score,
             'n_is_trades': len(overall_best_trades),
+            'param_stability': param_stability,
+            'n_combos_evaluated': len(all_combo_scores),
         })
 
         self.regime_param_history.append({
@@ -1694,4 +1885,5 @@ class RegimeAdaptiveWFO(WFOEngine):
             'oos_total_r': sum(t.r_multiple_after_costs for t in oos_trades),
             'is_trades': len(overall_best_trades),
             'is_total_r': sum(t.r_multiple_after_costs for t in overall_best_trades),
+            'param_stability': param_stability,
         })
