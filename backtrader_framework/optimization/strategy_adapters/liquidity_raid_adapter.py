@@ -10,9 +10,14 @@ v2 improvements (based on WFO analysis of 4,376 OOS trades):
     - Confidence scoring flipped to mean-reversion: rewards COUNTER-trend
       structure and HTF (WFO showed trend-aligned signals are anti-predictive)
     - EMA trend removed from hard gate (was forcing trend-aligned signals only)
-    - Volatile regime filter: skip signals when ATR_Pctile20 > 0.80
-    - Displacement filter: require 5-bar opposite directional move before entry
     - Param space tightened to reduce IS/OOS overfitting (was -0.011 ratio)
+
+v3 live-faithful changes:
+    - Removed volatile regime filter (not present in live bot)
+    - Removed displacement filter (not present in live bot)
+    - Confidence threshold changed from hard gate to informational only
+      (live bot uses confidence for sizing, not rejection)
+    - Volatility-adaptive SL multiplier retained (soft layer, used in live bot)
 
 Selectivity architecture:
     Hard gates (reject if failed):
@@ -20,8 +25,6 @@ Selectivity architecture:
         - Candle body >= min_body_pct
         - Sweep detection (price crosses session level + closes back)
         - IV-Adaptive min sweep depth (DVOL-based)
-        - Volatile regime filter (ATR_Pctile20 > 0.80)
-        - Displacement: 5-bar counter-directional price move
 
     Soft scoring (mean-reversion confidence):
         - Sweep depth (0-0.50, primary quality signal)
@@ -29,7 +32,7 @@ Selectivity architecture:
         - Counter-trend HTF Alignment (0-0.15, rewards opposing HTF)
         - Structure confidence bonus (0-0.15)
 
-    Minimum confidence threshold rejects low-quality setups.
+    Confidence score is informational (no hard reject threshold).
 
 Session definitions (Eastern Time, via zoneinfo):
     Asia:      19:00-23:59 ET  ->  establishes liquidity pool
@@ -182,11 +185,8 @@ class LiquidityRaidAdapter(StrategyAdapter):
                 valid_pctile & (atr_pctile >= 0.80), 1.25,
                 np.where(valid_pctile & (atr_pctile <= 0.20), 0.80, 1.0)
             )
-            # HARD GATE: volatile regime filter (top 20% ATR = worst regime)
-            is_volatile = valid_pctile & (atr_pctile > 0.80)
         else:
             sl_vol_mult = np.ones(scan_len)
-            is_volatile = np.zeros(scan_len, dtype=bool)
 
         # ── Vectorized candle properties ────────────────────────────
         candle_range = highs - lows
@@ -250,18 +250,11 @@ class LiquidityRaidAdapter(StrategyAdapter):
         min_cooldown = 4
         last_sig_rel = -min_cooldown
 
-        # Pre-extract close array for displacement check
-        all_closes = df['Close'].values
-
         for rel_i in sweep_rel_indices:
             if rel_i - last_sig_rel < min_cooldown:
                 continue
 
             abs_i = s + rel_i
-
-            # HARD GATE: volatile regime filter
-            if is_volatile[rel_i]:
-                continue
 
             atr_val = atrs[rel_i]
 
@@ -279,24 +272,6 @@ class LiquidityRaidAdapter(StrategyAdapter):
             depth_atr = depth / atr_val
             if depth_atr < min_depth_arr[rel_i]:
                 continue
-
-            # HARD GATE: Displacement check (5-bar directional move)
-            disp_lookback = 5
-            if abs_i >= disp_lookback:
-                ref_close = all_closes[abs_i - disp_lookback]
-                if ref_close > 0:
-                    price_change = (closes[rel_i] - ref_close) / ref_close
-                else:
-                    price_change = 0.0
-                # LR is mean-reversion: LONG after bearish sweep needs
-                # price to have dropped, SHORT after bullish sweep needs
-                # price to have risen — opposite displacement direction
-                min_disp = 0.003
-                if direction == 'LONG' and price_change > -min_disp:
-                    continue
-                if direction == 'SHORT' and price_change < min_disp:
-                    continue
-            # (skip displacement check if insufficient history)
 
             # ── Composite confidence (mean-reversion friendly) ──────
             # Sweep depth: primary quality signal (0.0 to 0.50)
@@ -321,10 +296,8 @@ class LiquidityRaidAdapter(StrategyAdapter):
 
             confidence = depth_c + struct_score + htf_score + struct_conf_score
             # Max possible: 0.50 + 0.20 + 0.15 + 0.15 = 1.0
-
-            # Soft gate: reject below minimum confidence
-            if confidence < min_conf:
-                continue
+            # Confidence is informational only (live bot uses it for sizing,
+            # not as a hard reject gate)
 
             # DVOL-based R:R scaling
             eff_min_rr = min_rr * rr_scale_arr[rel_i]
