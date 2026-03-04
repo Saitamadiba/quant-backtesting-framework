@@ -1,35 +1,34 @@
 """
-Liquidity Raid adapter for WFO engine — v2.
+Liquidity Raid adapter for WFO engine — v3 (live-faithful).
 
 Pure pandas/numpy signal generation, no backtrader dependency.
-Optimized: vectorized sweep detection with numpy boolean masks.
 
-v2 improvements (based on WFO analysis of 4,376 OOS trades):
-    - R:R corrected to 0.5:0.75 (MFE data: 79.6% reach 0.5R, 68.7% reach 0.75R)
-    - Trailing stop to breakeven after TP1 (via TradeSimulator)
-    - Confidence scoring flipped to mean-reversion: rewards COUNTER-trend
-      structure and HTF (WFO showed trend-aligned signals are anti-predictive)
-    - EMA trend removed from hard gate (was forcing trend-aligned signals only)
-    - Param space tightened to reduce IS/OOS overfitting (was -0.011 ratio)
-
-v3 live-faithful changes:
-    - Removed volatile regime filter (not present in live bot)
-    - Removed displacement filter (not present in live bot)
-    - Confidence threshold changed from hard gate to informational only
-      (live bot uses confidence for sizing, not rejection)
-    - Volatility-adaptive SL multiplier retained (soft layer, used in live bot)
+v3 live-faithful rewrite (shadow backtest alignment):
+    - Single-session levels: uses most recent Asia/London session only
+      (matches session_manager.py:146-187, no rolling aggregation)
+    - Multi-bar sweep state machine: sweep detection and confirmation
+      can occur on different bars (matches session_manager.py:256-366)
+    - Structural bias gate: one direction per bar from StructureBias,
+      falling back to EMA50 vs EMA200 (matches strategy.py:371-382)
+    - London High shorts disabled (0% historical WR, config_base.py:226)
+    - Min sweep depth 0.30 ATR without DVOL (matches config_base.py:244)
+    - London sweeps only in NY killzone (matches session_manager.py:306)
+    - Price reclaim: SWEEP_DETECTED → WAITING if close returns beyond
+      level (matches session_manager.py:192-229)
 
 Selectivity architecture:
     Hard gates (reject if failed):
         - Killzone (London 02-08 ET, NY 08-16 ET)
-        - Candle body >= min_body_pct
-        - Sweep detection (price crosses session level + closes back)
-        - IV-Adaptive min sweep depth (DVOL-based)
+        - Structural bias (LONG or SHORT per bar; NONE = skip)
+        - Sweep state machine (level break → directional confirmation)
+        - Candle body >= min_body_pct (on confirmation bar)
+        - IV-Adaptive min sweep depth (DVOL-based, 0.30 ATR fallback)
+        - London High shorts blocked
 
     Soft scoring (mean-reversion confidence):
         - Sweep depth (0-0.50, primary quality signal)
-        - Counter-trend Structure Bias (0-0.20, rewards opposing direction)
-        - Counter-trend HTF Alignment (0-0.15, rewards opposing HTF)
+        - Counter-trend Structure Bias (0-0.20)
+        - Counter-trend HTF Alignment (0-0.15)
         - Structure confidence bonus (0-0.15)
 
     Confidence score is informational (no hard reject threshold).
@@ -38,14 +37,10 @@ Session definitions (Eastern Time, via zoneinfo):
     Asia:      19:00-23:59 ET  ->  establishes liquidity pool
     London KZ: 02:00-08:00 ET  ->  trade Asia level sweeps
     NY KZ:     08:00-16:00 ET  ->  trade Asia + London level sweeps
-
-WFO Results (v1 baseline):
-    BTC 15m: -0.010R / 50.5% WR / 899 trades
-    BTC 1h:  -0.243R / 25.6% WR / 1243 trades
-    ETH 15m: -0.324R / 26.8% WR / 2234 trades
 """
 
-from typing import Dict, List, Any, Tuple
+from datetime import date as date_type, timedelta
+from typing import Dict, List, Any, Tuple, Optional
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -54,6 +49,11 @@ import pandas as pd
 _ET = ZoneInfo("America/New_York")
 
 from .base_adapter import StrategyAdapter, ParamSpec, Signal
+
+# Sweep state machine constants
+_WAITING = 0
+_SWEEP_DETECTED = 1
+_TRADED = 2
 
 
 class LiquidityRaidAdapter(StrategyAdapter):
@@ -71,8 +71,6 @@ class LiquidityRaidAdapter(StrategyAdapter):
 
         R:R calibrated from MFE analysis: 79.6% of trades reach 0.5R,
         68.7% reach 0.75R, only 58.7% reach 1.0R → 0.5R default target.
-        min_confidence lowered because WFO showed high-confidence signals
-        are anti-predictive (mean-reversion benefits from counter-trend).
         """
         return [
             ParamSpec("session_lookback",   12,    6,     18,    6,    'int'),
@@ -94,26 +92,23 @@ class LiquidityRaidAdapter(StrategyAdapter):
         """
         Generate Liquidity Raid trade signals over [scan_start_idx, scan_end_idx).
 
-        Hard gates: killzone, body size, sweep detection, DVOL depth.
-        Soft scoring: EMA bias, structure bias, HTF alignment, vol-adaptive SL.
-        Confidence threshold (optimizable) controls selectivity.
+        Uses a sequential state machine matching the live bot's sweep detection:
+        - Single-session levels (no rolling aggregation)
+        - Multi-bar sweep: detection on bar N, confirmation on bar N or later
+        - Structural bias gate: one direction per bar
+        - Price reclaim invalidates unconsumed sweeps
         """
         # ── Extract parameters ──────────────────────────────────────
-        lookback = int(params.get('session_lookback', 12))
         atr_mult = params.get('atr_sl_multiplier', 2.5)
         min_rr = params.get('min_rr', 1.0)
         max_rr = params.get('max_rr', 1.5)
         min_body = params.get('min_body_pct', 0.15)
-        sweep_tol = params.get('sweep_tolerance', 0.002)
         min_conf = params.get('min_confidence', 0.35)
 
         if max_rr < min_rr:
             max_rr = min_rr
 
-        # ── Session levels (loops over sessions, not bars) ──────────
-        levels = _compute_session_levels(df, lookback)
-
-        # ── Numpy arrays for vectorized detection ───────────────────
+        # ── Slice to scan range ───────────────────────────────────
         s = scan_start_idx
         e = min(scan_end_idx, len(df))
         if e <= s:
@@ -121,26 +116,17 @@ class LiquidityRaidAdapter(StrategyAdapter):
 
         sl = slice(s, e)
         scan_len = e - s
+
+        # ── Pre-compute numpy arrays ─────────────────────────────
         opens  = df['Open'].values[sl]
         highs  = df['High'].values[sl]
         lows   = df['Low'].values[sl]
         closes = df['Close'].values[sl]
         atrs   = df['ATR'].values[sl]
 
-        asia_hi   = levels['asia_high'][sl]
-        asia_lo   = levels['asia_low'][sl]
-        london_hi = levels['london_high'][sl]
-        london_lo = levels['london_low'][sl]
-        is_kz     = levels['is_killzone'][sl]
-
-        # ── HARD GATE: EMA trend bias (baseline direction) ──────────
         ema50 = df['EMA50'].values[sl]
         ema200 = df['EMA200'].values[sl]
-        is_long_ema = ema50 > ema200
-        is_short_ema = ema50 < ema200
 
-        # ── SOFT LAYER 1: Price Structure Bias ──────────────────────
-        # +0.25 confidence if structure agrees, 0 if neutral, -0.10 if against
         has_structure = 'StructureBias' in df.columns
         if has_structure:
             structure_bias = df['StructureBias'].values[sl]
@@ -149,17 +135,15 @@ class LiquidityRaidAdapter(StrategyAdapter):
             structure_bias = np.zeros(scan_len)
             struct_conf_arr = np.zeros(scan_len)
 
-        # ── SOFT LAYER 2: MTF (4H) Alignment ───────────────────────
-        # +0.20 confidence if HTF agrees, 0 if not
         has_htf = 'HTF_Bullish' in df.columns
         if has_htf:
             htf_bullish = df['HTF_Bullish'].values[sl]
             htf_bearish = df['HTF_Bearish'].values[sl]
         else:
-            htf_bullish = is_long_ema
-            htf_bearish = is_short_ema
+            htf_bullish = ema50 > ema200
+            htf_bearish = ema50 < ema200
 
-        # ── HARD GATE: DVOL-based IV-adaptive sweep depth ───────────
+        # ── DVOL-based IV-adaptive sweep depth ────────────────────
         has_dvol = 'DVOL' in df.columns
         if has_dvol:
             dvol = df['DVOL'].values[sl]
@@ -173,10 +157,10 @@ class LiquidityRaidAdapter(StrategyAdapter):
                 valid_dvol & (dvol >= 45) & (dvol < 65), 0.75, rr_scale_arr
             )
         else:
-            min_depth_arr = np.full(scan_len, 0.15)
+            min_depth_arr = np.full(scan_len, 0.30)   # Fix 5: was 0.15
             rr_scale_arr = np.ones(scan_len)
 
-        # ── SOFT LAYER 3: Volatility-Adaptive SL ───────────────────
+        # ── Volatility-Adaptive SL ────────────────────────────────
         has_pctile = 'ATR_Pctile20' in df.columns
         if has_pctile:
             atr_pctile = df['ATR_Pctile20'].values[sl]
@@ -188,7 +172,7 @@ class LiquidityRaidAdapter(StrategyAdapter):
         else:
             sl_vol_mult = np.ones(scan_len)
 
-        # ── Vectorized candle properties ────────────────────────────
+        # ── Candle properties ─────────────────────────────────────
         candle_range = highs - lows
         candle_range_safe = np.maximum(candle_range, 1e-10)
         body_pct = np.abs(closes - opens) / candle_range_safe
@@ -196,119 +180,258 @@ class LiquidityRaidAdapter(StrategyAdapter):
         is_bearish = closes < opens
         valid_atr = (atrs > 0) & ~np.isnan(atrs)
 
-        # Hard-gate base: KZ + candle direction + body + ATR
-        # EMA trend removed from hard gate — LR is mean-reversion and
-        # counter-trend sweeps have better edge. EMA/HTF remain as
-        # soft confidence layers (rewarding counter-trend setups).
-        long_base = (
-            is_kz & is_bullish
-            & (body_pct >= min_body) & valid_atr
-        )
-        short_base = (
-            is_kz & is_bearish
-            & (body_pct >= min_body) & valid_atr
+        # ── Pre-compute ET hours and session info ─────────────────
+        et_info = _compute_et_info(df.index)
+        et_hours_full = et_info['et_hours']
+        et_dates_full = et_info['et_dates']
+
+        et_hours_scan = et_hours_full[sl]
+        et_dates_scan = et_dates_full[s:e]
+
+        is_london = (et_hours_scan >= 2) & (et_hours_scan < 8)
+        is_ny     = (et_hours_scan >= 8) & (et_hours_scan < 16)
+        is_kz     = is_london | is_ny
+
+        # ── Pre-compute single-session levels lookup ──────────────
+        all_highs = df['High'].values
+        all_lows = df['Low'].values
+        asia_sess, london_sess = _build_session_lookups(
+            et_hours_full, et_dates_full, all_highs, all_lows
         )
 
-        # Session level validity
-        v_asia_lo   = ~np.isnan(asia_lo) & (asia_lo > 0)
-        v_london_lo = ~np.isnan(london_lo) & (london_lo > 0)
-        v_asia_hi   = ~np.isnan(asia_hi) & (asia_hi > 0)
-        v_london_hi = ~np.isnan(london_hi) & (london_hi > 0)
+        # ── State machine: sequential scan ────────────────────────
+        # States per level (reset each session date)
+        asia_lo_state = _WAITING
+        asia_hi_state = _WAITING
+        london_lo_state = _WAITING
+        london_hi_state = _WAITING
 
-        # ── Vectorized sweep detection (hard gate) ──────────────────
-        asia_lo_sweep = (
-            long_base & v_asia_lo
-            & (lows <= asia_lo * (1 - sweep_tol))
-            & (closes > asia_lo)
-        )
-        london_lo_sweep = (
-            long_base & v_london_lo
-            & (lows <= london_lo * (1 - sweep_tol))
-            & (closes > london_lo)
-        )
-        asia_hi_sweep = (
-            short_base & v_asia_hi
-            & (highs >= asia_hi * (1 + sweep_tol))
-            & (closes < asia_hi)
-        )
-        london_hi_sweep = (
-            short_base & v_london_hi
-            & (highs >= london_hi * (1 + sweep_tol))
-            & (closes < london_hi)
-        )
+        asia_lo_sweep_price = 0.0
+        asia_hi_sweep_price = 0.0
+        london_lo_sweep_price = 0.0
+        london_hi_sweep_price = 0.0
 
-        long_sweep = asia_lo_sweep | london_lo_sweep
-        short_sweep = asia_hi_sweep | london_hi_sweep
-        any_sweep = long_sweep | short_sweep
+        # Current session levels (scalars)
+        cur_asia_hi = np.nan
+        cur_asia_lo = np.nan
+        cur_london_hi = np.nan
+        cur_london_lo = np.nan
 
-        sweep_rel_indices = np.where(any_sweep)[0]
-        if len(sweep_rel_indices) == 0:
-            return []
+        # Track session dates for state reset
+        last_asia_date = None
+        last_london_date = None
 
-        # ── Build Signal objects with cooldown + soft scoring ───────
         signals: List[Signal] = []
         min_cooldown = 4
         last_sig_rel = -min_cooldown
 
-        for rel_i in sweep_rel_indices:
-            if rel_i - last_sig_rel < min_cooldown:
+        for rel_i in range(scan_len):
+            # Skip if not in killzone
+            if not is_kz[rel_i]:
                 continue
 
             abs_i = s + rel_i
+            if not valid_atr[rel_i]:
+                continue
 
             atr_val = atrs[rel_i]
+            h_et = et_hours_scan[rel_i]
+            bar_date = et_dates_scan[rel_i]
 
-            # Direction and sweep depth
-            if long_sweep[rel_i]:
-                direction = 'LONG'
-                level = asia_lo[rel_i] if asia_lo_sweep[rel_i] else london_lo[rel_i]
-                depth = level - lows[rel_i]
+            # ── Update session levels (single session) ────────────
+            # Asia: use yesterday's session if before noon ET, else today's
+            asia_date = bar_date - timedelta(days=1) if h_et < 12 else bar_date
+            if asia_date != last_asia_date:
+                sess = asia_sess.get(asia_date)
+                if sess is not None:
+                    cur_asia_hi, cur_asia_lo = sess
+                    # Reset state machine for new session
+                    asia_lo_state = _WAITING
+                    asia_hi_state = _WAITING
+                    asia_lo_sweep_price = 0.0
+                    asia_hi_sweep_price = 0.0
+                    last_asia_date = asia_date
+
+            # London: only update when in NY killzone
+            london_date = bar_date
+            if is_ny[rel_i] and london_date != last_london_date:
+                sess = london_sess.get(london_date)
+                if sess is not None:
+                    cur_london_hi, cur_london_lo = sess
+                    london_lo_state = _WAITING
+                    london_hi_state = _WAITING
+                    london_lo_sweep_price = 0.0
+                    london_hi_sweep_price = 0.0
+                    last_london_date = london_date
+
+            # ── Determine directional bias (Fix 3) ────────────────
+            sb = structure_bias[rel_i]
+            if sb > 0:
+                bias = 1   # LONG
+            elif sb < 0:
+                bias = -1  # SHORT
             else:
-                direction = 'SHORT'
-                level = asia_hi[rel_i] if asia_hi_sweep[rel_i] else london_hi[rel_i]
-                depth = highs[rel_i] - level
+                # Fall back to EMA
+                if ema50[rel_i] > ema200[rel_i]:
+                    bias = 1
+                elif ema50[rel_i] < ema200[rel_i]:
+                    bias = -1
+                else:
+                    continue  # No bias = no signal
 
-            # HARD GATE: IV-adaptive minimum sweep depth
+            close_val = closes[rel_i]
+            low_val = lows[rel_i]
+            high_val = highs[rel_i]
+
+            # ── Price reclaim check (Fix 2) ───────────────────────
+            # Reset SWEEP_DETECTED → WAITING if price closes beyond level
+            if asia_lo_state == _SWEEP_DETECTED:
+                if not np.isnan(cur_asia_lo) and close_val > cur_asia_lo:
+                    asia_lo_state = _WAITING
+                    asia_lo_sweep_price = 0.0
+
+            if london_lo_state == _SWEEP_DETECTED:
+                if not np.isnan(cur_london_lo) and close_val > cur_london_lo:
+                    london_lo_state = _WAITING
+                    london_lo_sweep_price = 0.0
+
+            if asia_hi_state == _SWEEP_DETECTED:
+                if not np.isnan(cur_asia_hi) and close_val < cur_asia_hi:
+                    asia_hi_state = _WAITING
+                    asia_hi_sweep_price = 0.0
+
+            if london_hi_state == _SWEEP_DETECTED:
+                if not np.isnan(cur_london_hi) and close_val < cur_london_hi:
+                    london_hi_state = _WAITING
+                    london_hi_sweep_price = 0.0
+
+            # ── Sweep detection (Fix 2 + Fix 3 bias gate) ─────────
+            # LONG bias: check low sweeps (sellside liquidity)
+            if bias == 1:
+                # Asia low
+                if (asia_lo_state != _TRADED
+                        and not np.isnan(cur_asia_lo) and cur_asia_lo > 0):
+                    if low_val < cur_asia_lo:
+                        if asia_lo_state == _WAITING:
+                            asia_lo_state = _SWEEP_DETECTED
+                            asia_lo_sweep_price = low_val
+                        elif low_val < asia_lo_sweep_price:
+                            asia_lo_sweep_price = low_val
+
+                # London low (only in NY killzone — Fix 6)
+                if (is_ny[rel_i]
+                        and london_lo_state != _TRADED
+                        and not np.isnan(cur_london_lo) and cur_london_lo > 0):
+                    if low_val < cur_london_lo:
+                        if london_lo_state == _WAITING:
+                            london_lo_state = _SWEEP_DETECTED
+                            london_lo_sweep_price = low_val
+                        elif low_val < london_lo_sweep_price:
+                            london_lo_sweep_price = low_val
+
+            # SHORT bias: check high sweeps (buyside liquidity)
+            elif bias == -1:
+                # Asia high
+                if (asia_hi_state != _TRADED
+                        and not np.isnan(cur_asia_hi) and cur_asia_hi > 0):
+                    if high_val > cur_asia_hi:
+                        if asia_hi_state == _WAITING:
+                            asia_hi_state = _SWEEP_DETECTED
+                            asia_hi_sweep_price = high_val
+                        elif high_val > asia_hi_sweep_price:
+                            asia_hi_sweep_price = high_val
+
+                # London high (only in NY killzone — Fix 6)
+                # Fix 4: London High shorts disabled (0% historical WR)
+                # Don't even detect London High sweeps since they'd all
+                # be SHORT and rejected anyway.
+
+            # ── Confirmation check (Fix 2) ────────────────────────
+            # A directional candle confirms a pending sweep.
+            # Check all levels that are SWEEP_DETECTED.
+            confirmed_level = None
+            confirmed_direction = None
+            confirmed_sweep_price = 0.0
+            confirmed_level_val = np.nan
+
+            # Priority: Asia levels first (checked first in live bot)
+            if bias == 1:
+                # Check Asia low confirmation (LONG)
+                if (asia_lo_state == _SWEEP_DETECTED
+                        and is_bullish[rel_i]
+                        and body_pct[rel_i] >= min_body):
+                    confirmed_level = 'asia_low'
+                    confirmed_direction = 'LONG'
+                    confirmed_sweep_price = asia_lo_sweep_price
+                    confirmed_level_val = cur_asia_lo
+
+                # Check London low confirmation (LONG, NY only)
+                elif (is_ny[rel_i]
+                      and london_lo_state == _SWEEP_DETECTED
+                      and is_bullish[rel_i]
+                      and body_pct[rel_i] >= min_body):
+                    confirmed_level = 'london_low'
+                    confirmed_direction = 'LONG'
+                    confirmed_sweep_price = london_lo_sweep_price
+                    confirmed_level_val = cur_london_lo
+
+            elif bias == -1:
+                # Check Asia high confirmation (SHORT)
+                if (asia_hi_state == _SWEEP_DETECTED
+                        and is_bearish[rel_i]
+                        and body_pct[rel_i] >= min_body):
+                    confirmed_level = 'asia_high'
+                    confirmed_direction = 'SHORT'
+                    confirmed_sweep_price = asia_hi_sweep_price
+                    confirmed_level_val = cur_asia_hi
+
+                # London high shorts blocked (Fix 4) — no check
+
+            if confirmed_level is None:
+                continue
+
+            # ── Cooldown ──────────────────────────────────────────
+            if rel_i - last_sig_rel < min_cooldown:
+                continue
+
+            # ── Sweep depth check (Fix 5) ─────────────────────────
+            depth = abs(confirmed_sweep_price - confirmed_level_val)
             depth_atr = depth / atr_val
             if depth_atr < min_depth_arr[rel_i]:
                 continue
 
-            # ── Composite confidence (mean-reversion friendly) ──────
-            # Sweep depth: primary quality signal (0.0 to 0.50)
+            # ── Mark level as TRADED ──────────────────────────────
+            if confirmed_level == 'asia_low':
+                asia_lo_state = _TRADED
+            elif confirmed_level == 'london_low':
+                london_lo_state = _TRADED
+            elif confirmed_level == 'asia_high':
+                asia_hi_state = _TRADED
+
+            # ── Composite confidence (mean-reversion friendly) ────
             depth_c = min(depth_atr / 1.0, 1.0) * 0.50
 
-            # SOFT LAYER 1: Structure bias — COUNTER-trend is better
-            # for mean-reversion. Reward when structure opposes direction.
-            sb = structure_bias[rel_i]
-            if direction == 'LONG':
-                struct_score = 0.20 if sb < 0 else (0.05 if sb == 0 else 0.0)
+            sb_val = structure_bias[rel_i]
+            if confirmed_direction == 'LONG':
+                struct_score = 0.20 if sb_val < 0 else (0.05 if sb_val == 0 else 0.0)
             else:
-                struct_score = 0.20 if sb > 0 else (0.05 if sb == 0 else 0.0)
+                struct_score = 0.20 if sb_val > 0 else (0.05 if sb_val == 0 else 0.0)
 
-            # SOFT LAYER 2: HTF alignment — COUNTER-trend = better setup
-            if direction == 'LONG':
+            if confirmed_direction == 'LONG':
                 htf_score = 0.15 if htf_bearish[rel_i] else 0.0
             else:
                 htf_score = 0.15 if htf_bullish[rel_i] else 0.0
 
-            # SOFT LAYER 3: Structure confidence bonus (0 to 0.15)
             struct_conf_score = float(struct_conf_arr[rel_i]) * 0.15
-
             confidence = depth_c + struct_score + htf_score + struct_conf_score
-            # Max possible: 0.50 + 0.20 + 0.15 + 0.15 = 1.0
-            # Confidence is informational only (live bot uses it for sizing,
-            # not as a hard reject gate)
 
-            # DVOL-based R:R scaling
+            # ── R:R and entry/exit calculation ────────────────────
             eff_min_rr = min_rr * rr_scale_arr[rel_i]
             eff_max_rr = max_rr * rr_scale_arr[rel_i]
-
-            # Volatility-adaptive SL distance
             vol_adjusted_mult = atr_mult * sl_vol_mult[rel_i]
 
-            # Entry at close of signal bar (no intra-bar look-ahead)
-            entry = closes[rel_i]
-            if direction == 'LONG':
+            entry = close_val
+            if confirmed_direction == 'LONG':
                 stop_loss = entry - atr_val * vol_adjusted_mult
                 if stop_loss >= entry:
                     continue
@@ -326,7 +449,7 @@ class LiquidityRaidAdapter(StrategyAdapter):
             signals.append(Signal(
                 idx=abs_i,
                 time=df.index[abs_i],
-                direction=direction,
+                direction=confirmed_direction,
                 entry_price=entry,
                 stop_loss=stop_loss,
                 take_profit_1=tp1,
@@ -359,12 +482,121 @@ def _utc_to_et_hours(index: pd.DatetimeIndex) -> np.ndarray:
     return np.asarray(et_index.hour, dtype=np.int32)
 
 
+def _compute_et_info(index: pd.DatetimeIndex) -> Dict[str, Any]:
+    """Pre-compute ET hours and dates for the full DataFrame index."""
+    if index.tz is None:
+        utc_index = index.tz_localize('UTC')
+    else:
+        utc_index = index.tz_convert('UTC')
+    et_index = utc_index.tz_convert(_ET)
+    et_hours = np.asarray(et_index.hour, dtype=np.int32)
+    et_dates = np.array([d.date() for d in et_index], dtype=object)
+    return {'et_hours': et_hours, 'et_dates': et_dates}
+
+
+def _build_session_lookups(
+    et_hours: np.ndarray,
+    et_dates: np.ndarray,
+    highs: np.ndarray,
+    lows: np.ndarray,
+) -> Tuple[Dict, Dict]:
+    """Build single-session H/L lookup tables.
+
+    Returns:
+        (asia_sessions, london_sessions) where each is
+        dict[date_type, (high, low)] for completed sessions.
+    """
+    n = len(et_hours)
+
+    # Detect session boundaries via hour masks
+    is_asia = et_hours >= 19       # 19:00-23:59 ET
+    is_london = (et_hours >= 2) & (et_hours < 8)  # 02:00-08:00 ET
+
+    asia_sessions: Dict[date_type, Tuple[float, float]] = {}
+    london_sessions: Dict[date_type, Tuple[float, float]] = {}
+
+    # Group bars by session date and type
+    # Asia: bars with hour >= 19, keyed by that bar's ET date
+    # London: bars with hour 2-7, keyed by that bar's ET date
+    curr_asia_date = None
+    curr_asia_bars: List[int] = []
+    curr_london_date = None
+    curr_london_bars: List[int] = []
+
+    for i in range(n):
+        h = et_hours[i]
+        d = et_dates[i]
+
+        # Asia session tracking (19:00-23:59)
+        if h >= 19:
+            if d != curr_asia_date:
+                # Finalize previous Asia session
+                if curr_asia_bars:
+                    bar_idx = np.array(curr_asia_bars)
+                    asia_sessions[curr_asia_date] = (
+                        float(np.max(highs[bar_idx])),
+                        float(np.min(lows[bar_idx])),
+                    )
+                curr_asia_date = d
+                curr_asia_bars = [i]
+            else:
+                curr_asia_bars.append(i)
+        else:
+            # Finalize Asia if transitioning out
+            if curr_asia_bars and curr_asia_date is not None:
+                bar_idx = np.array(curr_asia_bars)
+                asia_sessions[curr_asia_date] = (
+                    float(np.max(highs[bar_idx])),
+                    float(np.min(lows[bar_idx])),
+                )
+                curr_asia_bars = []
+
+        # London session tracking (02:00-07:59)
+        if 2 <= h < 8:
+            if d != curr_london_date:
+                if curr_london_bars:
+                    bar_idx = np.array(curr_london_bars)
+                    london_sessions[curr_london_date] = (
+                        float(np.max(highs[bar_idx])),
+                        float(np.min(lows[bar_idx])),
+                    )
+                curr_london_date = d
+                curr_london_bars = [i]
+            else:
+                curr_london_bars.append(i)
+        else:
+            if curr_london_bars and curr_london_date is not None:
+                bar_idx = np.array(curr_london_bars)
+                london_sessions[curr_london_date] = (
+                    float(np.max(highs[bar_idx])),
+                    float(np.min(lows[bar_idx])),
+                )
+                curr_london_bars = []
+
+    # Finalize any trailing sessions
+    if curr_asia_bars and curr_asia_date is not None:
+        bar_idx = np.array(curr_asia_bars)
+        asia_sessions[curr_asia_date] = (
+            float(np.max(highs[bar_idx])),
+            float(np.min(lows[bar_idx])),
+        )
+    if curr_london_bars and curr_london_date is not None:
+        bar_idx = np.array(curr_london_bars)
+        london_sessions[curr_london_date] = (
+            float(np.max(highs[bar_idx])),
+            float(np.min(lows[bar_idx])),
+        )
+
+    return asia_sessions, london_sessions
+
+
+# Keep legacy functions for backward compatibility with other adapters
 def _compute_session_levels(
     df: pd.DataFrame, lookback_bars: int,
 ) -> Dict[str, np.ndarray]:
-    """Compute session H/L via boundary detection.
+    """Compute session H/L via boundary detection (legacy, rolling aggregation).
 
-    Loops over ~365 session boundaries per year (fast), not over each bar.
+    Used by non-LR adapters. LR adapter uses _build_session_lookups() instead.
     """
     n = len(df)
     highs_arr = df['High'].values
@@ -399,7 +631,7 @@ def _session_hl(
     n: int,
     n_sessions: int,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Extract rolling session H/L from session boundary transitions."""
+    """Extract rolling session H/L from session boundary transitions (legacy)."""
     diff = np.diff(session_mask.astype(np.int8), prepend=0)
     starts = np.where(diff == 1)[0]
     ends   = np.where(diff == -1)[0]

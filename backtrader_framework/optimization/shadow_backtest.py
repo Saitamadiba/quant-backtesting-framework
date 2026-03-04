@@ -386,9 +386,10 @@ class ShadowBacktest:
         live_trades: pd.DataFrame,
         shadow_trades: List[TradeResult],
         df: pd.DataFrame,
-        bar_tolerance: int = 2,
+        bar_tolerance: int = 8,
     ) -> tuple:
         """Match live trades to shadow trades by time proximity and direction.
+        Default ±8 bars (±2h on 15m) accounts for 5M execution timing.
 
         Returns:
             (matched_list, missed_list, phantom_list)
