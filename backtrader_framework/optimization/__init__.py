@@ -25,6 +25,8 @@ from .statistics import StatisticalTests, MonteCarloAnalysis
 from .data_fetcher import DataFetcher
 from .hmm_regime import HMMRegimeAssessor
 from .strategy_adapters import LiquidityRaidLiveAdapter
+from .bayesian_edge import BayesianEdgeEstimator, BayesianPrior
+from .shadow_backtest import ShadowBacktest
 
 __all__ = [
     'WFOEngine',
@@ -41,4 +43,7 @@ __all__ = [
     'DataFetcher',
     'HMMRegimeAssessor',
     'LiquidityRaidLiveAdapter',
+    'BayesianEdgeEstimator',
+    'BayesianPrior',
+    'ShadowBacktest',
 ]
