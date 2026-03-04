@@ -1563,6 +1563,15 @@ class WFOEngine:
         if timing_analysis:
             result['timing_analysis'] = timing_analysis
 
+        # Bayesian edge estimation
+        if len(oos) >= 10:
+            try:
+                from .bayesian_edge import BayesianEdgeEstimator
+                bayes = BayesianEdgeEstimator.from_trade_results(oos, prior='skeptical')
+                result['bayesian_edge'] = bayes.summary()
+            except Exception as e:
+                logger.warning(f"Bayesian edge estimation failed: {e}")
+
         return result
 
     def _empty_result(self, symbol: str, timeframe: str, reason: str) -> Dict:
