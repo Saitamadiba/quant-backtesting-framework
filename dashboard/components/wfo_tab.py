@@ -17,11 +17,15 @@ def _get_adapter(strategy_name: str):
 
 
 def _get_symbols():
-    return ["BTC", "ETH", "NQ"]
+    from config import STRATEGIES
+    all_syms = set()
+    for s in STRATEGIES.values():
+        all_syms.update(s.get("symbols", []))
+    return sorted(all_syms)
 
 
 def _get_timeframes():
-    return ["15m", "1h", "4h"]
+    return ["5m", "15m", "1h", "4h"]
 
 
 def render_wfo_tab():
@@ -1166,7 +1170,7 @@ def _render_regime_adaptive_section(result: dict):
 
 def _render_saved_results():
     """Render the saved results section with load capability."""
-    from backtrader_framework.optimization.persistence import list_wfo_results, load_wfo_result
+    from data.wfo_loader import list_wfo_results, load_wfo_result
 
     saved = list_wfo_results()
     if not saved:
@@ -1181,6 +1185,6 @@ def _render_saved_results():
     )
 
     if st.button("Load", key="wfo_load_saved"):
-        result = load_wfo_result(saved[selected_idx]['filepath'])
+        result = load_wfo_result(saved[selected_idx]['path'])
         st.session_state["wfo_result"] = result
         st.rerun()
