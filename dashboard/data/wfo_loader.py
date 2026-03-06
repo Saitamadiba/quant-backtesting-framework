@@ -110,6 +110,35 @@ def get_latest_shadow(strategy: str, symbol: str) -> dict | None:
     return None
 
 
+def delete_wfo_result(path: str) -> bool:
+    """Delete a single WFO result file and clear cache."""
+    try:
+        p = Path(path)
+        if p.exists() and p.suffix == ".json" and p.parent == RESULTS_DIR:
+            p.unlink()
+            list_wfo_results.clear()
+            load_wfo_result.clear()
+            return True
+    except OSError:
+        pass
+    return False
+
+
+def delete_all_wfo_results() -> int:
+    """Delete all WFO result files. Returns count deleted."""
+    count = 0
+    if RESULTS_DIR.exists():
+        for p in RESULTS_DIR.glob("wfo_*.json"):
+            try:
+                p.unlink()
+                count += 1
+            except OSError:
+                pass
+    list_wfo_results.clear()
+    load_wfo_result.clear()
+    return count
+
+
 def load_meta_strategy_result() -> dict | None:
     """Load the latest meta-strategy analysis result (saved by page 12)."""
     meta_path = RESULTS_DIR / "meta_strategy_latest.json"

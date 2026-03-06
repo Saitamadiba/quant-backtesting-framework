@@ -1184,7 +1184,15 @@ def _render_saved_results():
         key="wfo_saved_select",
     )
 
-    if st.button("Load", key="wfo_load_saved"):
-        result = load_wfo_result(saved[selected_idx]['path'])
-        st.session_state["wfo_result"] = result
-        st.rerun()
+    _btn_c1, _btn_c2 = st.columns([1, 1])
+    with _btn_c1:
+        if st.button("Load", key="wfo_load_saved"):
+            result = load_wfo_result(saved[selected_idx]['path'])
+            st.session_state["wfo_result"] = result
+            st.rerun()
+    with _btn_c2:
+        if st.button("Delete", key="wfo_delete_saved"):
+            from data.wfo_loader import delete_wfo_result
+            if delete_wfo_result(saved[selected_idx]['path']):
+                st.toast("Deleted WFO result.")
+                st.rerun()

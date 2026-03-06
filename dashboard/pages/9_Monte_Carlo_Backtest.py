@@ -26,7 +26,7 @@ from config import (
 from data.data_loader import get_all_trades
 from data.binance_helpers import fetch_binance_candles, calculate_indicators
 from components.charts import mc_distribution_chart, mc_equity_fan
-from backtrader_framework.optimization.persistence import list_wfo_results, load_wfo_result
+from data.wfo_loader import list_wfo_results, load_wfo_result
 
 BACKTEST_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -384,7 +384,7 @@ if data_source == "WFO OOS Trades":
 
     if _wfo_filtered:
         _wfo_labels = {
-            i: f"{r['filename']}  ({r['timestamp']})"
+            i: f"{Path(r['path']).name}  ({r['timestamp']})"
             for i, r in enumerate(_wfo_filtered)
         }
         _wfo_idx = st.selectbox(
@@ -509,8 +509,7 @@ if run_btn:
 
                     # Store for metadata saving later
                     _selected_wfo = {
-                        'filepath': filepath,
-                        'filename': Path(filepath).name,
+                        'path': filepath,
                         'timestamp': '',
                     }
                 except Exception as e:
@@ -519,8 +518,8 @@ if run_btn:
                     st.code(traceback.format_exc())
                     st.stop()
             else:
-                st.write(f"Loading WFO OOS result: **{_selected_wfo['filename']}**...")
-                wfo_data = load_wfo_result(_selected_wfo['filepath'])
+                st.write(f"Loading WFO OOS result: **{Path(_selected_wfo['path']).name}**...")
+                wfo_data = load_wfo_result(_selected_wfo['path'])
 
             oos_equity = wfo_data.get('oos_equity', [])
             oos_stats = wfo_data.get('oos_stats', {})
@@ -762,8 +761,8 @@ if run_btn:
 
     # Add WFO metadata if applicable
     if data_source == "WFO OOS Trades" and _selected_wfo:
-        result_data["wfo_filepath"] = _selected_wfo['filepath']
-        result_data["wfo_filename"] = _selected_wfo['filename']
+        result_data["wfo_filepath"] = _selected_wfo['path']
+        result_data["wfo_filename"] = Path(_selected_wfo['path']).name
         result_data["risk_per_trade"] = _risk_per_trade
         result_data["wfo_oos_stats"] = {
             k: oos_stats.get(k) for k in [
@@ -821,6 +820,40 @@ if result_files:
             "Success Rate": st.column_config.TextColumn("Success Rate", help="Percentage of Monte Carlo runs that ended profitably. Above 80% is robust; below 60% is concerning."),
             "Mean Return": st.column_config.TextColumn("Mean Return", help="Average return across all simulated equity paths. This is the expected outcome, but individual runs can vary widely."),
         })
+
+        # ── Delete controls ──────────────────────────────────────────────
+        _del_c1, _del_c2 = st.columns([3, 1])
+        with _del_c1:
+            _del_idx = st.selectbox(
+                "Select run to delete",
+                range(len(rows)),
+                format_func=lambda i: f"{rows[i]['Run ID']} — {rows[i]['Strategy']} {rows[i]['Symbol']} ({rows[i]['Time']})",
+                key="mc_delete_select",
+            )
+        with _del_c2:
+            st.write("")  # vertical spacing
+            if st.button("Delete Run", key="mc_delete_one"):
+                _target = BACKTEST_RESULTS_DIR / rows[_del_idx]["file"]
+                if _target.exists():
+                    _target.unlink()
+                    st.toast("Deleted MC run.")
+                    st.rerun()
+
+        if st.button("Delete All MC Results", key="mc_delete_all"):
+            st.session_state["mc_confirm_delete_all"] = True
+
+        if st.session_state.get("mc_confirm_delete_all"):
+            st.warning(f"Delete all {len(result_files)} Monte Carlo result files?")
+            _cc1, _cc2 = st.columns(2)
+            if _cc1.button("Confirm", key="mc_confirm_yes"):
+                for _fp in result_files:
+                    _fp.unlink(missing_ok=True)
+                st.session_state["mc_confirm_delete_all"] = False
+                st.toast(f"Deleted {len(result_files)} MC files.")
+                st.rerun()
+            if _cc2.button("Cancel", key="mc_confirm_no"):
+                st.session_state["mc_confirm_delete_all"] = False
+                st.rerun()
 else:
     st.info("No past backtest runs found. Run one above!")
 
