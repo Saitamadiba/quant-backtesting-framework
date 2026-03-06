@@ -8,7 +8,10 @@ import numpy as np
 
 from config import STRATEGY_COLORS, STRATEGIES
 from components.charts import REGIME_COLORS
-from data.wfo_loader import list_wfo_results, load_wfo_result, get_latest_wfo
+from data.wfo_loader import (
+    list_wfo_results, load_wfo_result, get_latest_wfo,
+    delete_wfo_result, delete_all_wfo_results,
+)
 
 
 def _format_ci(ci):
@@ -48,6 +51,34 @@ timeframes = sorted(
      if r["strategy"] == sel_strategy and r["symbol"] == sel_symbol}
 )
 sel_tf = st.sidebar.selectbox("Timeframe", timeframes)
+
+# ── Manage Results ────────────────────────────────────────────────────────────
+st.sidebar.markdown("---")
+st.sidebar.caption("Manage Results")
+
+if st.sidebar.button("Delete Current Result", key="wfo_delete_current"):
+    matching = [r for r in results
+                if r["strategy"] == sel_strategy
+                and r["symbol"] == sel_symbol
+                and r["timeframe"] == sel_tf]
+    if matching and delete_wfo_result(matching[0]["path"]):
+        st.toast(f"Deleted {sel_strategy}/{sel_symbol}/{sel_tf} result.")
+        st.rerun()
+
+if st.sidebar.button("Delete All WFO Results", key="wfo_delete_all"):
+    st.session_state["wfo_confirm_delete_all"] = True
+
+if st.session_state.get("wfo_confirm_delete_all"):
+    st.sidebar.warning(f"Delete all {len(results)} WFO results?")
+    _c1, _c2 = st.sidebar.columns(2)
+    if _c1.button("Confirm", key="wfo_confirm_yes"):
+        n = delete_all_wfo_results()
+        st.session_state["wfo_confirm_delete_all"] = False
+        st.toast(f"Deleted {n} WFO result files.")
+        st.rerun()
+    if _c2.button("Cancel", key="wfo_confirm_no"):
+        st.session_state["wfo_confirm_delete_all"] = False
+        st.rerun()
 
 # Load the latest result for this combo
 data = get_latest_wfo(sel_strategy, sel_symbol, sel_tf)
