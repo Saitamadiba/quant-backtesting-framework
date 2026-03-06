@@ -58,6 +58,9 @@ class IndicatorEngine:
         # ── ML Feature Support Columns ──────────────────────────
         df['LogReturn'] = np.log(df['Close'] / df['Close'].shift(1))
         df['RealizedVol20'] = df['LogReturn'].rolling(window=20).std(ddof=1)
+        df['RV_Percentile'] = df['RealizedVol20'].rolling(
+            window=min(252, max(50, len(df) // 4)), min_periods=50,
+        ).rank(pct=True)
 
         # ATR percentile ranks (rolling rank / window)
         atr_series = df['ATR']

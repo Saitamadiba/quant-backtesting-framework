@@ -108,3 +108,15 @@ def get_latest_shadow(strategy: str, symbol: str) -> dict | None:
                 and r["symbol"] == symbol):
             return load_shadow_result(r["path"])
     return None
+
+
+def load_meta_strategy_result() -> dict | None:
+    """Load the latest meta-strategy analysis result (saved by page 12)."""
+    meta_path = RESULTS_DIR / "meta_strategy_latest.json"
+    if not meta_path.exists():
+        return None
+    try:
+        with open(meta_path) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, KeyError):
+        return None

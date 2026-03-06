@@ -26,6 +26,7 @@ if str(_BASE) not in sys.path:
 from backtrader_framework.optimization.shap_analysis import (
     FEATURE_CATEGORIES, CATEGORY_COLORS,
 )
+from data.wfo_loader import load_meta_strategy_result
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -39,6 +40,15 @@ has_meta = (
     'meta_train_stats' in st.session_state
     and st.session_state['meta_train_stats'].get('shap_analysis')
 )
+
+if not has_meta:
+    # Try loading from disk (survives browser refreshes)
+    saved_meta = load_meta_strategy_result()
+    if saved_meta and saved_meta.get('train_stats', {}).get('shap_analysis'):
+        st.session_state['meta_train_stats'] = saved_meta['train_stats']
+        st.session_state['meta_dataset_info'] = saved_meta.get('dataset_info', {})
+        has_meta = True
+        st.info("Loaded SHAP data from last saved meta-strategy run.")
 
 if not has_meta:
     st.warning(
@@ -332,3 +342,65 @@ if feature_summary:
                 'Positive Effect %': f"{s['positive_effect_frac']:.0%}",
             })
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 8. WFO REGIME CROSS-REFERENCE
+# ══════════════════════════════════════════════════════════════════════════════
+
+st.header("8. WFO Regime Cross-Reference")
+st.caption(
+    "How regime-related SHAP features connect to WFO regime analysis. "
+    "High regime feature importance means the meta-strategy selector "
+    "is actively switching strategies based on market regime."
+)
+
+# Check if regime features rank in top features
+gi = shap_data.get('global_importance', [])
+regime_features = [
+    g for g in gi
+    if g.get('category', '').lower() == 'regime'
+    or 'regime' in g.get('feature', '').lower()
+    or 'hmm' in g.get('feature', '').lower()
+    or 'vol' in g.get('feature', '').lower()
+]
+
+if regime_features:
+    top_5_names = {g['feature'] for g in gi[:5]}
+    regime_in_top5 = [f for f in regime_features if f['feature'] in top_5_names]
+
+    if regime_in_top5:
+        st.success(
+            f"Regime features rank in the top 5: "
+            f"**{', '.join(f['feature'].replace('_', ' ') for f in regime_in_top5)}**. "
+            f"The meta-strategy selector is strongly regime-aware."
+        )
+    else:
+        top_regime = regime_features[0]
+        rank = next((i for i, g in enumerate(gi) if g['feature'] == top_regime['feature']), -1)
+        st.info(
+            f"Top regime feature: **{top_regime['feature'].replace('_', ' ')}** "
+            f"(rank #{rank + 1}, importance {top_regime['importance']:.4f}). "
+            f"Consider whether regime switching adds value for your strategies."
+        )
+
+    # Show regime feature importances
+    with st.expander("Regime Feature Details", expanded=False):
+        reg_rows = []
+        for f in regime_features[:10]:
+            rank = next((i for i, g in enumerate(gi) if g['feature'] == f['feature']), -1)
+            reg_rows.append({
+                'Feature': f['feature'].replace('_', ' '),
+                'Rank': rank + 1,
+                'SHAP Importance': f"{f['importance']:.4f}",
+                'Category': f.get('category', 'Other'),
+            })
+        st.dataframe(pd.DataFrame(reg_rows), use_container_width=True, hide_index=True)
+else:
+    st.info("No regime-related features found in the SHAP analysis.")
+
+st.markdown("---")
+st.info(
+    "For detailed per-strategy regime analysis (HMM states, regime-conditional returns, "
+    "sizing tiers), see **WFO Analysis** (page 18)."
+)

@@ -81,15 +81,38 @@ LR_CONFIG = StrategyScoreConfig(
 FVG_CONFIG = StrategyScoreConfig(
     name='FVG',
     components={
-        'gap_size': 0.20,
-        'volume': 0.15,
-        'ema_align': 0.15,
-        'rsi_align': 0.10,
-        'struct_bias': 0.10,
-        'displacement': 0.15,
-        'sweep': 0.15,
+        'gap_size': 0.18,
+        'volume': 0.13,
+        'ema_align': 0.13,
+        'rsi_align': 0.09,
+        'struct_bias': 0.09,
+        'displacement': 0.13,
+        'sweep': 0.10,
+        'hmm_align': 0.10,     # HMM regime alignment (v5)
+        'rv_align': 0.05,      # Realized vol alignment (v5)
     },
     min_confidence=0.45,
+    regime_gates={
+        'dvol_low_max': 45,
+        'dvol_med_range': (45, 65),
+        'dvol_high_min': 65,
+    },
+)
+
+FVG_IFVG_CONFIG = StrategyScoreConfig(
+    name='FVG_IFVG',
+    components={
+        'gap_size': 0.15,
+        'volume': 0.10,
+        'ema_align': 0.10,
+        'rsi_align': 0.08,
+        'struct_bias': 0.08,
+        'displacement': 0.10,
+        'sweep': 0.09,
+        'hmm_align': 0.15,     # iFVG strongly prefers volatile HMM
+        'rv_align': 0.15,      # High RV is strongest iFVG filter
+    },
+    min_confidence=0.40,        # Lower: iFVG has 51.8% base WR
     regime_gates={
         'dvol_low_max': 45,
         'dvol_med_range': (45, 65),
@@ -325,7 +348,8 @@ class WFOSignalScorer:
         self.adapter = adapter
 
     def score(self, features: Dict[str, float], direction: str,
-              dvol: Optional[float] = None, atr_pctile: Optional[float] = None) -> ScoreResult:
+              dvol: Optional[float] = None, atr_pctile: Optional[float] = None,
+              signal_type: str = 'RETEST') -> ScoreResult:
         """
         Score a signal using WFO-validated formula.
 
@@ -334,12 +358,13 @@ class WFOSignalScorer:
             direction: 'LONG' or 'SHORT'
             dvol: Current DVOL value (optional, for regime gating)
             atr_pctile: Current ATR percentile (optional, for regime gating)
+            signal_type: 'RETEST' or 'IFVG' — controls DVOL gate logic
 
         Returns:
             ScoreResult with confidence, components, and regime gate status
         """
-        # Step 1: Check regime gates
-        gate, reason = self._check_regime_gates(direction, dvol, atr_pctile)
+        # Step 1: Check regime gates (strategy-dependent)
+        gate, reason = self._check_regime_gates(direction, dvol, atr_pctile, signal_type)
 
         if gate == 'SKIP':
             return ScoreResult(
@@ -402,13 +427,18 @@ class WFOSignalScorer:
 
     def _check_regime_gates(self, direction: str,
                             dvol: Optional[float],
-                            atr_pctile: Optional[float]) -> Tuple[str, str]:
+                            atr_pctile: Optional[float],
+                            signal_type: str = 'RETEST') -> Tuple[str, str]:
         """
         Check regime gates for this strategy's config.
 
         Returns:
             (gate_status, reason) where gate_status is one of:
             PASS, SKIP, LONG_ONLY, SHORT_ONLY
+
+        DVOL gates are signal_type-dependent (v5, profitability study):
+            RETEST: LOW=LONG_ONLY, MED=PASS (was SKIP), HIGH=SHORT_ONLY
+            IFVG:   LOW=SHORT_ONLY, MED=PASS, HIGH=PASS (all directions)
         """
         gates = self.config.regime_gates
         if not gates:
@@ -419,20 +449,27 @@ class WFOSignalScorer:
             if atr_pctile > gates['atr_pctile_max']:
                 return 'SKIP', f"ATR_pctile {atr_pctile:.2f} > {gates['atr_pctile_max']}"
 
-        # FVG DVOL direction gates
+        # FVG DVOL direction gates (strategy-dependent)
         if dvol is not None:
             if 'dvol_low_max' in gates and 'dvol_high_min' in gates:
-                # FVG-style: LOW=LONG_ONLY, MED=SKIP, HIGH=SHORT_ONLY
                 dvol_low = gates['dvol_low_max']
                 dvol_high = gates['dvol_high_min']
-                dvol_med = gates.get('dvol_med_range', (dvol_low, dvol_high))
 
-                if dvol < dvol_low:
-                    return 'LONG_ONLY', f"DVOL {dvol:.1f} < {dvol_low} (low IV → LONG only)"
-                elif dvol_med[0] <= dvol < dvol_med[1]:
-                    return 'SKIP', f"DVOL {dvol:.1f} in [{dvol_med[0]}, {dvol_med[1]}) (medium IV → skip)"
-                elif dvol >= dvol_high:
-                    return 'SHORT_ONLY', f"DVOL {dvol:.1f} >= {dvol_high} (high IV → SHORT only)"
+                if signal_type == 'IFVG':
+                    # iFVG: reversed gates (study: HIGH is best +0.600R)
+                    # LOW DVOL → SHORT_ONLY (block longs in low vol)
+                    # MED/HIGH → PASS (allow all directions)
+                    if dvol < dvol_low:
+                        return 'SHORT_ONLY', f"DVOL {dvol:.1f} < {dvol_low} (iFVG low IV → SHORT only)"
+                    return 'PASS', f"DVOL {dvol:.1f} (iFVG: all directions allowed)"
+                else:
+                    # RETEST: LOW=LONG_ONLY, MED=PASS (no longer SKIP), HIGH=SHORT_ONLY
+                    if dvol < dvol_low:
+                        return 'LONG_ONLY', f"DVOL {dvol:.1f} < {dvol_low} (low IV → LONG only)"
+                    elif dvol >= dvol_high:
+                        return 'SHORT_ONLY', f"DVOL {dvol:.1f} >= {dvol_high} (high IV → SHORT only)"
+                    # MED range: allow (was SKIP — study shows MED is sweet spot +0.441R)
+                    return 'PASS', f"DVOL {dvol:.1f} MED range (retest: allowed)"
 
             elif 'dvol_med_range' in gates:
                 # LR-style: medium DVOL → stricter but not skip (handled by caller via gate_reason)

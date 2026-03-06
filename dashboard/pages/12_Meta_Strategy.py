@@ -1,5 +1,6 @@
 """Page 12: Meta-Strategy Selector — predict best strategy from market state."""
 
+import json
 import sys
 from pathlib import Path
 
@@ -21,7 +22,7 @@ _BASE = Path(__file__).resolve().parent.parent.parent
 if str(_BASE) not in sys.path:
     sys.path.insert(0, str(_BASE))
 
-from backtrader_framework.optimization.persistence import list_wfo_results
+from data.wfo_loader import list_wfo_results, RESULTS_DIR
 from backtrader_framework.optimization.meta_strategy_selector import MetaStrategySelector
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -73,10 +74,12 @@ with col_sym:
     )
 
 with col_tf:
+    available_tfs = sorted({saved[i]['timeframe'] for i in selected_indices if saved[i].get('timeframe')})
+    all_tfs = sorted(set(available_tfs) | {'4h', '1h', '15m'})
     timeframe = st.selectbox(
         "Feature timeframe",
-        ['4h', '1h', '15m'],
-        index=0,
+        all_tfs,
+        index=all_tfs.index('4h') if '4h' in all_tfs else 0,
         key="meta_timeframe",
         help="Timeframe for computing market features (4h recommended).",
     )
@@ -95,7 +98,7 @@ with col_fwd:
 # ══════════════════════════════════════════════════════════════════════════════
 
 if st.button("Train & Backtest", type="primary"):
-    filepaths = [saved[i]['filepath'] for i in selected_indices]
+    filepaths = [saved[i]['path'] for i in selected_indices]
 
     try:
         with st.spinner("Loading OHLCV data from DuckDB..."):
@@ -118,12 +121,28 @@ if st.button("Train & Backtest", type="primary"):
         st.session_state['meta_backtest'] = backtest_result
         st.session_state['meta_regime_heatmap'] = regime_heatmap
         st.session_state['meta_wfo_filepaths'] = filepaths
-        st.session_state['meta_dataset_info'] = {
+        ds_info_new = {
             'n_rows': len(dataset),
             'date_start': str(dataset.index[0].date()),
             'date_end': str(dataset.index[-1].date()),
             'strategies': selector.strategy_labels,
         }
+        st.session_state['meta_dataset_info'] = ds_info_new
+
+        # Persist to disk so page 13 survives browser refreshes
+        try:
+            meta_save_path = RESULTS_DIR / "meta_strategy_latest.json"
+            meta_save_data = {
+                'train_stats': train_stats,
+                'backtest': backtest_result,
+                'regime_heatmap': regime_heatmap,
+                'dataset_info': ds_info_new,
+            }
+            with open(str(meta_save_path), 'w') as f:
+                json.dump(meta_save_data, f, default=str)
+        except Exception:
+            pass  # disk save is best-effort
+
         st.success("Training & backtesting complete!")
 
     except Exception as e:
@@ -395,3 +414,10 @@ if regime_heatmap.get('valid'):
                 f"In **{regime.replace('_', ' ')}** markets, the selector "
                 f"prefers **{best_strat.replace('_', ' ')}** ({strats[best_strat]:.0%} of the time)."
             )
+
+# ── Cross-reference ──────────────────────────────────────────────────────────
+st.markdown("---")
+st.info(
+    "For per-strategy WFO analysis (parameter stability, Bayesian edge, "
+    "regime breakdown), see **WFO Analysis** (page 18)."
+)
