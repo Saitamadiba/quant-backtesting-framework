@@ -13,6 +13,14 @@ import numpy as np
 
 from .wfo_engine import TradeResult
 
+# ── Numba kernel import (optional) ──────────────────────────
+try:
+    from .numba_kernels import (
+        _mc_bootstrap_ci_kernel, _mc_equity_fan_kernel, HAS_NUMBA as _HAS_NUMBA,
+    )
+except ImportError:
+    _HAS_NUMBA = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -141,43 +149,47 @@ class MonteCarloAnalysis:
         sharpes = np.empty(n_resamples)
         max_dds = np.empty(n_resamples)
 
-        max_block_start = max(1, n - block_size + 1)
+        if _HAS_NUMBA:
+            _mc_bootstrap_ci_kernel(
+                r_values, n_resamples, block_size,
+                mean_rs, win_rates, expectancies, profit_factors, sharpes, max_dds,
+            )
+        else:
+            max_block_start = max(1, n - block_size + 1)
 
-        for i in range(n_resamples):
-            # Resample
-            if block_size <= 1:
-                sample = r_values[np.random.randint(0, n, size=n)]
-            else:
-                n_blocks = int(np.ceil(n / block_size))
-                blocks = []
-                for _ in range(n_blocks):
-                    start = np.random.randint(0, max_block_start)
-                    blocks.extend(r_values[start:start + block_size].tolist())
-                sample = np.array(blocks[:n])
+            for i in range(n_resamples):
+                if block_size <= 1:
+                    sample = r_values[np.random.randint(0, n, size=n)]
+                else:
+                    n_blocks = int(np.ceil(n / block_size))
+                    blocks = []
+                    for _ in range(n_blocks):
+                        start = np.random.randint(0, max_block_start)
+                        blocks.extend(r_values[start:start + block_size].tolist())
+                    sample = np.array(blocks[:n])
 
-            # Compute metrics on this resample
-            mean_rs[i] = np.mean(sample)
-            wins = sample > 0
-            wr = np.sum(wins) / n
-            win_rates[i] = wr
+                mean_rs[i] = np.mean(sample)
+                wins = sample > 0
+                wr = np.sum(wins) / n
+                win_rates[i] = wr
 
-            win_vals = sample[wins]
-            loss_vals = sample[~wins]
-            avg_w = np.mean(win_vals) if len(win_vals) > 0 else 0.0
-            avg_l = np.mean(loss_vals) if len(loss_vals) > 0 else 0.0
-            expectancies[i] = wr * avg_w + (1 - wr) * avg_l
+                win_vals = sample[wins]
+                loss_vals = sample[~wins]
+                avg_w = np.mean(win_vals) if len(win_vals) > 0 else 0.0
+                avg_l = np.mean(loss_vals) if len(loss_vals) > 0 else 0.0
+                expectancies[i] = wr * avg_w + (1 - wr) * avg_l
 
-            gp = np.sum(sample[sample > 0])
-            gl = abs(np.sum(sample[sample < 0]))
-            profit_factors[i] = gp / gl if gl > 0 else 0.0
+                gp = np.sum(sample[sample > 0])
+                gl = abs(np.sum(sample[sample < 0]))
+                profit_factors[i] = gp / gl if gl > 0 else 0.0
 
-            std = np.std(sample, ddof=1)
-            sharpes[i] = mean_rs[i] / std if std > 0 else 0.0
+                std = np.std(sample, ddof=1)
+                sharpes[i] = mean_rs[i] / std if std > 0 else 0.0
 
-            cum = np.cumsum(sample)
-            running_max = np.maximum.accumulate(cum)
-            dd = running_max - cum
-            max_dds[i] = np.max(dd) if len(dd) > 0 else 0.0
+                cum = np.cumsum(sample)
+                running_max = np.maximum.accumulate(cum)
+                dd = running_max - cum
+                max_dds[i] = np.max(dd) if len(dd) > 0 else 0.0
 
         p_profitable = float(np.mean(mean_rs > 0))
 
@@ -210,21 +222,24 @@ class MonteCarloAnalysis:
         if n < 5:
             return {'valid': False}
 
-        max_block_start = max(1, n - block_size + 1)
-
         # Generate paths
         all_paths = np.empty((n_paths, n))
-        for i in range(n_paths):
-            if block_size <= 1:
-                sample = r_values[np.random.randint(0, n, size=n)]
-            else:
-                n_blocks = int(np.ceil(n / block_size))
-                blocks = []
-                for _ in range(n_blocks):
-                    start = np.random.randint(0, max_block_start)
-                    blocks.extend(r_values[start:start + block_size].tolist())
-                sample = np.array(blocks[:n])
-            all_paths[i] = np.cumsum(sample)
+
+        if _HAS_NUMBA:
+            _mc_equity_fan_kernel(r_values, n_paths, block_size, all_paths)
+        else:
+            max_block_start = max(1, n - block_size + 1)
+            for i in range(n_paths):
+                if block_size <= 1:
+                    sample = r_values[np.random.randint(0, n, size=n)]
+                else:
+                    n_blocks = int(np.ceil(n / block_size))
+                    blocks = []
+                    for _ in range(n_blocks):
+                        start = np.random.randint(0, max_block_start)
+                        blocks.extend(r_values[start:start + block_size].tolist())
+                    sample = np.array(blocks[:n])
+                all_paths[i] = np.cumsum(sample)
 
         # Compute percentile bands at each trade index
         pct_5 = np.percentile(all_paths, 5, axis=0).tolist()

@@ -53,7 +53,7 @@ for i in range(0, len(items), cols_per_row):
                 continue
 
             # Deploy button
-            if st.button(f"Deploy {label}", key=f"deploy_{label}", type="primary"):
+            if st.button(f"Deploy {label}", key=f"deploy_{label}", type="primary", help="Upload this bot's script to the VPS via SCP. Service must be restarted afterward for changes to take effect."):
                 with st.spinner(f"Uploading {local_p.name}..."):
                     result = deploy_file_to_vps(str(local_path), remote_path)
                 st.session_state["deploy_results"][label] = result
@@ -64,7 +64,7 @@ for i in range(0, len(items), cols_per_row):
                 if deploy_result["status"] == "ok":
                     st.success(f"Deployed ({deploy_result.get('size_kb', '?')}KB)")
                     if svc:
-                        if st.button(f"Restart {svc}", key=f"restart_after_{label}"):
+                        if st.button(f"Restart {svc}", key=f"restart_after_{label}", help="Restart this bot's systemd service on the VPS to apply deployed code changes."):
                             r = manage_bot_service(svc, "restart")
                             if r["success"]:
                                 st.success(f"`{svc}` restarted")
@@ -82,7 +82,7 @@ st.markdown("---")
 st.subheader("Bulk Deploy")
 st.caption("Deploy all bot scripts in one click. Useful after a batch update (e.g., new ML model integration or parameter changes). After bulk deploy, use 'Restart All Bots' to apply the changes across all services.")
 
-if st.button("Deploy All Bots", type="primary"):
+if st.button("Deploy All Bots", type="primary", help="Deploy all bot scripts to VPS in parallel. Use after batch code updates."):
     results = {}
     progress = st.progress(0, text="Deploying...")
     total = len(DEPLOY_BOT_FILES)
@@ -111,7 +111,7 @@ if bulk_results:
         st.write(f"{icon} **{label}** — {detail}")
 
     st.markdown("---")
-    if st.button("Restart All Bots", key="restart_all_after_deploy"):
+    if st.button("Restart All Bots", key="restart_all_after_deploy", help="Restart all bot services on the VPS. Required after bulk deploy to activate code changes."):
         restart_results = []
         for label in bulk_results:
             svc = DEPLOY_SERVICE_MAP.get(label)

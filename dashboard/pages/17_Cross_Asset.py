@@ -112,6 +112,7 @@ selected_indices = st.multiselect(
     format_func=lambda i: options[i],
     default=defaults,
     key="cross_asset_select",
+    help="Select one WFO result per strategy/asset combination. The tool compares performance of the same strategy across different assets.",
 )
 
 if len(selected_indices) < 2:
@@ -183,6 +184,7 @@ METRIC_MAP = {
 metric_choice = st.selectbox(
     "Metric to display", list(METRIC_MAP.keys()), index=0,
     key="cross_asset_metric",
+    help="Choose which metric to visualize in the heatmap. Sharpe = risk-adjusted return. Win Rate = % profitable trades. Mean R = average R-multiple per trade.",
 )
 metric_attr = METRIC_MAP[metric_choice]
 
@@ -249,19 +251,24 @@ for tab, strat_name in zip(tabs, tab_names):
 
         # KPI row
         k1, k2, k3 = st.columns(3)
-        k1.metric("Robustness Score", f"{rob.robustness_score:.0f}/100")
-        k2.metric("Grade", rob.robustness_grade)
-        k3.metric("Assets Tested", len(rob.assets))
+        k1.metric("Robustness Score", f"{rob.robustness_score:.0f}/100",
+                  help="Composite 0-100 score. 80+ = strategy works across multiple assets (structural edge). <50 = asset-specific (may be curve-fitted to one market).")
+        k2.metric("Grade", rob.robustness_grade,
+                  help="Letter grade for cross-asset robustness. A = excellent structural edge across all tested assets. F = only works on one asset.")
+        k3.metric("Assets Tested", len(rob.assets),
+                  help="Number of different assets this strategy was evaluated on. More assets tested = more confident robustness assessment.")
 
         st.info(rob.verdict)
 
         # Metrics table
         with st.expander("Side-by-Side Metrics", expanded=True):
+            st.caption("Compares key metrics (Sharpe, win rate, mean R, drawdown) for the same strategy across assets. Similar values = universal pattern. Divergent = asset-specific adaptation.")
             df_metrics = pd.DataFrame(rob.metrics_table)
             st.dataframe(df_metrics, use_container_width=True, hide_index=True)
 
         # Equity curves
         with st.expander("Equity Curves", expanded=True):
+            st.caption("OOS equity curves overlaid by asset. High visual correlation = strategy doesn't adapt well to different markets.")
             fig_eq = go.Figure()
             for i, (asset, ar) in enumerate(sorted(rob.asset_results.items())):
                 if not ar.oos_equity:
@@ -288,6 +295,7 @@ for tab, strat_name in zip(tabs, tab_names):
         # Equity correlation
         if rob.equity_correlation is not None:
             with st.expander("Equity Curve Correlation", expanded=False):
+                st.caption("Correlation matrix of returns across assets. >0.5 = moves together (less diversification benefit). <0.1 = independent streams (good for portfolio construction).")
                 corr = rob.equity_correlation
                 fig_corr = go.Figure(go.Heatmap(
                     z=corr.values,
@@ -309,6 +317,7 @@ for tab, strat_name in zip(tabs, tab_names):
 
         # Regime comparison
         with st.expander("Regime Comparison", expanded=True):
+            st.caption("Mean R-multiple per market regime across assets. Reveals if the edge is regime-dependent (e.g., only works in trends).")
             regimes = ['trending_up', 'trending_down', 'ranging', 'volatile']
             regime_assets = sorted(rob.asset_results.keys())
 
@@ -347,6 +356,7 @@ for tab, strat_name in zip(tabs, tab_names):
 
         # Direction breakdown
         with st.expander("Direction Breakdown", expanded=False):
+            st.caption("LONG vs SHORT performance by asset. Asymmetric win rates suggest the strategy has a directional bias.")
             dir_rows = []
             for asset, ar in sorted(rob.asset_results.items()):
                 for direction in ['LONG', 'SHORT']:

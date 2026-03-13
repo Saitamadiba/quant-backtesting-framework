@@ -24,6 +24,14 @@ from .timing_analysis import TimingAnalyzer
 
 logger = logging.getLogger(__name__)
 
+# ── Numba kernel import (optional) ──────────────────────────
+try:
+    from .numba_kernels import (
+        _mc_bootstrap_ci_kernel, _mc_equity_fan_kernel, HAS_NUMBA as _HAS_NUMBA,
+    )
+except ImportError:
+    _HAS_NUMBA = False
+
 # DuckDB path
 _BASE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DUCKDB_PATH = os.path.join(_BASE, 'duckdb_data', 'trading_data.duckdb')
@@ -88,6 +96,8 @@ class WFOConfig:
     use_hmm_regime: bool = False     # Run HMM regime assessment per window
     hmm_n_states: int = 2            # Number of HMM states
     hmm_position_sizing: bool = False  # Scale OOS R-multiples by HMM sizing
+    parallel: bool = True            # Multiprocess grid/random combo evaluation
+    n_workers: int = 0               # Worker processes (0 = auto = cpu_count - 1)
 
     @classmethod
     def for_timeframe(cls, timeframe: str, **kwargs) -> 'WFOConfig':
@@ -747,43 +757,47 @@ class MonteCarloAnalysis:
         sharpes = np.empty(n_resamples)
         max_dds = np.empty(n_resamples)
 
-        max_block_start = max(1, n - block_size + 1)
+        if _HAS_NUMBA:
+            _mc_bootstrap_ci_kernel(
+                r_values, n_resamples, block_size,
+                mean_rs, win_rates, expectancies, profit_factors, sharpes, max_dds,
+            )
+        else:
+            max_block_start = max(1, n - block_size + 1)
 
-        for i in range(n_resamples):
-            # Resample
-            if block_size <= 1:
-                sample = r_values[np.random.randint(0, n, size=n)]
-            else:
-                n_blocks = int(np.ceil(n / block_size))
-                blocks = []
-                for _ in range(n_blocks):
-                    start = np.random.randint(0, max_block_start)
-                    blocks.extend(r_values[start:start + block_size].tolist())
-                sample = np.array(blocks[:n])
+            for i in range(n_resamples):
+                if block_size <= 1:
+                    sample = r_values[np.random.randint(0, n, size=n)]
+                else:
+                    n_blocks = int(np.ceil(n / block_size))
+                    blocks = []
+                    for _ in range(n_blocks):
+                        start = np.random.randint(0, max_block_start)
+                        blocks.extend(r_values[start:start + block_size].tolist())
+                    sample = np.array(blocks[:n])
 
-            # Compute metrics on this resample
-            mean_rs[i] = np.mean(sample)
-            wins = sample > 0
-            wr = np.sum(wins) / n
-            win_rates[i] = wr
+                mean_rs[i] = np.mean(sample)
+                wins = sample > 0
+                wr = np.sum(wins) / n
+                win_rates[i] = wr
 
-            win_vals = sample[wins]
-            loss_vals = sample[~wins]
-            avg_w = np.mean(win_vals) if len(win_vals) > 0 else 0.0
-            avg_l = np.mean(loss_vals) if len(loss_vals) > 0 else 0.0
-            expectancies[i] = wr * avg_w + (1 - wr) * avg_l
+                win_vals = sample[wins]
+                loss_vals = sample[~wins]
+                avg_w = np.mean(win_vals) if len(win_vals) > 0 else 0.0
+                avg_l = np.mean(loss_vals) if len(loss_vals) > 0 else 0.0
+                expectancies[i] = wr * avg_w + (1 - wr) * avg_l
 
-            gp = np.sum(sample[sample > 0])
-            gl = abs(np.sum(sample[sample < 0]))
-            profit_factors[i] = gp / gl if gl > 0 else 0.0
+                gp = np.sum(sample[sample > 0])
+                gl = abs(np.sum(sample[sample < 0]))
+                profit_factors[i] = gp / gl if gl > 0 else 0.0
 
-            std = np.std(sample, ddof=1)
-            sharpes[i] = mean_rs[i] / std if std > 0 else 0.0
+                std = np.std(sample, ddof=1)
+                sharpes[i] = mean_rs[i] / std if std > 0 else 0.0
 
-            cum = np.cumsum(sample)
-            running_max = np.maximum.accumulate(cum)
-            dd = running_max - cum
-            max_dds[i] = np.max(dd) if len(dd) > 0 else 0.0
+                cum = np.cumsum(sample)
+                running_max = np.maximum.accumulate(cum)
+                dd = running_max - cum
+                max_dds[i] = np.max(dd) if len(dd) > 0 else 0.0
 
         p_profitable = float(np.mean(mean_rs > 0))
 
@@ -816,21 +830,24 @@ class MonteCarloAnalysis:
         if n < 5:
             return {'valid': False}
 
-        max_block_start = max(1, n - block_size + 1)
-
         # Generate paths
         all_paths = np.empty((n_paths, n))
-        for i in range(n_paths):
-            if block_size <= 1:
-                sample = r_values[np.random.randint(0, n, size=n)]
-            else:
-                n_blocks = int(np.ceil(n / block_size))
-                blocks = []
-                for _ in range(n_blocks):
-                    start = np.random.randint(0, max_block_start)
-                    blocks.extend(r_values[start:start + block_size].tolist())
-                sample = np.array(blocks[:n])
-            all_paths[i] = np.cumsum(sample)
+
+        if _HAS_NUMBA:
+            _mc_equity_fan_kernel(r_values, n_paths, block_size, all_paths)
+        else:
+            max_block_start = max(1, n - block_size + 1)
+            for i in range(n_paths):
+                if block_size <= 1:
+                    sample = r_values[np.random.randint(0, n, size=n)]
+                else:
+                    n_blocks = int(np.ceil(n / block_size))
+                    blocks = []
+                    for _ in range(n_blocks):
+                        start = np.random.randint(0, max_block_start)
+                        blocks.extend(r_values[start:start + block_size].tolist())
+                    sample = np.array(blocks[:n])
+                all_paths[i] = np.cumsum(sample)
 
         # Compute percentile bands at each trade index
         pct_5 = np.percentile(all_paths, 5, axis=0).tolist()
@@ -1151,32 +1168,64 @@ class WFOEngine:
         all_combo_scores = []  # Collect (params, score) for stability analysis
 
         if not cfg.use_bayesian:
-            # Standard grid/random search
-            for params in param_grid:
-                # Try execute_signals (stateful adapter) first
-                trades = self.adapter.execute_signals(
-                    train_df, params, scan_start, scan_end,
-                    cfg.costs, cfg.max_trade_bars, w_id, is_oos=False, regime=regime,
-                )
-                if trades is None:
-                    signals = self.adapter.generate_signals(train_df, params, scan_start, scan_end)
-                    trades = []
-                    for sig in signals:
-                        trade = TradeSimulator.simulate(
-                            sig.to_dict(), train_df, cfg.costs,
-                            cfg.max_trade_bars, w_id, is_oos=False, regime=regime,
-                            _highs=train_highs, _lows=train_lows, _closes=train_closes,
-                            _atrs=train_atrs,
-                        )
-                        if trade:
-                            trades.append(trade)
+            _use_parallel = cfg.parallel and len(param_grid) > 1
 
-                score = self._score_trades(trades)
-                all_combo_scores.append((params, score))
-                if score > best_score and len(trades) >= cfg.min_trades_per_window:
-                    best_score = score
-                    best_params = params
-                    best_is_trades = trades
+            if _use_parallel:
+                try:
+                    from .parallel import evaluate_combos_parallel
+                    results = evaluate_combos_parallel(
+                        adapter=self.adapter,
+                        train_df=train_df,
+                        train_highs=train_highs,
+                        train_lows=train_lows,
+                        train_closes=train_closes,
+                        train_atrs=train_atrs,
+                        scan_start=scan_start,
+                        scan_end=scan_end,
+                        costs=cfg.costs,
+                        max_trade_bars=cfg.max_trade_bars,
+                        window_id=w_id,
+                        regime=regime,
+                        optimization_metric=cfg.optimization_metric,
+                        param_grid=param_grid,
+                        n_workers=cfg.n_workers,
+                    )
+                    for params, score, trades in results:
+                        all_combo_scores.append((params, score))
+                        if score > best_score and len(trades) >= cfg.min_trades_per_window:
+                            best_score = score
+                            best_params = params
+                            best_is_trades = trades
+                except Exception as e:
+                    logger.warning(f"Parallel evaluation failed (window {w_id}): {e}. Falling back to sequential.")
+                    _use_parallel = False
+
+            if not _use_parallel:
+                # Sequential fallback
+                for params in param_grid:
+                    trades = self.adapter.execute_signals(
+                        train_df, params, scan_start, scan_end,
+                        cfg.costs, cfg.max_trade_bars, w_id, is_oos=False, regime=regime,
+                    )
+                    if trades is None:
+                        signals = self.adapter.generate_signals(train_df, params, scan_start, scan_end)
+                        trades = []
+                        for sig in signals:
+                            trade = TradeSimulator.simulate(
+                                sig.to_dict(), train_df, cfg.costs,
+                                cfg.max_trade_bars, w_id, is_oos=False, regime=regime,
+                                _highs=train_highs, _lows=train_lows, _closes=train_closes,
+                                _atrs=train_atrs,
+                            )
+                            if trade:
+                                trades.append(trade)
+
+                    score = self._score_trades(trades)
+                    all_combo_scores.append((params, score))
+                    if score > best_score and len(trades) >= cfg.min_trades_per_window:
+                        best_score = score
+                        best_params = params
+                        best_is_trades = trades
 
         # Parameter stability analysis
         param_stability = None
@@ -1274,34 +1323,9 @@ class WFOEngine:
         })
 
     def _score_trades(self, trades: List[TradeResult]) -> float:
-        """Score a set of trades using the configured optimization metric.
-
-        Supports 'expectancy', 'profit_factor', 'sharpe', and 'total_r'.
-        Returns -inf if fewer than 2 trades.
-        """
-        if len(trades) < 2:
-            return -float('inf')
-
-        r_values = [t.r_multiple_after_costs for t in trades]
-        metric = self.config.optimization_metric
-
-        if metric == 'expectancy':
-            wins = [r for r in r_values if r > 0]
-            losses = [r for r in r_values if r <= 0]
-            wr = len(wins) / len(r_values)
-            avg_w = float(np.mean(wins)) if wins else 0
-            avg_l = float(np.mean(losses)) if losses else 0
-            return wr * avg_w + (1 - wr) * avg_l
-        elif metric == 'profit_factor':
-            gp = sum(r for r in r_values if r > 0)
-            gl = abs(sum(r for r in r_values if r < 0))
-            return gp / gl if gl > 0 else 0
-        elif metric == 'sharpe':
-            m = np.mean(r_values)
-            s = np.std(r_values, ddof=1)
-            return m / s if s > 0 else 0
-        else:  # total_r
-            return sum(r_values)
+        """Score a set of trades using the configured optimization metric."""
+        from .parallel import score_trades
+        return score_trades(trades, self.config.optimization_metric)
 
     def _compile_results(self, symbol: str, timeframe: str, df: pd.DataFrame) -> Dict:
         """Compile all OOS results into the final output dict.

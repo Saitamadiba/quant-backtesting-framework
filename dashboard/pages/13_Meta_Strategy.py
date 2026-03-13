@@ -97,7 +97,7 @@ with col_fwd:
 # 3. TRAIN & BACKTEST
 # ══════════════════════════════════════════════════════════════════════════════
 
-if st.button("Train & Backtest", type="primary"):
+if st.button("Train & Backtest", type="primary", help="Train a Random Forest classifier to predict the best strategy from market features, then run a walk-forward backtest comparing dynamic allocation vs. static baselines. Takes 1-3 minutes."):
     filepaths = [saved[i]['path'] for i in selected_indices]
 
     try:
@@ -177,17 +177,19 @@ st.caption(
 
 # KPI row
 tr_c1, tr_c2, tr_c3, tr_c4 = st.columns(4)
-tr_c1.metric("Test Accuracy", f"{train_stats['accuracy']:.1%}")
+tr_c1.metric("Test Accuracy", f"{train_stats['accuracy']:.1%}", help="Classification accuracy on held-out test data. How often the model correctly identifies the best strategy for given market conditions.")
 tr_c2.metric(
     "CV Score",
     f"{train_stats['cv_mean']:.1%}",
     delta=f"±{train_stats['cv_std']:.1%}",
+    help="Cross-validation score (mean +/- std). Estimates how well the classifier generalizes to unseen data. Low std = stable model.",
 )
-tr_c3.metric("Classes", train_stats['n_classes'])
-tr_c4.metric("Train / Test", f"{train_stats['n_train']} / {train_stats['n_test']}")
+tr_c3.metric("Classes", train_stats['n_classes'], help="Number of strategy classes the model distinguishes between. One class per selected WFO result.")
+tr_c4.metric("Train / Test", f"{train_stats['n_train']} / {train_stats['n_test']}", help="Number of labeled samples in training vs. test splits.")
 
 # Confusion matrix
 with st.expander("Confusion Matrix", expanded=True):
+    st.caption("Rows = actual best strategy. Columns = predicted best. Diagonal cells = correct predictions. Off-diagonal = misclassifications.")
     cm = np.array(train_stats['confusion_matrix'])
     classes = train_stats['classes']
 
@@ -256,10 +258,12 @@ if backtest_result.get('valid'):
     bt_c1.metric(
         "Meta (Soft) Sharpe",
         f"{backtest_result['meta_soft']['sharpe_annual']:.3f}",
+        help="Sharpe ratio using soft (probabilistic) predictions — capital is allocated proportionally to model confidence across all strategies.",
     )
     bt_c2.metric(
         "Equal Weight Sharpe",
         f"{backtest_result['equal_weight']['sharpe_annual']:.3f}",
+        help="Baseline Sharpe from equal 1/N allocation across all strategies. The meta-selector should beat this.",
     )
     improvement = (
         backtest_result['meta_soft']['total_r'] - backtest_result['equal_weight']['total_r']
@@ -269,13 +273,19 @@ if backtest_result.get('valid'):
         f"{improvement:+.1f}",
         delta=f"{'better' if improvement > 0 else 'worse'}",
         delta_color="normal" if improvement > 0 else "inverse",
+        help="R-multiple outperformance of dynamic allocation over static 1/N baseline. Positive = meta-selector adds value.",
     )
     bt_c4.metric(
         "Prediction Accuracy",
         f"{backtest_result['prediction_accuracy']:.1%}",
+        help="During walk-forward backtest, how often the selector's pick matched the actually best-performing strategy.",
     )
 
     # Equity curves
+    st.caption(
+        "Compares dynamic allocation (hard/soft) vs. static (equal weight) and oracle "
+        "(clairvoyant best single). The gold/blue lines should stay above the gray baseline."
+    )
     with st.expander("Equity Curves", expanded=True):
         dates = pd.to_datetime(backtest_result['dates'])
 
@@ -325,6 +335,10 @@ if backtest_result.get('valid'):
     # Strategy selection timeline
     timeline = backtest_result.get('selection_timeline', [])
     if timeline:
+        st.caption(
+            "Stacked area: how the classifier's confidence shifts between strategies over time. "
+            "Wider bands = higher conviction."
+        )
         with st.expander("Strategy Selection Timeline", expanded=False):
             # Build stacked area data: date → strategy probability
             strat_labels = backtest_result.get('strategy_labels', [])
@@ -419,5 +433,5 @@ if regime_heatmap.get('valid'):
 st.markdown("---")
 st.info(
     "For per-strategy WFO analysis (parameter stability, Bayesian edge, "
-    "regime breakdown), see **WFO Analysis** (page 18)."
+    "regime breakdown), see **WFO Analysis** (page 9)."
 )

@@ -2,9 +2,19 @@
 
 __version__ = "1.0.0"
 
-from backtrader_framework.strategies.base_strategy import BaseStrategy
-from backtrader_framework.runners.single_backtest import run_backtest
-from backtrader_framework.data.duckdb_manager import DuckDBManager
+# Lazy imports — backtrader may not be installed in all environments
+# (e.g. the Streamlit dashboard only needs the optimization sub-package).
+try:
+    from backtrader_framework.strategies.base_strategy import BaseStrategy
+    from backtrader_framework.runners.single_backtest import run_backtest
+except ImportError:
+    BaseStrategy = None
+    run_backtest = None
+
+try:
+    from backtrader_framework.data.duckdb_manager import DuckDBManager
+except ImportError:
+    DuckDBManager = None
 
 __all__ = [
     "BaseStrategy",

@@ -123,11 +123,13 @@ with st.sidebar:
     st.header("Filters")
     strategies = sorted(all_preds["strategy"].dropna().unique().tolist())
     selected_strategy = st.selectbox(
-        "Strategy", ["All"] + strategies, key="ml_perf_strat"
+        "Strategy", ["All"] + strategies, key="ml_perf_strat",
+        help="Filter ML predictions by strategy. 'All' shows combined metrics across all strategies.",
     )
     symbols = sorted(all_preds["symbol"].dropna().unique().tolist())
     selected_symbol = st.selectbox(
-        "Symbol", ["All"] + symbols, key="ml_perf_sym"
+        "Symbol", ["All"] + symbols, key="ml_perf_sym",
+        help="Filter by asset. 'All' shows combined metrics.",
     )
 
 strat_filter = None if selected_strategy == "All" else selected_strategy
@@ -160,10 +162,14 @@ total_reconciled = len(df)
 pct_reconciled = total_reconciled / total_logged if total_logged > 0 else 0
 
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Total Predictions", f"{total_logged:,}")
-c2.metric("Filtered (Blocked)", f"{total_filtered:,}")
-c3.metric("Passed (Traded)", f"{total_passed:,}")
-c4.metric("Reconciled", f"{total_reconciled:,} ({pct_reconciled:.0%})")
+c1.metric("Total Predictions", f"{total_logged:,}",
+          help="All ML predictions logged, regardless of whether the trade was executed or filtered.")
+c2.metric("Filtered (Blocked)", f"{total_filtered:,}",
+          help="Trades the ML filter rejected (low predicted win probability). These were NOT executed.")
+c3.metric("Passed (Traded)", f"{total_passed:,}",
+          help="Trades the ML filter approved. These were sent to the bot for execution.")
+c4.metric("Reconciled", f"{total_reconciled:,} ({pct_reconciled:.0%})",
+          help="Predictions with known outcomes (trade closed). Required for accuracy calculation.")
 
 st.markdown("---")
 
@@ -193,9 +199,12 @@ roc = all_metrics["roc_auc"]
 pr_auc = all_metrics["pr_auc"]
 
 c1, c2, c3, c4, c5, c6 = st.columns(6)
-c1.metric("Accuracy", f"{acc:.1%}")
-c2.metric("Precision", f"{pr['precision']:.1%}")
-c3.metric("Recall", f"{pr['recall']:.1%}")
+c1.metric("Accuracy", f"{acc:.1%}",
+          help="(True positives + true negatives) / total. How often the filter's pass/block decision was correct.")
+c2.metric("Precision", f"{pr['precision']:.1%}",
+          help="Of trades we blocked, what fraction were actually losers? Higher = fewer wrongly blocked winners.")
+c3.metric("Recall", f"{pr['recall']:.1%}",
+          help="Of all actual losers, what fraction did we catch and block? Higher = fewer missed losers getting through.")
 c4.metric("Brier Score", f"{brier:.4f}", help="Lower is better. 0 = perfect, 0.25 = random.")
 c5.metric("ECE", f"{ece:.4f}", help="Expected Calibration Error. Lower = better calibrated.")
 
@@ -251,6 +260,7 @@ if not cal_table.empty and cal_table["count"].sum() > 0:
     st.plotly_chart(fig_cal, use_container_width=True, key="calibration_plot")
 
     # Show raw table
+    st.caption("Look for actual win rate close to predicted probability in each bin. Large gaps indicate miscalibrated confidence.")
     with st.expander("Calibration Table"):
         display_cal = cal_table.copy()
         display_cal["mean_predicted_prob"] = display_cal["mean_predicted_prob"].apply(
@@ -345,6 +355,7 @@ col3.metric(
 )
 
 # R-multiple breakdown
+st.caption("Net economic value of the ML filter. R Saved = losses prevented by blocking bad trades. R Missed = profits foregone by blocking good trades. Net = R Saved - R Missed.")
 with st.expander("R-Multiple Breakdown"):
     rc1, rc2, rc3 = st.columns(3)
     rc1.metric("R Saved", f"{econ['r_saved']:.2f}R")
@@ -352,6 +363,7 @@ with st.expander("R-Multiple Breakdown"):
     rc3.metric("Net R Edge", f"{econ['net_ml_edge_r']:.2f}R")
 
 # Waterfall chart
+st.caption("Positive bar = R saved from blocking losers. Negative bar = R missed from blocking winners. Green final bar = net economic value added by the ML filter.")
 fig_waterfall = go.Figure(go.Waterfall(
     name="Economic Value",
     orientation="v",
@@ -468,6 +480,7 @@ st.caption(
 drift_window = st.slider(
     "Rolling window size", min_value=10, max_value=100, value=30,
     step=5, key="drift_window",
+    help="Rolling window size for accuracy calculation. Smaller = more responsive to recent changes. Larger = smoother trend line.",
 )
 
 df_drift = df.copy()

@@ -83,6 +83,11 @@ st.success(
 st.header("2. Global Feature Importance")
 
 with st.expander("SHAP vs Gini Importance", expanded=True):
+    st.caption(
+        "SHAP importance (left) measures how much each feature shifts predictions on average. "
+        "Gini importance (right) measures how often each feature is used in tree splits. "
+        "Both should rank similar features highly — divergence suggests Gini overstates noisy splitters."
+    )
     gi = shap_data['global_importance']
     gini_dict = dict(train_stats.get('feature_importances', []))
 
@@ -222,6 +227,11 @@ if dep_data:
     dep_features = list(dep_data.keys())[:4]  # Top 4
 
     with st.expander("Dependence Plots (Top 4 Features)", expanded=True):
+        st.caption(
+            "Each scatter shows one feature. X-axis = feature value, Y-axis = SHAP impact on prediction. "
+            "A steep slope means the feature strongly influences the model. A flat cloud means weak influence. "
+            "The dashed line at y=0 is neutral."
+        )
         cols = st.columns(2)
         for i, fname in enumerate(dep_features):
             d = dep_data[fname]
@@ -330,6 +340,11 @@ if per_class:
 feature_summary = shap_data.get('feature_summary', {})
 if feature_summary:
     with st.expander("Full Feature Summary Table", expanded=False):
+        st.caption(
+            "Complete ranking of all features by mean |SHAP|. 'Positive Effect %' shows how often "
+            "that feature pushed the prediction in the positive direction. Features with ~50% are "
+            "symmetric (push both ways equally)."
+        )
         rows = []
         for fname, s in sorted(
             feature_summary.items(), key=lambda x: x[1]['mean_abs_shap'], reverse=True
@@ -402,5 +417,5 @@ else:
 st.markdown("---")
 st.info(
     "For detailed per-strategy regime analysis (HMM states, regime-conditional returns, "
-    "sizing tiers), see **WFO Analysis** (page 18)."
+    "sizing tiers), see **WFO Analysis** (page 9)."
 )

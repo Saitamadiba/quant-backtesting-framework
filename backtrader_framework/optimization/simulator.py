@@ -4,6 +4,9 @@ Trade simulation engine for Walk-Forward Optimization.
 Provides the TradeSimulator class which simulates trade execution with
 spread, commission, slippage, and TP/SL logic on OHLCV data. Uses
 conservative same-bar ambiguity resolution (SL checked before TP).
+
+When numba is available, the inner bar-by-bar loops are JIT-compiled
+for ~10-100x speedup. The public API is unchanged.
 """
 
 import logging
@@ -14,7 +17,21 @@ import pandas as pd
 
 from .wfo_engine import TransactionCosts, TradeResult
 
+# ── Numba kernel import (optional) ──────────────────────────
+try:
+    from .numba_kernels import (
+        _simulate_v1_kernel,
+        _simulate_v2_kernel,
+        HAS_NUMBA,
+        OUTCOME_STRINGS,
+    )
+except ImportError:
+    HAS_NUMBA = False
+    OUTCOME_STRINGS = {}
+
 logger = logging.getLogger(__name__)
+
+_EMPTY_F64 = np.empty(0, dtype=np.float64)
 
 
 class TradeSimulator:
@@ -59,8 +76,50 @@ class TradeSimulator:
         meta = signal.get('metadata', {}) or {}
         trail_atr_mult = meta.get('trail_atr_mult', 0)
 
+        is_long = direction == 'LONG'
+
+        # ── Numba fast path ─────────────────────────────────
+        if HAS_NUMBA:
+            has_atrs = atrs is not None
+            atrs_arr = atrs if has_atrs else _EMPTY_F64
+
+            result = _simulate_v1_kernel(
+                idx, is_long, entry_price, stop_loss, tp1, tp2, risk,
+                costs.spread_pct, costs.commission_pct, costs.slippage_pct,
+                max_bars, float(trail_atr_mult),
+                highs, lows, closes, atrs_arr, has_atrs, n,
+            )
+            outcome_code, exit_px, bars_held, mfe, mae, raw_r, total_cost, final_sl = result
+
+            if exit_px < 0.0:
+                return None
+
+            return TradeResult(
+                entry_time=signal['time'],
+                exit_time=df.index[min(idx + bars_held, n - 1)],
+                direction=direction,
+                entry_price=entry_price,
+                exit_price=exit_px,
+                stop_loss=final_sl,
+                take_profit_1=tp1,
+                take_profit_2=tp2,
+                outcome=OUTCOME_STRINGS[int(outcome_code)],
+                r_multiple=raw_r,
+                r_multiple_after_costs=raw_r - total_cost,
+                bars_held=bars_held,
+                confidence=signal.get('confidence', 0.5),
+                bias=signal.get('bias', 'COUNTER'),
+                mfe=mfe,
+                mae=mae,
+                window_id=window_id,
+                is_oos=is_oos,
+                regime=regime,
+                cost_deducted=total_cost,
+            )
+
+        # ── Pure-Python fallback ────────────────────────────
         entry_cost = entry_price * (costs.spread_pct + costs.slippage_pct)
-        effective_entry = entry_price + entry_cost if direction == 'LONG' else entry_price - entry_cost
+        effective_entry = entry_price + entry_cost if is_long else entry_price - entry_cost
 
         outcome = 'timeout'
         exit_price = None
@@ -68,7 +127,6 @@ class TradeSimulator:
         mfe = 0.0
         mae = 0.0
         tp1_hit = False
-        is_long = direction == 'LONG'
         high_water = 0.0
         low_water = float('inf')
 
@@ -78,11 +136,6 @@ class TradeSimulator:
             lo = lows[i]
             bars_held += 1
 
-            # Conservative same-bar TP/SL ambiguity resolution:
-            # Within a single OHLCV bar we cannot determine whether SL or TP
-            # was hit first.  We assume the WORST outcome — SL is always
-            # checked before TP for both LONG and SHORT directions.  This
-            # avoids overstating backtest performance.
             if is_long:
                 favorable = (h - effective_entry) / risk
                 adverse = (effective_entry - lo) / risk
@@ -91,19 +144,17 @@ class TradeSimulator:
                 if adverse > mae:
                     mae = adverse
 
-                # SL checked first (conservative: assume SL hit before TP)
                 if lo <= stop_loss:
                     outcome = 'breakeven' if tp1_hit else 'loss'
                     exit_price = stop_loss
                     break
                 if not tp1_hit and h >= tp1:
                     tp1_hit = True
-                    stop_loss = effective_entry  # Breakeven floor
+                    stop_loss = effective_entry
                     high_water = h
                 if tp1_hit:
                     if h > high_water:
                         high_water = h
-                    # ATR trailing: ratchet SL up from high water mark
                     if trail_atr_mult > 0 and atrs is not None and i < len(atrs):
                         trail_level = high_water - trail_atr_mult * atrs[i]
                         if trail_level > stop_loss:
@@ -120,19 +171,17 @@ class TradeSimulator:
                 if adverse > mae:
                     mae = adverse
 
-                # SL checked first (conservative: assume SL hit before TP)
                 if h >= stop_loss:
                     outcome = 'breakeven' if tp1_hit else 'loss'
                     exit_price = stop_loss
                     break
                 if not tp1_hit and lo <= tp1:
                     tp1_hit = True
-                    stop_loss = effective_entry  # Breakeven floor
+                    stop_loss = effective_entry
                     low_water = lo
                 if tp1_hit:
                     if lo < low_water:
                         low_water = lo
-                    # ATR trailing: ratchet SL down from low water mark
                     if trail_atr_mult > 0 and atrs is not None and i < len(atrs):
                         trail_level = low_water + trail_atr_mult * atrs[i]
                         if trail_level < stop_loss:
@@ -158,8 +207,6 @@ class TradeSimulator:
         else:
             raw_r = (effective_entry - exit_price) / risk
 
-        # Entry spread+slippage already in effective_entry,
-        # so only charge commission for entry to avoid double-counting.
         entry_comm = entry_price * costs.commission_pct
         exit_cost = exit_price * (costs.spread_pct + costs.commission_pct + costs.slippage_pct)
         total_cost = (entry_comm + exit_cost) / risk if risk > 0 else 0
@@ -230,18 +277,57 @@ class TradeSimulator:
         be_buffer_pct = meta.get('breakeven_buffer_pct', 0.001)
         time_exit_bars = meta.get('time_exit_bars', 0)
 
-        # Direction-specific trailing
         is_long = direction == 'LONG'
         trail_atr_mult = meta.get('trail_atr_mult_long' if is_long else 'trail_atr_mult_short', 0)
         trail_step_atr = meta.get('trail_step_atr_long' if is_long else 'trail_step_atr_short', 0)
 
-        # Entry cost
+        # ── Numba fast path ─────────────────────────────────
+        if HAS_NUMBA:
+            has_atrs = atrs is not None
+            atrs_arr = atrs if has_atrs else _EMPTY_F64
+
+            result = _simulate_v2_kernel(
+                idx, is_long, entry_price, stop_loss, tp, risk,
+                costs.spread_pct, costs.commission_pct, costs.slippage_pct,
+                max_bars,
+                int(buffer_bars), float(buffer_mult), float(be_trigger_r),
+                float(be_buffer_pct), int(time_exit_bars),
+                float(trail_atr_mult), float(trail_step_atr),
+                highs, lows, closes, atrs_arr, has_atrs, n,
+            )
+            outcome_code, exit_px, bars_held, mfe, mae, raw_r, total_cost, final_sl = result
+
+            if exit_px < 0.0:
+                return None
+
+            return TradeResult(
+                entry_time=signal['time'],
+                exit_time=df.index[min(idx + bars_held, n - 1)],
+                direction=direction,
+                entry_price=entry_price,
+                exit_price=exit_px,
+                stop_loss=final_sl,
+                take_profit_1=tp,
+                take_profit_2=tp,
+                outcome=OUTCOME_STRINGS[int(outcome_code)],
+                r_multiple=raw_r,
+                r_multiple_after_costs=raw_r - total_cost,
+                bars_held=bars_held,
+                confidence=signal.get('confidence', 0.5),
+                bias=signal.get('bias', 'COUNTER'),
+                mfe=mfe,
+                mae=mae,
+                window_id=window_id,
+                is_oos=is_oos,
+                regime=regime,
+                cost_deducted=total_cost,
+            )
+
+        # ── Pure-Python fallback ────────────────────────────
         entry_cost = entry_price * (costs.spread_pct + costs.slippage_pct)
         effective_entry = entry_price + entry_cost if is_long else entry_price - entry_cost
 
-        # SL distance for buffer calculation
         sl_distance = abs(effective_entry - stop_loss)
-        original_sl = stop_loss
 
         outcome = 'timeout'
         exit_price = None
@@ -252,7 +338,7 @@ class TradeSimulator:
         trailing_active = False
         high_water = effective_entry if is_long else 0.0
         low_water = effective_entry if not is_long else float('inf')
-        last_trail_price = effective_entry  # Price at last trail update
+        last_trail_price = effective_entry
 
         end_bar = min(idx + max_bars, n)
         for i in range(idx + 1, end_bar):
@@ -261,10 +347,8 @@ class TradeSimulator:
             cl = closes[i]
             bars_held += 1
 
-            # Current ATR for trailing
             atr_i = atrs[i] if atrs is not None and i < len(atrs) else 0
 
-            # --- MFE/MAE tracking ---
             if is_long:
                 favorable = (h - effective_entry) / risk
                 adverse = (effective_entry - lo) / risk
@@ -276,10 +360,8 @@ class TradeSimulator:
             if adverse > mae:
                 mae = adverse
 
-            # --- 1. INITIAL BUFFER (first N bars) ---
             in_buffer = bars_held <= buffer_bars and buffer_bars > 0
             if in_buffer:
-                # Virtual SL = wider by buffer_mult
                 virtual_sl_dist = sl_distance * buffer_mult
                 if is_long:
                     virtual_sl = effective_entry - virtual_sl_dist
@@ -287,16 +369,13 @@ class TradeSimulator:
                         outcome = 'loss'
                         exit_price = virtual_sl
                         break
-                    # Real SL hit but within buffer → ignore (let trade recover)
                 else:
                     virtual_sl = effective_entry + virtual_sl_dist
                     if h >= virtual_sl:
                         outcome = 'loss'
                         exit_price = virtual_sl
                         break
-                    # Real SL hit but within buffer → ignore
             else:
-                # --- 2. BREAKEVEN CHECK (at be_trigger_r profit) ---
                 if not be_triggered:
                     if is_long:
                         current_r = (h - effective_entry) / risk
@@ -314,12 +393,10 @@ class TradeSimulator:
                             if be_level < stop_loss:
                                 stop_loss = be_level
 
-                # --- 3. STEPPED TRAILING (after breakeven) ---
                 if trailing_active and trail_atr_mult > 0 and atr_i > 0:
                     if is_long:
                         if h > high_water:
                             high_water = h
-                        # Only update trail on significant moves
                         step_ok = (trail_step_atr <= 0 or
                                    high_water - last_trail_price >= trail_step_atr * atr_i)
                         if step_ok:
@@ -338,7 +415,6 @@ class TradeSimulator:
                                 stop_loss = trail_level
                                 last_trail_price = low_water
 
-                # --- 4. SL CHECK (conservative: SL before TP) ---
                 if is_long:
                     if lo <= stop_loss:
                         if be_triggered:
@@ -358,7 +434,6 @@ class TradeSimulator:
                         exit_price = stop_loss
                         break
 
-                # --- 5. TP CHECK ---
                 if is_long and h >= tp:
                     outcome = 'win_tp'
                     exit_price = tp
@@ -368,7 +443,6 @@ class TradeSimulator:
                     exit_price = tp
                     break
 
-            # --- 6. TIME EXIT (after time_exit_bars) ---
             if time_exit_bars > 0 and bars_held >= time_exit_bars:
                 if is_long:
                     in_profit = cl > effective_entry
@@ -379,7 +453,6 @@ class TradeSimulator:
                     exit_price = cl
                     break
 
-        # Timeout handling
         if outcome == 'timeout':
             last_idx = min(idx + max_bars - 1, n - 1)
             exit_price = closes[last_idx]

@@ -158,6 +158,7 @@ with tab_ml:
             # ── Per-table schema + completeness ──────────────────────
             _inspect_table = st.selectbox(
                 "Inspect table", _ins_tables, key="ml_inspect_table",
+                help="Select which database table to inspect. 'ml_training_data' = completed trades with 75+ features. 'ml_features' = engineered features. 'market_conditions' = market context snapshots.",
             )
 
             if _inspect_table and _table_counts.get(_inspect_table, 0) > 0:
@@ -192,6 +193,8 @@ with tab_ml:
                 # Split into filled vs sparse
                 well_filled = _schema_df[_schema_df["Completeness"] >= 50].copy()
                 sparse = _schema_df[_schema_df["Completeness"] < 50].copy()
+
+                st.caption("Inspect data quality per column. 'Well-Populated' columns (50%+ filled) are usable for ML. 'Sparse' columns need data collection fixes or feature engineering.")
 
                 tab_all, tab_filled, tab_sparse, tab_sample = st.tabs([
                     f"All Columns ({len(_schema_df)})",
@@ -907,7 +910,7 @@ with tab_ml:
         st.caption(f"Script: `{ML_TRAINING_SCRIPT.name}` (SBS research)")
 
     if training_script:
-        if st.button("Train ML Models", type="primary"):
+        if st.button("Train ML Models", type="primary", help="Retrain the Random Forest classifier on all collected training data. Takes 1-5 minutes. After training, restart bots on VPS to load the new model."):
             with st.status("Training ML models...", expanded=True) as status:
                 try:
                     result = subprocess.run(
@@ -940,7 +943,7 @@ with tab_ml:
 
     st.caption(f"VPS: {VPS_USER}@{VPS_HOST}:{VPS_PORT}")
 
-    if st.button("Refresh Bot Status"):
+    if st.button("Refresh Bot Status", help="Fetch current status of all bot services from the VPS."):
         st.session_state["_refresh_bots"] = True
 
     cols_per_row = 3
@@ -959,15 +962,15 @@ with tab_ml:
                     st.warning(f"**{info['strategy']} {info['symbol']}**  \n`{svc}` — {status}", icon="🟡")
 
                 bc1, bc2, bc3 = st.columns(3)
-                if bc1.button("Start", key=f"start_{svc}"):
+                if bc1.button("Start", key=f"start_{svc}", help="Start this bot's systemd service on the VPS. Use after a manual stop or initial deployment."):
                     r = manage_bot_service(svc, "start")
                     st.toast(f"Start {svc}: {'OK' if r['success'] else r['stderr']}")
                     st.rerun()
-                if bc2.button("Stop", key=f"stop_{svc}"):
+                if bc2.button("Stop", key=f"stop_{svc}", help="Stop this bot's systemd service on the VPS. The bot will stop trading immediately."):
                     r = manage_bot_service(svc, "stop")
                     st.toast(f"Stop {svc}: {'OK' if r['success'] else r['stderr']}")
                     st.rerun()
-                if bc3.button("Restart", key=f"restart_{svc}"):
+                if bc3.button("Restart", key=f"restart_{svc}", help="Restart this bot's systemd service on the VPS. Required after deploying new code or retraining ML models."):
                     r = manage_bot_service(svc, "restart")
                     st.toast(f"Restart {svc}: {'OK' if r['success'] else r['stderr']}")
                     st.rerun()

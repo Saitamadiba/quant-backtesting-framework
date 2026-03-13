@@ -28,6 +28,14 @@ from data.binance_helpers import fetch_binance_candles, calculate_indicators
 from components.charts import mc_distribution_chart, mc_equity_fan
 from data.wfo_loader import list_wfo_results, load_wfo_result
 
+# ── Numba kernel import (optional) ──────────────────────────
+try:
+    from backtrader_framework.optimization.numba_kernels import (
+        _mc_dashboard_kernel, HAS_NUMBA as _HAS_NUMBA,
+    )
+except ImportError:
+    _HAS_NUMBA = False
+
 BACKTEST_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -290,8 +298,8 @@ _BT_DEFAULT_TF = {
 }
 
 c1, c2 = st.columns(2)
-strategy = c1.selectbox("Strategy", ["FVG", "SBS", "Liquidity Raid", "Momentum Mastery"])
-symbol = c2.selectbox("Symbol", ["BTC", "ETH", "NQ"])
+strategy = c1.selectbox("Strategy", ["FVG", "SBS", "Liquidity Raid", "Momentum Mastery"], help="Trading strategy to simulate. Each has different risk/reward profiles.")
+symbol = c2.selectbox("Symbol", ["BTC", "ETH", "NQ"], help="Asset to backtest. BTC/ETH = crypto (24/7, higher costs). NQ = equity futures (session hours, lower costs).")
 
 # ── Auto-detect real trades and WFO results ────────────────────────────────
 _all_trades_preview = get_all_trades()
@@ -359,7 +367,7 @@ elif data_source == "WFO OOS Trades":
 else:
     timeframe = c3.selectbox("Timeframe", ["All"], disabled=True)
 
-num_sims = c4.slider("Monte Carlo Simulations", 100, 50_000, 10_000, step=100)
+num_sims = c4.slider("Monte Carlo Simulations", 100, 50_000, 10_000, step=100, help="Number of random reshuffles of your trade sequence. 10,000 is a solid default. Higher = more accurate probability estimates but slower. 1,000 for quick checks; 50,000 for publication-quality analysis.")
 
 if data_source == "Synthetic Backtest":
     lookback_days = None
@@ -413,10 +421,10 @@ if data_source == "WFO OOS Trades":
 block_size = st.slider(
     "Block Size",
     min_value=1, max_value=10, value=1,
-    help="Block size for bootstrap resampling. 1 = IID (independent trades). >1 = block bootstrap preserving consecutive trade clusters to account for regime effects.",
+    help="Block bootstrap size. 1 = treat each trade independently (no serial correlation). >1 = preserve clusters of consecutive trades (use if strategy is regime-dependent). Default 1 for most strategies.",
 )
 
-run_btn = st.button("Run Backtest", type="primary")
+run_btn = st.button("Run Backtest", type="primary", help="Execute Monte Carlo simulation. Runtime depends on number of simulations and data source — typically 10 seconds to 5 minutes.")
 
 
 def monte_carlo_simulation(trade_pnls: list, num_runs: int,
@@ -426,18 +434,33 @@ def monte_carlo_simulation(trade_pnls: list, num_runs: int,
     if len(trade_pnls) < 3:
         return {"returns": [], "drawdowns": [], "equity_paths": []}
 
-    pnls = np.array(trade_pnls)
+    pnls = np.array(trade_pnls, dtype=np.float64)
     n = len(pnls)
+    max_stored = min(200, num_runs)
+
+    if _HAS_NUMBA:
+        final_returns = np.empty(num_runs)
+        max_drawdowns = np.empty(num_runs)
+        equity_paths = np.empty((max_stored, n + 1))
+        _mc_dashboard_kernel(
+            pnls, initial_capital, num_runs, block_size,
+            final_returns, max_drawdowns, equity_paths, max_stored,
+        )
+        return {
+            "returns": final_returns.tolist(),
+            "drawdowns": max_drawdowns.tolist(),
+            "equity_paths": equity_paths.tolist(),
+        }
+
+    # Python fallback
     final_returns = []
-    max_drawdowns = []
-    equity_paths = []
+    max_drawdowns_list = []
+    equity_paths_list = []
 
     for _ in range(num_runs):
         if block_size <= 1:
-            # IID bootstrap (original behavior)
             shuffled = np.random.choice(pnls, size=n, replace=True)
         else:
-            # Block bootstrap: preserve consecutive trade clusters
             n_blocks = int(np.ceil(n / block_size))
             blocks = []
             max_start = max(1, n - block_size + 1)
@@ -454,15 +477,15 @@ def monte_carlo_simulation(trade_pnls: list, num_runs: int,
 
         peak = np.maximum.accumulate(equity)
         dd = (peak - equity) / np.where(peak > 0, peak, 1)
-        max_drawdowns.append(dd.max() * 100)
+        max_drawdowns_list.append(dd.max() * 100)
 
-        if len(equity_paths) < 200:  # store up to 200 for fan chart
-            equity_paths.append(equity.tolist())
+        if len(equity_paths_list) < 200:
+            equity_paths_list.append(equity.tolist())
 
     return {
         "returns": final_returns,
-        "drawdowns": max_drawdowns,
-        "equity_paths": equity_paths,
+        "drawdowns": max_drawdowns_list,
+        "equity_paths": equity_paths_list,
     }
 
 
@@ -832,14 +855,14 @@ if result_files:
             )
         with _del_c2:
             st.write("")  # vertical spacing
-            if st.button("Delete Run", key="mc_delete_one"):
+            if st.button("Delete Run", key="mc_delete_one", help="Permanently delete selected Monte Carlo result. Cannot be undone."):
                 _target = BACKTEST_RESULTS_DIR / rows[_del_idx]["file"]
                 if _target.exists():
                     _target.unlink()
                     st.toast("Deleted MC run.")
                     st.rerun()
 
-        if st.button("Delete All MC Results", key="mc_delete_all"):
+        if st.button("Delete All MC Results", key="mc_delete_all", help="Permanently delete all Monte Carlo result(s). Cannot be undone."):
             st.session_state["mc_confirm_delete_all"] = True
 
         if st.session_state.get("mc_confirm_delete_all"):
@@ -869,6 +892,7 @@ if result_files:
     selected_run = st.selectbox(
         "Select MC Run to Compare",
         [f.stem for f in result_files[:20]],
+        help="Choose a previous Monte Carlo run to compare against actual live trading results. Validates whether backtest predictions matched reality.",
     )
     selected_path = BACKTEST_RESULTS_DIR / f"{selected_run}.json"
 

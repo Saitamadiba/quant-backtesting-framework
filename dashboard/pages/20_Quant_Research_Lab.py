@@ -53,7 +53,8 @@ def _render_wfo():
     )
 
     # Interactive visualization: train/test windows
-    n_windows = st.slider("Number of WFO windows", 3, 8, 5, key="wfo_nwin")
+    n_windows = st.slider("Number of WFO windows", 3, 8, 5, key="wfo_nwin",
+                          help="Number of train/test splits to simulate. More windows = shorter per-window training but more out-of-sample tests. Shows how WFO adapts to changing market conditions.")
     total_bars = 1000
     train_pct = 0.7
 
@@ -234,9 +235,11 @@ def _render_bayesian():
     # Interactive: slider for trades and win rate
     col1, col2 = st.columns(2)
     with col1:
-        n_trades = st.slider("Number of trades", 10, 300, 50, key="bayes_n")
+        n_trades = st.slider("Number of trades", 10, 300, 50, key="bayes_n",
+                             help="Simulated trade count. More trades = narrower Bayesian posterior = higher confidence in the estimated edge.")
     with col2:
-        true_wr = st.slider("True win rate (%)", 30, 70, 55, key="bayes_wr")
+        true_wr = st.slider("True win rate (%)", 30, 70, 55, key="bayes_wr",
+                            help="Hypothetical true win rate for the simulation. Observe how the Bayesian posterior (blue curve) converges toward this value as trade count increases.")
 
     n_wins = int(n_trades * true_wr / 100)
 
@@ -321,8 +324,10 @@ def _render_monte_carlo():
     )
 
     # Generate synthetic equity paths
-    n_paths = st.slider("Number of simulations", 100, 5000, 1000, key="mc_paths")
-    confidence = st.slider("Confidence level (%)", 80, 99, 95, key="mc_conf")
+    n_paths = st.slider("Number of simulations", 100, 5000, 1000, key="mc_paths",
+                        help="How many times to reshuffle trade results. More paths = better picture of possible equity curve outcomes.")
+    confidence = st.slider("Confidence level (%)", 80, 99, 95, key="mc_conf",
+                           help="Width of the confidence band. 95% means the worst-case drawdown sits in the bottom 2.5% of all simulations.")
 
     np.random.seed(42)
     # Simulate trade results: slight positive edge
@@ -453,9 +458,11 @@ def _render_optuna():
         "Search method",
         ["Grid Search", "Random Search", "Bayesian (Optuna)"],
         horizontal=True, key="optuna_method",
+        help="Grid = exhaustive search (slow but guaranteed). Random = fast sampling (may miss optimum). Bayesian = intelligent search that focuses on promising parameter regions.",
     )
 
-    n_evals = st.slider("Number of evaluations", 10, 100, 30, key="optuna_n")
+    n_evals = st.slider("Number of evaluations", 10, 100, 30, key="optuna_n",
+                        help="How many parameter combinations to test. More = better fit but longer runtime.")
 
     if method == "Grid Search":
         side = int(np.sqrt(n_evals))
@@ -560,7 +567,8 @@ def _render_dvol():
     returns = returns * (1 + (dvol - 50) / 100)
     price = 50000 * np.cumprod(1 + returns)
 
-    threshold = st.slider("DVOL threshold for regime shift", 30, 90, 55, key="dvol_thresh")
+    threshold = st.slider("DVOL threshold for regime shift", 30, 90, 55, key="dvol_thresh",
+                          help="Volatility level that triggers a regime shift. Higher threshold = less frequent regime switching. Lower = more responsive but more whipsaws.")
 
     fig_dvol = go.Figure()
 

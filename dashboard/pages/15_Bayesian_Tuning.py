@@ -173,10 +173,22 @@ tuned_cv = bay_train.get('cv_mean', 0)
 base_acc = baseline.get('accuracy', 0)
 base_cv = baseline.get('cv_mean', 0)
 
-k1.metric("Tuned Accuracy", f"{tuned_acc:.1%}", f"{tuned_acc - base_acc:+.1%}")
-k2.metric("Tuned CV Mean", f"{tuned_cv:.1%}", f"{tuned_cv - base_cv:+.1%}")
-k3.metric("Trials Completed", bay.get('n_trials_completed', 0))
-k4.metric("Trials Pruned", bay.get('n_trials_pruned', 0))
+k1.metric(
+    "Tuned Accuracy", f"{tuned_acc:.1%}", f"{tuned_acc - base_acc:+.1%}",
+    help="Classification accuracy after Bayesian hyperparameter optimization. Compare delta to baseline to measure improvement from tuning.",
+)
+k2.metric(
+    "Tuned CV Mean", f"{tuned_cv:.1%}", f"{tuned_cv - base_cv:+.1%}",
+    help="Cross-validation mean score after tuning. Higher and more stable than baseline indicates genuine improvement, not overfitting to the test set.",
+)
+k3.metric(
+    "Trials Completed", bay.get('n_trials_completed', 0),
+    help="Number of Optuna optimization trials that ran to completion (not pruned).",
+)
+k4.metric(
+    "Trials Pruned", bay.get('n_trials_pruned', 0),
+    help="Trials terminated early because they underperformed the current best. High pruning ratio = efficient search (Optuna focuses on promising regions).",
+)
 
 
 # ── Best Parameters ──────────────────────────────────────────────────────────
@@ -214,6 +226,11 @@ history = bay.get('optimization_history', [])
 convergence = bay.get('convergence', [])
 
 if history:
+    st.caption(
+        "Blue dots = individual trial scores. Green line = best score found so far "
+        "(monotonically increasing). Orange star = overall winner. A flat green line "
+        "after many trials means the search has converged."
+    )
     with st.expander("Trial Scores & Convergence", expanded=True):
         trial_nums = [h['trial_number'] for h in history]
         trial_vals = [h['value'] for h in history]
@@ -270,6 +287,10 @@ st.header("6. Parameter Importance")
 
 param_imp = bay.get('param_importances', {})
 if param_imp:
+    st.caption(
+        "Shows which hyperparameters had the most impact on the objective. "
+        "Focus tuning effort on the top parameters; the bottom ones can be left at defaults."
+    )
     with st.expander("Which hyperparameters matter most?", expanded=True):
         names = list(param_imp.keys())
         values = list(param_imp.values())

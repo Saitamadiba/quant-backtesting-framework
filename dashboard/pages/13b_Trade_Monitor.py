@@ -151,7 +151,8 @@ try:
     from streamlit_autorefresh import st_autorefresh
 
     refresh_label = st.sidebar.selectbox(
-        "Data Refresh", list(TRADING_REFRESH_OPTIONS.keys()), index=2, key="mon_refresh"
+        "Data Refresh", list(TRADING_REFRESH_OPTIONS.keys()), index=2, key="mon_refresh",
+        help="Auto-refresh interval for live data. 'Off' = manual refresh only. '5s' = update charts every 5 seconds.",
     )
     interval = TRADING_REFRESH_OPTIONS[refresh_label]
     if interval > 0:
@@ -163,19 +164,19 @@ st.title("Trade Monitor")
 
 # ── Symbol / Timeframe / History selectors ─────────────────────────────────────
 scols = st.columns([1, 1, 1, 3])
-sym_key = scols[0].selectbox("Symbol", list(TRADING_PAIRS.keys()), key="mon_sym")
-timeframe = scols[1].selectbox("Timeframe", CHART_TIMEFRAMES, index=2, key="mon_tf")
-history_days = scols[2].number_input("Days", min_value=1, max_value=30, value=3, key="mon_days")
+sym_key = scols[0].selectbox("Symbol", list(TRADING_PAIRS.keys()), key="mon_sym", help="Trading pair to monitor. Price chart, open positions, and trade history filter to this symbol.")
+timeframe = scols[1].selectbox("Timeframe", CHART_TIMEFRAMES, index=2, key="mon_tf", help="Candlestick period. 1m = high detail, 4h = cleaner trends with less noise.")
+history_days = scols[2].number_input("Days", min_value=1, max_value=30, value=3, key="mon_days", help="History window in days. Longer = more context for support/resistance but slower to load.")
 pair = TRADING_PAIRS[sym_key]
 
 # Indicator toggles
 tcols = st.columns(6)
-show_emas = tcols[0].checkbox("EMAs", True, key="t_ema")
-show_vol = tcols[1].checkbox("Volume", True, key="t_vol")
-show_obs = tcols[2].checkbox("Order Blocks", True, key="t_ob")
-show_fvgs = tcols[3].checkbox("FVGs", True, key="t_fvg")
-show_htf = tcols[4].checkbox("HTF FVGs", False, key="t_htf")
-show_sess = tcols[5].checkbox("Session H/L", True, key="t_sess")
+show_emas = tcols[0].checkbox("EMAs", True, key="t_ema", help="Overlay EMA50 and EMA200 moving averages. Crossovers signal trend changes.")
+show_vol = tcols[1].checkbox("Volume", True, key="t_vol", help="Volume histogram. Green = up-day volume, red = down-day volume. High volume confirms price moves.")
+show_obs = tcols[2].checkbox("Order Blocks", True, key="t_ob", help="ICT order blocks: institutional supply/demand zones. Blue = bullish, red = bearish.")
+show_fvgs = tcols[3].checkbox("FVGs", True, key="t_fvg", help="Fair Value Gaps: 3-candle imbalance zones. Cyan = bullish, pink = bearish. Price tends to fill these gaps.")
+show_htf = tcols[4].checkbox("HTF FVGs", False, key="t_htf", help="Higher-timeframe FVGs. Macro liquidity targets that drive intraday action.")
+show_sess = tcols[5].checkbox("Session H/L", True, key="t_sess", help="Session highs/lows: Asian (purple), London (green), New York (orange). Key levels for intraday strategies.")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # FETCH DATA
@@ -463,14 +464,17 @@ with st.expander("Manual Order Entry", expanded=False):
 
                 ocols = st.columns([1, 1, 1, 1])
                 direction = ocols[0].radio(
-                    "Direction", ["Long", "Short"], horizontal=True, key="m_dir"
+                    "Direction", ["Long", "Short"], horizontal=True, key="m_dir",
+                    help="Long = profit if price rises. Short = profit if price falls.",
                 )
                 order_type = ocols[1].selectbox(
-                    "Type", ["Market", "Limit", "Stop Market", "Stop Limit"], key="m_otype"
+                    "Type", ["Market", "Limit", "Stop Market", "Stop Limit"], key="m_otype",
+                    help="Market = instant fill at current price. Limit = fill at your price or better. Stop = trigger when price breaches level.",
                 )
                 qty = ocols[2].number_input(
                     f"Qty ({pair['base']})", min_value=lot_step, step=lot_step,
                     format=f"%.{pair['qty_decimals']}f", key="m_qty",
+                    help="Position size in base currency (e.g., BTC). Respects exchange minimum lot sizes.",
                 )
                 ocols[3].metric("Price", f"${cur_price:,.2f}")
 
@@ -482,27 +486,31 @@ with st.expander("Manual Order Entry", expanded=False):
                     limit_price = pcols[0].number_input(
                         "Limit Price", min_value=0.0, step=tick_size, value=cur_price,
                         format=f"%.{pair['price_decimals']}f", key="m_lpx",
+                        help="Fill price for limit orders. Only used for Limit and Stop Limit types.",
                     )
                 if order_type in ("Stop Market", "Stop Limit"):
                     stop_price = pcols[1].number_input(
                         "Stop Price", min_value=0.0, step=tick_size, value=cur_price,
                         format=f"%.{pair['price_decimals']}f", key="m_spx",
+                        help="Trigger price for stop orders. Once breached, order activates.",
                     )
 
                 sl_price = pcols[2].number_input(
                     "Stop Loss", min_value=0.0, step=tick_size, value=0.0,
                     format=f"%.{pair['price_decimals']}f", key="m_sl",
+                    help="Automatic exit price to cap losses. Placed as a stop-market order after fill.",
                 )
                 tp_price = pcols[3].number_input(
                     "Take Profit", min_value=0.0, step=tick_size, value=0.0,
                     format=f"%.{pair['price_decimals']}f", key="m_tp",
+                    help="Automatic exit price to lock in profit. Placed as a limit order after fill.",
                 )
 
                 # 2-step confirmation
                 if "pending_order" not in st.session_state:
                     st.session_state.pending_order = None
 
-                if st.button("Place Order", type="primary"):
+                if st.button("Place Order", type="primary", help="Queue order for 2-step confirmation. Review details before final submission."):
                     st.session_state.pending_order = {
                         "symbol": binance_sym, "direction": direction,
                         "order_type": order_type,
@@ -640,10 +648,10 @@ with tab_history:
         else:
             stats = mdb2.get_trade_stats()
             hcols = st.columns(4)
-            hcols[0].metric("Trades", stats["total"])
-            hcols[1].metric("Win Rate", f"{stats['win_rate']}%")
-            hcols[2].metric("Total P&L", f"${stats['total_pnl'] or 0:,.2f}")
-            hcols[3].metric("Best", f"${stats['best_trade'] or 0:,.2f}")
+            hcols[0].metric("Trades", stats["total"], help="Total number of completed manual trades for this symbol.")
+            hcols[1].metric("Win Rate", f"{stats['win_rate']}%", help="Percentage of manual trades that closed with a positive P&L.")
+            hcols[2].metric("Total P&L", f"${stats['total_pnl'] or 0:,.2f}", help="Sum of realized profit and loss across all closed manual trades (USD).")
+            hcols[3].metric("Best", f"${stats['best_trade'] or 0:,.2f}", help="Largest single winning trade by USD profit.")
 
             tdf = pd.DataFrame(closed)
             tcols_list = [

@@ -28,7 +28,7 @@ if not df_all.empty and "pnl_usd" in df_all.columns:
     pnl_min = float(df_all["pnl_usd"].min())
     pnl_max = float(df_all["pnl_usd"].max())
     if pnl_min < pnl_max:
-        pnl_range = st.sidebar.slider("P&L ($)", pnl_min, pnl_max, (pnl_min, pnl_max), key="tj_pnl")
+        pnl_range = st.sidebar.slider("P&L ($)", pnl_min, pnl_max, (pnl_min, pnl_max), key="tj_pnl", help="Filter trades within a specific P&L range in USD. Useful for isolating big winners, big losers, or analyzing a specific trade-size bucket.")
     else:
         pnl_range = (pnl_min, pnl_max)
 else:

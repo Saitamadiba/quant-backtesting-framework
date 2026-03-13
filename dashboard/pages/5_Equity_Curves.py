@@ -15,7 +15,7 @@ from config import INITIAL_BALANCE, STRATEGY_CHANGELOG
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 src = source_filter(key_prefix="eq")
 st.sidebar.markdown("**Overlays**")
-show_benchmark = st.sidebar.checkbox("Buy & Hold Benchmark", value=False, key="eq_benchmark")
+show_benchmark = st.sidebar.checkbox("Buy & Hold Benchmark", value=False, key="eq_benchmark", help="Overlay a buy-and-hold comparison line showing how passive holding would have performed over the same period. If your equity curve beats this, you are generating alpha.")
 show_regimes = st.sidebar.checkbox("Market Regimes", value=False, key="eq_regimes",
                                    help="Shade background by market regime (Trending Up / Down / Ranging) using ADX + EMA on 1h candles.")
 show_changes = st.sidebar.checkbox("Strategy Deployments", value=True, key="eq_changes",

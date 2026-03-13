@@ -48,6 +48,7 @@ selected_indices = st.multiselect(
     format_func=lambda i: options[i],
     default=[0, 1] if len(options) >= 2 else [],
     key="portfolio_select",
+    help="Select 2+ WFO results to combine into a portfolio. Choose different strategies/symbols/timeframes for diversification.",
 )
 
 if len(selected_indices) < 2:
@@ -74,6 +75,7 @@ with col_method:
             'max_sharpe': 'Mean-Variance (maximize Sharpe)',
         }[m],
         key="portfolio_method",
+        help="Equal = 1/N baseline. Risk Parity = weight inversely by volatility. Kelly = edge-based optimal sizing. Max Sharpe = mean-variance optimization for best risk-adjusted return.",
     )
 with col_kelly:
     frac_kelly = st.slider(
@@ -128,17 +130,21 @@ ps = result.portfolio_stats
 st.header("3. Portfolio Results")
 
 k1, k2, k3, k4, k5 = st.columns(5)
-k1.metric("Sharpe (Annual)", f"{ps['sharpe_annual']:.3f}")
-k2.metric("Max Drawdown", f"{ps['max_drawdown_r']:.2f} R")
-k3.metric("Total R", f"{ps['total_r']:.2f}")
-k4.metric("Diversification Ratio", f"{result.diversification_ratio:.2f}")
-k5.metric("Overlap Days", f"{ps['n_days']}")
+k1.metric("Sharpe (Annual)", f"{ps['sharpe_annual']:.3f}", help="Annualized Sharpe ratio of combined portfolio daily returns (x sqrt(252)). > 1.0 is good, > 2.0 is excellent.")
+k2.metric("Max Drawdown", f"{ps['max_drawdown_r']:.2f} R", help="Largest peak-to-trough decline in R-multiples during the backtest period.")
+k3.metric("Total R", f"{ps['total_r']:.2f}", help="Cumulative R-multiple return of the combined portfolio.")
+k4.metric("Diversification Ratio", f"{result.diversification_ratio:.2f}", help="Weighted average component volatility / portfolio volatility. > 1.0 means diversification is reducing risk. Higher = better diversification benefit.")
+k5.metric("Overlap Days", f"{ps['n_days']}", help="Days where all portfolio components have data. Shorter overlap reduces statistical power of the comparison.")
 
 st.caption(f"Period: {ps['date_start']} to {ps['date_end']}  |  Method: {result.allocation_method}")
 
 # ── Allocation Weights Table ────────────────────────────────────
 
 st.subheader("Allocation Weights")
+st.caption(
+    "Portfolio weights (% of capital) per component, with individual risk/return metrics. "
+    "Weights depend on the allocation method selected above."
+)
 
 weight_rows = []
 for label, stats in result.component_stats.items():
@@ -209,6 +215,10 @@ st.caption(f"Average off-diagonal correlation: **{avg_corr:.3f}**")
 # ── Combined Equity Curve ──────────────────────────────────────
 
 st.subheader("Combined Equity Curve")
+st.caption(
+    "Gold line = combined portfolio. Thin dashed = individual components. "
+    "The portfolio should be smoother (lower drawdowns) than any single component."
+)
 
 fig_eq = go.Figure()
 
@@ -288,9 +298,9 @@ if result.monte_carlo and result.monte_carlo.get('valid'):
     mc = result.monte_carlo
 
     mc1, mc2, mc3 = st.columns(3)
-    mc1.metric("P(Profitable)", f"{mc['p_profitable']:.1%}")
-    mc2.metric("5th %ile Final R", f"{mc['pct_5_final_r']:.2f}")
-    mc3.metric("95th %ile Max DD", f"{mc['pct_95_max_dd']:.2f} R")
+    mc1.metric("P(Profitable)", f"{mc['p_profitable']:.1%}", help="Probability portfolio ends profitable based on 10,000 bootstrap resamples of the combined return stream.")
+    mc2.metric("5th %ile Final R", f"{mc['pct_5_final_r']:.2f}", help="Worst 5% scenario outcome. If positive, the portfolio is profitable even in pessimistic trade orderings.")
+    mc3.metric("95th %ile Max DD", f"{mc['pct_95_max_dd']:.2f} R", help="Worst-case max drawdown (95th percentile). Plan your risk management for at least this level of drawdown.")
 
     with st.expander("Confidence Intervals", expanded=False):
         ci_rows = [

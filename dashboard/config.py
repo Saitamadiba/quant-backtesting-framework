@@ -92,6 +92,12 @@ SERVICE_WORK_DIRS = {
     "sbs-eth": f"{VPS_REMOTE_BASE}/SBS/bots/eth",
 }
 
+# ── VPS Log Files (read directly — journalctl requires systemd-journal group) ─
+SERVICE_LOG_FILES = {
+    svc: f"{VPS_REMOTE_BASE}/logs/{svc.replace('-', '_')}.log"
+    for svc in BOT_SERVICES
+}
+
 VPS_BACKUP_SCRIPT = f"{VPS_REMOTE_BASE}/backup_dbs.sh"
 
 # ── Session Time Ranges (Eastern Time — America/New_York, DST-aware) ─────────

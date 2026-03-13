@@ -35,15 +35,24 @@ col1, col2, col3 = st.columns(3)
 
 with col1:
     strategies = list(ADAPTER_REGISTRY.keys())
-    strategy = st.selectbox("Strategy", strategies, index=0, key="stress_strategy")
+    strategy = st.selectbox(
+        "Strategy", strategies, index=0, key="stress_strategy",
+        help="Strategy to stress test. Must have a completed WFO result saved.",
+    )
 
 with col2:
     symbols = sorted(set(s['symbol'] for s in saved))
-    symbol = st.selectbox("Symbol", symbols, index=0, key="stress_symbol")
+    symbol = st.selectbox(
+        "Symbol", symbols, index=0, key="stress_symbol",
+        help="Asset to apply stress scenarios to.",
+    )
 
 with col3:
     timeframes = sorted(set(s['timeframe'] for s in saved))
-    timeframe = st.selectbox("Timeframe", timeframes, index=0, key="stress_timeframe")
+    timeframe = st.selectbox(
+        "Timeframe", timeframes, index=0, key="stress_timeframe",
+        help="Timeframe of the WFO result to use as the baseline.",
+    )
 
 # Filter WFO results
 filtered = [
@@ -66,13 +75,28 @@ st.subheader("Scenarios")
 col_a, col_b = st.columns(2)
 
 with col_a:
-    use_historical = st.checkbox("Historical Crash Scaling", value=True)
-    use_vol_spike = st.checkbox("Volatility Spike", value=True)
-    use_flash = st.checkbox("Flash Crash", value=True)
+    use_historical = st.checkbox(
+        "Historical Crash Scaling", value=True,
+        help="Replay historical crash patterns (e.g., May 2021, Nov 2022) at 1x-2x severity. Tests if your strategy survives known tail events.",
+    )
+    use_vol_spike = st.checkbox(
+        "Volatility Spike", value=True,
+        help="Synthetically multiply market volatility by 2x, 3x, or 5x. Reveals how stop-losses and position sizing behave in extreme vol.",
+    )
+    use_flash = st.checkbox(
+        "Flash Crash", value=True,
+        help="Sudden -10% to -15% price drops within minutes. Tests drawdown recovery and whether stops execute at intended prices.",
+    )
 
 with col_b:
-    use_drawdown = st.checkbox("Prolonged Drawdown", value=True)
-    use_v_recovery = st.checkbox("V-Shaped Recovery", value=True)
+    use_drawdown = st.checkbox(
+        "Prolonged Drawdown", value=True,
+        help="Extended losing streak lasting weeks. Tests psychological and financial resilience during sustained adverse conditions.",
+    )
+    use_v_recovery = st.checkbox(
+        "V-Shaped Recovery", value=True,
+        help="Sharp -30% crash followed by rapid bounce. Tests whether the strategy catches the recovery or locks in losses too early.",
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -201,15 +225,20 @@ if not scenarios:
 
 st.header("2. Baseline Performance")
 b1, b2, b3, b4 = st.columns(4)
-b1.metric("Strategy", results.get('strategy', ''))
-b2.metric("Baseline Trades", baseline.get('n_trades', 0))
-b3.metric("Baseline Win Rate", f"{baseline.get('win_rate', 0):.1%}")
-b4.metric("Baseline Mean R", f"{baseline.get('mean_r', 0):+.3f}")
+b1.metric("Strategy", results.get('strategy', ''), help="The strategy being stress-tested.")
+b2.metric("Baseline Trades", baseline.get('n_trades', 0), help="Total number of trades in the baseline (non-stressed) WFO result.")
+b3.metric("Baseline Win Rate", f"{baseline.get('win_rate', 0):.1%}", help="Percentage of winning trades under normal (non-stressed) market conditions.")
+b4.metric("Baseline Mean R", f"{baseline.get('mean_r', 0):+.3f}", help="Average R-multiple per trade under normal conditions. Positive = profitable on average.")
 
 
 # ── Survival Heatmap ─────────────────────────────────────────────────────────
 
 st.header("3. Survival Heatmap")
+st.caption(
+    "Heatmap showing strategy resilience across all tested scenarios. "
+    "Green = survived well, red = significant degradation. "
+    "Rows = scenarios, columns = metrics."
+)
 st.caption(
     "Green (80+) = strategy handles this stress well. "
     "Yellow (50-80) = vulnerable. Red (<50) = high risk of significant losses."
@@ -249,6 +278,10 @@ if matrix.get('types') and matrix.get('magnitudes') and matrix.get('scores'):
 # ── Price Charts ─────────────────────────────────────────────────────────────
 
 st.header("4. Scenario Price Charts")
+st.caption(
+    "Synthetic price paths overlaid on original data. Red zones highlight the stress event. "
+    "Observe where the strategy would have taken losses or been stopped out."
+)
 
 scenarios_with_price = [s for s in scenarios if s.get('price_data')]
 if scenarios_with_price:
@@ -292,11 +325,26 @@ if scenarios_with_price:
             # Metrics for this scenario
             sm = sc.get('survival_metrics', {})
             mc1, mc2, mc3, mc4, mc5 = st.columns(5)
-            mc1.metric("Survival Score", f"{sm.get('survival_score', 0):.0f}/100")
-            mc2.metric("Max DD (R)", f"{sm.get('max_drawdown_r', 0):.2f}")
-            mc3.metric("Consec Losses", sm.get('consecutive_losses', 0))
-            mc4.metric("Trades (Event)", sc.get('trades_during_event', 0))
-            mc5.metric("Net R (Event)", f"{sm.get('net_r_during_event', 0):+.2f}")
+            mc1.metric(
+                "Survival Score", f"{sm.get('survival_score', 0):.0f}/100",
+                help="Composite 0-100 score measuring strategy viability under this scenario. >70 = resilient, <40 = vulnerable.",
+            )
+            mc2.metric(
+                "Max DD (R)", f"{sm.get('max_drawdown_r', 0):.2f}",
+                help="Worst peak-to-trough drawdown in R-multiples during the stress event.",
+            )
+            mc3.metric(
+                "Consec Losses", sm.get('consecutive_losses', 0),
+                help="Longest consecutive losing streak during the scenario.",
+            )
+            mc4.metric(
+                "Trades (Event)", sc.get('trades_during_event', 0),
+                help="Number of trade entries that occurred during the stress window.",
+            )
+            mc5.metric(
+                "Net R (Event)", f"{sm.get('net_r_during_event', 0):+.2f}",
+                help="Total R-multiple earned/lost during the stress event period.",
+            )
 
 
 # ── Detailed Comparison Table ────────────────────────────────────────────────
