@@ -1724,7 +1724,725 @@ implement the abstract methods for their strategy, inheriting all infrastructure
 
 
 # ╔══════════════════════════════════════════════════════════════════════════╗
-# ║  MAIN — 10 TABS ALIGNED TO EVALUATION GRID                              ║
+# ║  11 — BACKTESTING & QUANTITATIVE METHODS                                ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+
+def tab_11_backtesting():
+    st.header("11 — Backtesting & Quantitative Methods")
+
+    st.markdown("""
+This section covers the **quantitative backtesting infrastructure** that
+validates every strategy before deployment.  The system implements
+Walk-Forward Optimisation (WFO), Monte Carlo simulation, Hidden Markov Model
+regime detection, implied volatility gating, and Bayesian optimisation — all
+built from first principles in Python.
+""")
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  11.1 — WALK-FORWARD OPTIMISATION (WFO) ARCHITECTURE
+    # ══════════════════════════════════════════════════════════════════════
+
+    st.subheader("11.1 — Walk-Forward Optimisation (WFO)")
+
+    st.markdown("""
+**Walk-Forward Optimisation** prevents curve-fitting by splitting historical
+data into sequential **in-sample (IS)** and **out-of-sample (OOS)** windows.
+Parameters are optimised on IS data, then validated on unseen OOS data.
+The engine supports both **anchored** (expanding) and **rolling** windows.
+""")
+
+    st.code("""
+Anchored (expanding) window — IS grows, OOS slides forward:
+
+  ┌─────────── IS Window 1 ──────────┐ embargo ┌── OOS 1 ──┐
+  │▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓│░░░░░░░░░│▒▒▒▒▒▒▒▒▒▒▒│
+  0                                 500       668          768
+
+  ┌──────────────── IS Window 2 ─────────────────┐ embargo ┌── OOS 2 ──┐
+  │▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓│░░░░░░░░░│▒▒▒▒▒▒▒▒▒▒▒│
+  0                                             600       768          868
+
+  ▓ = In-Sample (train)   ░ = Embargo gap   ▒ = Out-of-Sample (validate)
+
+  The embargo gap = max_trade_bars (168 bars on 15m ≈ 42 hours).
+  This prevents IS trades from "leaking" exit prices into OOS territory.
+""", language="text")
+
+    st.markdown("**`WFOConfig` — the dataclass controlling the entire pipeline:**")
+    st.code("""
+# backtrader_framework/optimization/wfo_engine.py
+
+@dataclass
+class WFOConfig:
+    # Window sizing
+    train_window_bars: int = 500      # Bars in each IS window
+    test_window_bars: int = 100       # Bars in each OOS window
+    step_bars: int = 100              # Slide forward by N bars per iteration
+    anchored: bool = True             # Expanding (True) or rolling (False) window
+    min_train_bars: int = 250         # Minimum IS size before optimisation starts
+    min_ema_warmup: int = 250         # Bars needed for EMA200 to stabilise
+    min_trades_per_window: int = 3    # Reject param combos with fewer IS trades
+
+    # Transaction costs (round-trip model)
+    costs: TransactionCosts = field(default_factory=TransactionCosts)
+    max_trade_bars: int = 168         # Force-close trades after N bars (= embargo)
+
+    # Optimisation
+    optimization_metric: str = 'expectancy'  # 'expectancy' | 'profit_factor' | 'sharpe' | 'total_r'
+    max_param_combos: int = 1000      # Cap total grid search combos
+    grid_mode: str = 'auto'           # 'full' | 'random' (Sobol) | 'auto'
+    random_samples: int = 150         # Combos to sample in random mode
+
+    # Advanced
+    use_bayesian: bool = False        # Use Optuna TPE instead of grid search
+    use_hmm_regime: bool = False      # HMM regime detection per window
+    hmm_position_sizing: bool = False # Scale OOS R-multiples by HMM probability
+    parallel: bool = True             # Multiprocess combo evaluation
+    n_workers: int = 0                # 0 = auto (cpu_count - 1)
+""", language="python")
+
+    st.markdown("**The `for_timeframe()` factory** scales window sizes so that each window covers "
+                "the same calendar duration regardless of bar frequency:")
+    st.code("""
+# 4h bars: 100 bars = 17 days of market data
+# 15m bars: need 16× more bars for the same 17 days
+
+@classmethod
+def for_timeframe(cls, tf: str, **overrides) -> 'WFOConfig':
+    multiplier = {'15m': 16, '30m': 8, '1h': 4, '4h': 1, '1d': 1}[tf]
+    return cls(
+        train_window_bars=500 * multiplier,
+        test_window_bars=100 * multiplier,
+        step_bars=100 * multiplier,
+        max_trade_bars=168 * multiplier,
+        **overrides,
+    )
+""", language="python")
+
+    st.markdown("""
+**High-level execution flow:**
+""")
+    st.code("""
+WalkForwardOptimizer.run_optimization(symbol, timeframe)
+│
+├── 1. Fetch OHLCV from DuckDB
+├── 2. IndicatorEngine.calculate(df) → adds 30+ indicator columns
+├── 3. _generate_windows(df) → list of (IS_start, IS_end, OOS_start, OOS_end)
+│
+├── 4. FOR EACH WINDOW:
+│   ├── _optimize_window()
+│   │   ├── IN-SAMPLE: evaluate all param combos (grid or Bayesian)
+│   │   │   ├── adapter.generate_signals() or adapter.execute_signals()
+│   │   │   ├── TradeSimulator.simulate() per signal
+│   │   │   └── score_trades() → select best combo
+│   │   │
+│   │   └── OUT-OF-SAMPLE: apply best params to unseen data
+│   │       ├── Generate signals with best_params
+│   │       ├── Simulate trades
+│   │       └── (optional) HMM regime position sizing
+│   │
+│   └── Collect OOS trades
+│
+└── 5. _compile_results()
+    ├── Deduplicate overlapping OOS trades
+    ├── StatisticalTests.run_all() → win rate, Sharpe, profit factor, CIs
+    ├── Overfit ratio = OOS_mean_R / IS_mean_R
+    ├── Deflated Sharpe Ratio (adjusts for multiple testing)
+    ├── MonteCarloAnalysis.bootstrap_ci() → 10,000 resamples
+    └── MonteCarloAnalysis.equity_fan() → 1,000 equity paths
+""", language="text")
+
+    st.divider()
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  11.2 — WFO SCORING SYSTEM
+    # ══════════════════════════════════════════════════════════════════════
+
+    st.subheader("11.2 — WFO Scoring System")
+
+    st.markdown("""
+Every parameter combination is scored on its **in-sample trades** using one of
+four metrics.  The metric operates on **R-multiples** (profit/loss normalised
+by initial risk), not raw dollar P&L — this makes scores comparable across
+assets with different price levels.
+""")
+
+    st.code("""
+# backtrader_framework/optimization/parallel.py
+
+def score_trades(trades: list, metric: str) -> float:
+    \"\"\"Score a set of trades using the given optimization metric.\"\"\"
+    if len(trades) < 2:
+        return -float('inf')                  # Reject trivial samples
+
+    r_values = [t.r_multiple_after_costs for t in trades]
+
+    if metric == 'expectancy':
+        # E = WR × avg_win + (1 - WR) × avg_loss
+        wins = [r for r in r_values if r > 0]
+        losses = [r for r in r_values if r <= 0]
+        wr = len(wins) / len(r_values)
+        avg_w = float(np.mean(wins)) if wins else 0
+        avg_l = float(np.mean(losses)) if losses else 0
+        return wr * avg_w + (1 - wr) * avg_l
+
+    elif metric == 'profit_factor':
+        # PF = gross_profit / |gross_loss|
+        gp = sum(r for r in r_values if r > 0)
+        gl = abs(sum(r for r in r_values if r < 0))
+        return gp / gl if gl > 0 else 0
+
+    elif metric == 'sharpe':
+        # Sharpe = mean(R) / std(R)
+        m = np.mean(r_values)
+        s = np.std(r_values, ddof=1)
+        return m / s if s > 0 else 0
+
+    else:  # total_r
+        return sum(r_values)
+""", language="python")
+
+    st.markdown("""
+| Metric | Formula | Best for |
+|--------|---------|----------|
+| **Expectancy** | `WR × avg_win + (1 - WR) × avg_loss` | General-purpose (default) |
+| **Profit Factor** | `gross_profit / \\|gross_loss\\|` | Conservative strategies |
+| **Sharpe** | `mean(R) / std(R, ddof=1)` | Risk-adjusted returns |
+| **Total R** | `sum(R-multiples)` | Aggressive: maximise raw P&L |
+""")
+
+    st.markdown("**Transaction cost model** — applied to every simulated trade:")
+    st.code("""
+# backtrader_framework/optimization/wfo_engine.py
+
+@dataclass
+class TransactionCosts:
+    spread_pct: float = 0.0005       # Bid-ask spread
+    commission_pct: float = 0.001    # Exchange fee
+    slippage_pct: float = 0.0003     # Price impact
+
+    @classmethod
+    def for_asset(cls, symbol: str) -> 'TransactionCosts':
+        if symbol in ('BTC', 'ETH'):
+            return cls(spread_pct=0.0001, commission_pct=0.00055, slippage_pct=0.0001)
+        if symbol == 'NQ':
+            return cls(spread_pct=0.0001, commission_pct=0.0002, slippage_pct=0.0001)
+        return cls()
+""", language="python")
+
+    st.markdown("**Trade Simulator** — walks bar-by-bar from entry, applying SL/TP/trailing:")
+    st.code("""
+# backtrader_framework/optimization/wfo_engine.py — TradeSimulator.simulate()
+
+# Simplified structure (actual code is 150+ lines):
+for i in range(entry_bar + 1, entry_bar + max_bars):
+    h, lo = highs[i], lows[i]
+
+    # Track maximum favourable/adverse excursion
+    mfe = max(mfe, (h - entry) / risk)      # Best unrealised profit
+    mae = max(mae, (entry - lo) / risk)      # Worst unrealised loss
+
+    # TP1 hit → move stop-loss to breakeven (lock in 0R floor)
+    if not tp1_hit and h >= take_profit_1:
+        tp1_hit = True
+        stop_loss = entry_price              # Breakeven
+
+    # ATR trailing stop (after TP1)
+    if tp1_hit and atrs is not None:
+        trail = high_water - trail_atr_mult * atrs[i]
+        stop_loss = max(stop_loss, trail)    # Only ratchet up
+
+    # Exit conditions
+    if lo <= stop_loss:
+        exit_price = stop_loss               # Loss or breakeven
+        break
+    if h >= take_profit_2:
+        exit_price = take_profit_2           # Full target hit
+        break
+
+# Final R-multiple (after costs):
+raw_r = (exit_price - entry_price) / risk
+cost_r = (entry_commission + exit_costs) / risk
+r_after_costs = raw_r - cost_r
+""", language="python")
+
+    st.divider()
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  11.3 — MONTE CARLO SIMULATION
+    # ══════════════════════════════════════════════════════════════════════
+
+    st.subheader("11.3 — Monte Carlo Simulation")
+
+    st.markdown("""
+After WFO produces a set of out-of-sample trades, Monte Carlo simulation
+quantifies the **range of possible outcomes** by resampling those trades
+thousands of times.  This answers questions like: *"If I traded this strategy
+1,000 times, what's the worst drawdown I might see?"*
+
+The implementation uses **block bootstrap resampling**: rather than shuffling
+individual trades (which destroys serial correlation), it samples contiguous
+blocks to preserve regime clustering.
+""")
+
+    st.code("""
+Algorithm: Block Bootstrap Monte Carlo
+
+Input:  R-multiples from OOS trades = [r₁, r₂, ..., rₙ]
+Config: n_resamples = 10,000, block_size = 3
+
+FOR each of 10,000 simulations:
+    1. Build a resampled trade sequence of length n:
+       - Pick a random start index
+       - Copy block_size consecutive trades
+       - Repeat until n trades are collected
+
+    2. Compute 6 metrics on this resampled sequence:
+       - Mean R-multiple
+       - Win rate (% of R > 0)
+       - Expectancy (WR × avg_win + (1 - WR) × avg_loss)
+       - Profit factor (gross_wins / |gross_losses|)
+       - Sharpe ratio (mean / std)
+       - Max drawdown (peak-to-trough of cumulative R)
+
+OUTPUT: For each metric, extract the 2.5th and 97.5th percentile
+        → 95% confidence interval
+""", language="text")
+
+    st.markdown("**Core implementation** (with optional Numba JIT acceleration):")
+    st.code("""
+# backtrader_framework/optimization/wfo_engine.py — MonteCarloAnalysis
+
+@staticmethod
+def bootstrap_ci(trades, n_resamples=10000, confidence=0.95, block_size=1):
+    r_values = np.array([t.r_multiple_after_costs for t in trades])
+    n = len(r_values)
+
+    # Pre-allocate metric arrays
+    mean_rs = np.empty(n_resamples)
+    win_rates = np.empty(n_resamples)
+    expectancies = np.empty(n_resamples)
+    profit_factors = np.empty(n_resamples)
+    sharpes = np.empty(n_resamples)
+    max_dds = np.empty(n_resamples)
+
+    if HAS_NUMBA:
+        # Numba kernel: tight loop, ~100x faster than pure Python
+        _mc_bootstrap_ci_kernel(r_values, n_resamples, block_size,
+                                mean_rs, win_rates, expectancies,
+                                profit_factors, sharpes, max_dds)
+    else:
+        # Pure Python fallback (identical logic)
+        for i in range(n_resamples):
+            sample = r_values[np.random.randint(0, n, size=n)]
+            mean_rs[i] = np.mean(sample)
+            # ... compute other 5 metrics ...
+
+    # Extract percentile-based confidence intervals
+    alpha = 1 - confidence    # 0.05
+    lo, hi = alpha / 2 * 100, (1 - alpha / 2) * 100  # 2.5, 97.5
+
+    return {
+        'p_profitable': float(np.mean(mean_rs > 0)),
+        'mean_r_ci':       (np.percentile(mean_rs, lo),       np.percentile(mean_rs, hi)),
+        'win_rate_ci':     (np.percentile(win_rates, lo),     np.percentile(win_rates, hi)),
+        'expectancy_ci':   (np.percentile(expectancies, lo),  np.percentile(expectancies, hi)),
+        'profit_factor_ci':(np.percentile(profit_factors, lo),np.percentile(profit_factors, hi)),
+        'sharpe_ci':       (np.percentile(sharpes, lo),       np.percentile(sharpes, hi)),
+        'max_drawdown_ci': (np.percentile(max_dds, lo),       np.percentile(max_dds, hi)),
+    }
+""", language="python")
+
+    st.markdown("**Equity fan chart** — visualises the distribution of possible equity paths:")
+    st.code("""
+# MonteCarloAnalysis.equity_fan()
+
+@staticmethod
+def equity_fan(trades, n_paths=1000, block_size=1):
+    r_values = np.array([t.r_multiple_after_costs for t in trades])
+    n = len(r_values)
+    all_paths = np.empty((n_paths, n))
+
+    # Generate 1,000 resampled cumulative equity paths
+    for i in range(n_paths):
+        sample = r_values[np.random.randint(0, n, size=n)]
+        all_paths[i] = np.cumsum(sample)
+
+    # Extract percentile bands at each trade index
+    return {
+        'percentiles': {
+            '5':  np.percentile(all_paths, 5, axis=0).tolist(),   # Worst 5%
+            '25': np.percentile(all_paths, 25, axis=0).tolist(),
+            '50': np.percentile(all_paths, 50, axis=0).tolist(),  # Median
+            '75': np.percentile(all_paths, 75, axis=0).tolist(),
+            '95': np.percentile(all_paths, 95, axis=0).tolist(),  # Best 5%
+        },
+        'actual_equity': np.cumsum(r_values).tolist(),
+        'median_max_dd': float(np.median(per_path_max_drawdowns)),
+    }
+""", language="python")
+
+    st.divider()
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  11.4 — HMM REGIME DETECTION
+    # ══════════════════════════════════════════════════════════════════════
+
+    st.subheader("11.4 — HMM Regime Detection (Hidden Markov Model)")
+
+    st.markdown("""
+The WFO engine includes a **2-state Gaussian Hidden Markov Model** that
+classifies the market into *calm* and *volatile* regimes.  This is used to
+gate entries (only trade during volatile regimes) and scale position sizes
+by regime probability.
+
+**Three layers of information leakage prevention:**
+
+| Layer | Protection | Why it matters |
+|-------|-----------|----------------|
+| 1. IS-only fitting | HMM is trained exclusively on in-sample data | OOS bars are never seen during model fitting |
+| 2. IS-only standardisation | Feature mean/std computed from IS only | Prevents OOS statistics from leaking into normalisation |
+| 3. Forward-filter only | OOS inference uses `P(state_t \\| x_1:t)` | No backward pass — each bar only uses data up to that point |
+""")
+
+    st.code("""
+# backtrader_framework/optimization/hmm_regime.py
+
+class GaussianHMM:
+    \"\"\"2-state multivariate Gaussian HMM with diagonal covariance.\"\"\"
+
+    def fit(self, X: np.ndarray) -> 'GaussianHMM':
+        T, D = X.shape
+
+        # ── K-Means Initialisation ──
+        # Split by median of first feature (RealizedVol)
+        med = np.median(X[:, 0])
+        self.mu[0] = np.mean(X[X[:, 0] <= med], axis=0)   # Calm centre
+        self.mu[1] = np.mean(X[X[:, 0] > med], axis=0)    # Volatile centre
+
+        # Sticky transition matrix: 90% stay in same state
+        self.A = np.full((2, 2), 0.05)
+        np.fill_diagonal(self.A, 0.90)
+
+        # ── Baum-Welch EM (up to 100 iterations) ──
+        for iteration in range(self.max_iter):
+            # Forward pass: log α(t,k) = log P(x_1:t, state_t=k)
+            for t in range(1, T):
+                for j in range(K):
+                    log_alpha[t, j] = logsumexp(
+                        log_alpha[t-1] + log(A[:, j])
+                    ) + log_emission[t, j]
+
+            # Backward pass: log β(t,k) = log P(x_t+1:T | state_t=k)
+            for t in range(T-2, -1, -1):
+                for i in range(K):
+                    log_beta[t, i] = logsumexp(
+                        log(A[i, :]) + log_emission[t+1] + log_beta[t+1]
+                    )
+
+            # Posterior: γ(t,k) = P(state_t=k | x_1:T)
+            gamma = softmax(log_alpha + log_beta, axis=1)
+
+            # M-step: update μ, σ, A, π from γ-weighted statistics
+            for k in range(K):
+                self.mu[k] = Σ(γ[:,k] * X) / Σ(γ[:,k])
+                self.sigma[k] = sqrt(Σ(γ[:,k] * (X - μ[k])²) / Σ(γ[:,k]))
+
+        # Relabel: state 0 = calm (lower variance in RealizedVol dimension)
+        if self.mu[1, vol_dim] < self.mu[0, vol_dim]:
+            swap(state_0, state_1)
+""", language="python")
+
+    st.markdown("**Forward filter** — causal inference for OOS (no future leakage):")
+    st.code("""
+def forward_filter(self, X: np.ndarray) -> np.ndarray:
+    \"\"\"P(state_t | x_1:t) — uses only past and current data.\"\"\"
+    log_alpha = np.zeros((T, K))
+    log_alpha[0] = log(π) + log_emission(X[0])
+
+    for t in range(1, T):
+        for j in range(K):
+            log_alpha[t, j] = logsumexp(
+                log_alpha[t-1] + log(A[:, j])
+            ) + log_emission(X[t], j)
+
+        # Normalise at each step (prevents underflow)
+        log_alpha[t] -= logsumexp(log_alpha[t])
+
+    return exp(log_alpha)  # (T, 2) → state probabilities per bar
+""", language="python")
+
+    st.markdown("**Position sizing by regime probability:**")
+    st.markdown("""
+| Condition | Size Multiplier | Interpretation |
+|-----------|----------------|----------------|
+| P(calm) ≥ 0.70 | **1.0×** | High confidence calm → full size |
+| P(calm) ≥ 0.55 | **0.7×** | Moderate calm → reduced size |
+| P(volatile) ≥ 0.60 | **0.3×** | Volatile regime → defensive |
+| Otherwise | **0.5×** | Uncertain → half size |
+
+**Features used:** `[LogReturn, RealizedVol20]` — both computed from price data only.
+""")
+
+    st.divider()
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  11.5 — DVOL (DERIBIT IMPLIED VOLATILITY INDEX)
+    # ══════════════════════════════════════════════════════════════════════
+
+    st.subheader("11.5 — DVOL (Deribit Implied Volatility Index)")
+
+    st.markdown("""
+**DVOL** is an external implied volatility index derived from Bitcoin options
+on the Deribit exchange — analogous to the VIX for the S&P 500.  It measures
+the market's *expectation* of future volatility, as opposed to realised
+volatility which looks backward.
+
+The WFO engine loads hourly historical DVOL data and merges it into the
+strategy DataFrame via **forward-fill**, bridging the frequency gap between
+hourly DVOL and 15-minute strategy bars.
+""")
+
+    st.code("""
+# backtrader_framework/optimization/indicators.py — DVOL loading
+
+import json
+
+dvol_path = 'Liquidity_Raid/Research/btc_dvol_hourly.json'
+# JSON format: [{"timestamp": 1619820000000, "dvol": 75.25}, ...]
+
+with open(dvol_path) as f:
+    dvol_raw = json.load(f)
+
+dvol_df = pd.DataFrame(dvol_raw)
+dvol_df['timestamp'] = pd.to_datetime(
+    dvol_df['timestamp'], unit='ms', utc=True
+).dt.tz_localize(None)
+dvol_df = dvol_df.set_index('timestamp').sort_index()
+
+# Forward-fill: each 15m bar inherits the most recent hourly DVOL
+df['DVOL'] = dvol_df['dvol'].reindex(df.index, method='ffill')
+""", language="python")
+
+    st.markdown("**IV regime classification and directional gating:**")
+    st.code("""
+# backtrader_framework/optimization/strategy_adapters/fvg_adapter.py
+
+# Classify the current bar's IV regime
+if dvol < 45:
+    iv_regime = 'LOW'
+elif dvol < 65:
+    iv_regime = 'MED'
+else:
+    iv_regime = 'HIGH'
+
+# RETEST signals — directional gate:
+if iv_regime == 'LOW' and direction == 'SHORT':
+    continue    # Low IV → suppress short entries
+if iv_regime == 'HIGH' and direction == 'LONG':
+    continue    # High IV → suppress long entries
+
+# iFVG signals — reversed logic (works best in high volatility):
+if iv_regime == 'LOW' and direction == 'LONG':
+    continue    # Low IV → only short iFVGs allowed
+""", language="python")
+
+    st.markdown("""
+| DVOL Range | Regime | Retest Gate | iFVG Gate | Study Result |
+|-----------|--------|-------------|-----------|-------------|
+| < 45 | **LOW** | Block SHORT | Block LONG | Suppress counter-trend |
+| 45 – 65 | **MED** | Allow all | Allow all | positive in regime (per internal DVOL study) |
+| ≥ 65 | **HIGH** | Block LONG | Allow all | positive for iFVG (per internal DVOL study) |
+""")
+
+    st.divider()
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  11.6 — ADX (AVERAGE DIRECTIONAL INDEX)
+    # ══════════════════════════════════════════════════════════════════════
+
+    st.subheader("11.6 — ADX (Average Directional Index)")
+
+    st.markdown("""
+**ADX** (Average Directional Index) is a Wilder indicator that measures
+**trend strength** on a 0–100 scale — it does not indicate direction, only
+how strongly the market is trending.  ADX > 25 signals a meaningful trend;
+ADX < 20 suggests consolidation.
+
+The computation follows Wilder's original 5-step process:
+""")
+
+    st.markdown("""
+**Step 1 — Directional Movement (DM):**
+- `+DM = High[today] - High[yesterday]` (if positive and > −DM, else 0)
+- `−DM = Low[yesterday] - Low[today]` (if positive and > +DM, else 0)
+
+**Step 2 — True Range (TR):**
+- `TR = max(High - Low, |High - Close_prev|, |Low - Close_prev|)`
+
+**Step 3 — Smoothed averages** using Wilder's EMA (α = 1/14):
+- `ATR = EWM(TR, α=1/14)`
+- `+DI = 100 × EWM(+DM, α=1/14) / ATR`
+- `−DI = 100 × EWM(−DM, α=1/14) / ATR`
+
+**Step 4 — Directional Movement Index:**
+- `DX = 100 × |+DI − −DI| / (+DI + −DI)`
+
+**Step 5 — ADX (smoothed DX):**
+- `ADX = EWM(DX, α=1/14)`
+""")
+
+    st.code("""
+# backtrader_framework/optimization/indicators.py
+
+@staticmethod
+def _calculate_adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    high, low, close = df['High'], df['Low'], df['Close']
+
+    # Step 1: Directional Movement
+    plus_dm = high.diff()
+    minus_dm = -low.diff()
+    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+
+    # Step 2: True Range
+    tr = pd.concat([
+        high - low,
+        np.abs(high - close.shift()),
+        np.abs(low - close.shift())
+    ], axis=1).max(axis=1)
+
+    # Steps 3-4: Wilder's EMA smoothing (alpha = 1/period)
+    atr = tr.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+    plus_di = 100 * (plus_dm.ewm(alpha=1/period, min_periods=period,
+                                   adjust=False).mean() / (atr + 1e-10))
+    minus_di = 100 * (minus_dm.ewm(alpha=1/period, min_periods=period,
+                                     adjust=False).mean() / (atr + 1e-10))
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+
+    # Step 5: Smooth DX into ADX
+    return dx.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+""", language="python")
+
+    st.markdown("""
+**Integration with WFO regime classification:**
+
+| ADX Value | ATR vs Average | Classification |
+|-----------|---------------|---------------|
+| ADX > 30 | — | `trending_up` or `trending_down` (based on EMA position) |
+| ADX ≤ 30 | ATR > 1.8× average | `volatile` (expansion without trend) |
+| ADX ≤ 30 | ATR ≤ 1.8× average | `ranging` (consolidation) |
+""")
+
+    st.divider()
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  11.7 — BAYESIAN OPTIMISATION (OPTUNA / TPE)
+    # ══════════════════════════════════════════════════════════════════════
+
+    st.subheader("11.7 — Bayesian Optimisation (Optuna / TPE)")
+
+    st.markdown("""
+As an alternative to grid search, the WFO engine supports **Bayesian
+optimisation** via Optuna's **Tree-structured Parzen Estimator (TPE)**.
+
+**Why Bayesian over grid search?**
+
+| Aspect | Grid Search | Bayesian (TPE) |
+|--------|------------|----------------|
+| Exploration | Exhaustive (or Sobol quasi-random) | Guided by surrogate model |
+| Efficiency | Tests every combo blindly | Focuses on promising regions |
+| Combos needed | 150+ for 5-parameter space | 50–100 trials often suffice |
+| Overhead | Near-zero | Small per-trial overhead |
+| Best for | Low-dimensional, fast combos | High-dimensional, slow combos |
+
+**TPE principle:** Instead of modelling `f(params)` directly, TPE builds two
+density estimators — `l(params)` for "good" parameter regions and `g(params)`
+for "bad" regions — then suggests the next trial by maximising `l(x)/g(x)`.
+""")
+
+    st.code("""
+# backtrader_framework/optimization/bayesian_tuner.py
+
+import optuna
+
+def tune_strategy_params(self, param_specs, objective_fn):
+    def objective(trial):
+        params = {}
+        for spec in param_specs:
+            params[spec.name] = suggest_from_param_spec(trial, spec)
+        return objective_fn(params)    # Returns score (e.g. expectancy)
+
+    sampler = optuna.samplers.TPESampler(
+        seed=42,
+        n_startup_trials=10,           # Random exploration before TPE kicks in
+    )
+    study = optuna.create_study(direction='maximize', sampler=sampler)
+    study.optimize(
+        objective,
+        n_trials=100,                  # Max evaluations per window
+        timeout=60,                    # Hard time limit (seconds)
+    )
+    return study.best_params, study.best_value
+""", language="python")
+
+    st.markdown("**Parameter suggestion** supports int, float, log-scale, and stepped ranges:")
+    st.code("""
+# backtrader_framework/optimization/param_grid.py
+
+def suggest_from_param_spec(trial, spec: ParamSpec):
+    if spec.param_type == 'int':
+        return trial.suggest_int(spec.name, int(spec.min_val),
+                                 int(spec.max_val), step=int(spec.step))
+    elif spec.log_scale and spec.min_val > 0:
+        # Log-scale for parameters spanning orders of magnitude
+        return trial.suggest_float(spec.name, spec.min_val,
+                                   spec.max_val, log=True)
+    elif spec.step > 0:
+        return trial.suggest_float(spec.name, spec.min_val,
+                                   spec.max_val, step=spec.step)
+    else:
+        return trial.suggest_float(spec.name, spec.min_val, spec.max_val)
+""", language="python")
+
+    st.markdown("""
+**Sobol quasi-random sampling** (used in `grid_mode='random'`):
+
+When grid search has too many combos (> `max_param_combos`), the engine
+switches to **Sobol sequences** — a low-discrepancy quasi-random sampling
+method that provides better coverage of the parameter space than pseudo-random
+sampling.  The default parameters are always included as the first sample.
+""")
+    st.code("""
+# backtrader_framework/optimization/param_grid.py
+
+from scipy.stats.qmc import Sobol
+
+def generate_random_grid(param_specs, n_samples=150, seed=42):
+    grid = [get_defaults(param_specs)]    # Always include defaults
+
+    # Sobol sequence for uniform coverage (power-of-2 samples)
+    m = int(np.ceil(np.log2(max(n_samples - 1, 2))))
+    sampler = Sobol(d=len(param_specs), scramble=True, seed=seed)
+    unit_samples = sampler.random_base2(m)[:n_samples - 1]
+
+    # Scale [0, 1] samples to parameter ranges
+    for sample in unit_samples:
+        params = {}
+        for i, spec in enumerate(param_specs):
+            if spec.log_scale and spec.min_val > 0:
+                val = exp(log(spec.min_val) + sample[i] *
+                          (log(spec.max_val) - log(spec.min_val)))
+            else:
+                val = spec.min_val + sample[i] * (spec.max_val - spec.min_val)
+            params[spec.name] = round_to_step(val, spec)
+        grid.append(params)
+    return grid
+""", language="python")
+
+
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  MAIN — 11 TABS ALIGNED TO EVALUATION GRID                              ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
 
 def main():
@@ -1739,6 +2457,7 @@ def main():
         "08 Server & DB",
         "09 DevOps",
         "10 Showcase",
+        "11 Backtesting",
     ])
 
     with tabs[0]:
@@ -1761,6 +2480,8 @@ def main():
         tab_09_devops()
     with tabs[9]:
         tab_10_fonctionnalites()
+    with tabs[10]:
+        tab_11_backtesting()
 
 
 main()
