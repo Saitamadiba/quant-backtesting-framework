@@ -9,8 +9,8 @@ st.set_page_config(page_title="Strategy Explainer", page_icon="📖", layout="wi
 st.title("📖 Strategy Logic Explainer")
 st.caption(
     "A plain-English reference guide for every strategy in the portfolio. "
-    "Each section explains the core logic, entry/exit conditions, risk management rules, "
-    "and key indicators used — so you can understand exactly what your bots are doing and why."
+    "Each section explains the core concepts, market mechanics, and the type of edge "
+    "each strategy seeks — designed as an educational overview."
 )
 
 from config import STRATEGIES
@@ -23,7 +23,7 @@ df_all = get_all_trades()
 strategy = st.selectbox(
     "Select Strategy",
     list(STRATEGIES.keys()),
-    help="Choose a strategy to see its full logic breakdown.",
+    help="Choose a strategy to see its conceptual breakdown.",
 )
 
 st.markdown("---")
@@ -48,10 +48,10 @@ def _show_live_summary(strat_name: str):
 
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Trades", total, help="Total closed trades for this strategy across all live bots.")
-    c2.metric("Win Rate", f"{wr:.1%}", help="Percentage of trades that closed in profit. Evaluate alongside Avg R — a 30% win rate with 3:1 R:R is highly profitable.")
+    c2.metric("Win Rate", f"{wr:.1%}", help="Percentage of trades that closed in profit.")
     c3.metric("Total P&L", f"${total_pnl:,.2f}", help="Cumulative realized profit/loss in USD across all trades.")
-    c4.metric("Avg R", f"{avg_r:.2f}", help="Average R-multiple per trade. Positive means winners outpace losers on a risk-adjusted basis. > 0.2R is a strong edge.")
-    c5.metric("Total R", f"{total_r:.1f}", help="Sum of all R-multiples. The total risk-adjusted return — 10R means you earned 10x your risk unit.")
+    c4.metric("Avg R", f"{avg_r:.2f}", help="Average R-multiple per trade. Positive means winners outpace losers on a risk-adjusted basis.")
+    c5.metric("Total R", f"{total_r:.1f}", help="Sum of all R-multiples — the total risk-adjusted return.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -132,7 +132,7 @@ def _pipeline_diagram(steps: list[str], final: str = "EXECUTE"):
 # ══════════════════════════════════════════════════════════════════════════════
 if strategy == "FVG":
     st.header("FVG — Fair Value Gap Strategy")
-    st.caption("An ICT (Inner Circle Trader) concept: identifies imbalances in price delivery where institutional orders leave 'gaps' in the candle structure. Enhanced with HMM regime gating, WFO signal scoring, and midpoint entry precision.")
+    st.caption("An ICT (Inner Circle Trader) concept: identifies imbalances in price delivery where institutional orders leave 'gaps' in the candle structure, then enters at optimal retracement levels within the gap zone.")
 
     # Live summary
     st.subheader("Live Performance Snapshot")
@@ -150,176 +150,146 @@ unfilled orders.
 **Bullish FVG**: High of candle 1 < Low of candle 3 (gap above)
 **Bearish FVG**: Low of candle 1 > High of candle 3 (gap below)
 
-The bot detects these gaps across **multiple timeframes** (15m, 1H, 4H, Daily) and looks for
-price to retrace back into the gap zone for an entry at the **midpoint** of the gap.
+The bot detects these gaps across **multiple timeframes** and looks for price to retrace back
+into the gap zone for an entry at a calculated **optimal level** within the gap.
 """)
 
     # Visual: FVG pattern
     bullish_fvg = [100, 101, 99, 97, 96, 100, 103, 105, 103, 101, 98, 100, 102, 104, 106]
     fig = _entry_exit_diagram(
-        "Bullish FVG Midpoint Entry Example",
+        "Bullish FVG Retracement Entry Example",
         bullish_fvg, entry_idx=10, sl=95.5, tp=107, direction="Long",
         annotations=[
             dict(x=3, y=96, text="FVG Zone", showarrow=True, arrowhead=2, font=dict(color="#FF9800")),
-            dict(x=10, y=98, text="Midpoint entry", showarrow=True, arrowhead=2),
+            dict(x=10, y=98, text="Retracement entry", showarrow=True, arrowhead=2),
         ],
     )
     st.plotly_chart(fig, key="fvg_diagram")
 
-    # ── Recent Improvements ──────────────────────────────────────────
-    st.subheader("Recent Improvements")
-    with st.expander("HMM Hard Gate (Crypto Only)", expanded=True):
+    # ── Key Components ──────────────────────────────────────────────
+    st.subheader("Key Components")
+    with st.expander("Regime Filtering (Crypto Only)", expanded=True):
         st.markdown("""
-**What**: A Hidden Markov Model classifies the market into **volatile** (momentum bullish/bearish)
-or **calm** (ranging/choppy/unknown) states. The bot **skips signal generation entirely** during
-calm regimes for BTC and ETH.
+**What**: A regime classification model categorises the market into **volatile** (momentum) or
+**calm** (ranging/choppy) states. The bot **skips signal generation entirely** during calm
+regimes for crypto assets.
 
-**Why**: The profitability study showed materially better expectancy in one HMM state — a 63% improvement in expectancy. By gating out calm periods, the bot
-only trades when its edge is strongest.
+**Why**: Analysis showed that volatile regimes produce significantly higher expectancy than calm
+regimes. By gating out calm periods, the bot only trades when its edge is strongest.
 
-**Scope**: Applies to crypto (BTC, ETH) only. NQ is not gated because it trades during defined
-equity sessions with naturally higher institutional activity.
-
-| Regime | Action |
-|--------|--------|
-| `momentum_bullish` | Trade normally |
-| `momentum_bearish` | Trade normally |
-| `ranging` | Skip signal generation |
-| `choppy` | Skip signal generation |
-| `unknown` | Skip signal generation |
+**Scope**: Applies to crypto assets only. Equity index futures are not gated because they
+trade during defined sessions with naturally higher institutional activity.
 """)
 
-    with st.expander("WFO Signal Scoring (9 Components)"):
+    with st.expander("Walk-Forward Optimized Signal Scoring"):
         st.markdown("""
-**Walk-Forward Optimized** signal scoring grades every FVG setup across 9 weighted components
-before execution. Weights were calibrated on historical profitability data and adapt online
-via an ML Weight Adapter.
+**Walk-Forward Optimized (WFO)** signal scoring grades every FVG setup across multiple weighted
+components before execution. Weights are calibrated on historical profitability data and
+can adapt online via a machine learning adapter.
 
-| Component | Weight | What It Measures |
-|-----------|--------|------------------|
-| `gap_size` | 0.18 | FVG gap size relative to ATR |
-| `volume` | 0.13 | Sweep candle volume vs 20-bar average |
-| `ema_align` | 0.13 | EMA stack alignment with trade direction |
-| `rsi_align` | 0.09 | RSI alignment (not overbought for longs, not oversold for shorts) |
-| `struct_bias` | 0.09 | Price structure (HH/HL or LH/LL) alignment |
-| `displacement` | 0.13 | Strength of the move that created the FVG |
-| `sweep` | 0.10 | Whether a liquidity sweep preceded the gap |
-| `hmm_align` | 0.10 | HMM regime alignment with trade direction |
-| `rv_align` | 0.05 | Realized volatility percentile alignment |
+The scoring system evaluates factors such as:
+- **Gap characteristics** — size and quality of the FVG relative to recent volatility
+- **Volume confirmation** — whether institutional participation is evident
+- **Trend alignment** — EMA stack and momentum indicators agreeing with direction
+- **Market structure** — whether the broader price structure supports the trade
+- **Regime context** — volatility and market state alignment
 
-**Minimum confidence**: 0.45 for standard FVGs, 0.40 for inverted FVGs (iFVGs).
-
-The **ML Weight Adapter** retrains every 50 trade outcomes using ridge logistic regression,
-clamping weight multipliers to [0.5x, 2.0x] of the WFO baseline. Requires 100+ trades and
-CV accuracy > 0.52 before first adaptation.
+A minimum composite confidence score must be exceeded before any trade is taken.
+The ML adapter periodically retrains from trade outcomes, adjusting component weights
+within bounded ranges to prevent overfitting.
 """)
 
-    with st.expander("Midpoint Entry + Study-Matched SL"):
+    with st.expander("Optimal Entry + Volatility-Scaled Stop"):
         st.markdown("""
-**Midpoint Entry**: All retest entries target the **exact midpoint** of the FVG zone,
-not the zone edges. This was validated by the profitability study as the optimal
-entry location that balances fill probability against risk distance.
+**Entry Location**: Entries target a calculated optimal level within the FVG zone, balancing
+fill probability against risk distance. This was validated through backtesting as the
+best entry location for the pattern.
 
-**Study-Matched Stop Loss**: Stop loss is placed at the opposite side of the FVG zone
-with an ATR buffer, calibrated from the study's optimal SL distance findings.
+**Volatility-Scaled Stop Loss**: Stop loss is placed relative to the FVG zone boundary with
+a volatility buffer, ensuring stops adapt to current market conditions.
 
-```
-Entry = (FVG High + FVG Low) / 2
-SL = FVG zone boundary + ATR buffer (opposite side)
-TP = ATR-regime-scaled R:R ratio
-```
+**Take Profit**: TP targets are scaled by the prevailing volatility regime — wider in
+trending conditions, tighter in ranging markets.
 """)
 
-    with st.expander("Session Filter Bypass (Crypto 24/7)"):
+    with st.expander("Session Filtering"):
         st.markdown("""
-The session filter (London/NY hours restriction) is enforced **only for NQ futures**.
-BTC and ETH trade **24/7** because the profitability study showed no statistically
-significant edge improvement from session filtering on crypto pairs — institutional
-flow in crypto is distributed across all sessions, unlike equity futures.
-
-| Asset | Session Rule |
-|-------|-------------|
-| BTC | 24/7 (no session filter) |
-| ETH | 24/7 (no session filter) |
-| NQ | London + NY sessions only |
+Session filtering is enforced **only for equity index futures**. Crypto assets trade
+**24/7** because analysis showed no statistically significant edge improvement from
+session filtering on crypto pairs — institutional flow in crypto is distributed across
+all sessions, unlike equity futures which concentrate around market opens.
 """)
 
-    with st.expander("iFVG Detection (Inverted Fair Value Gaps)"):
+    with st.expander("Inverted FVG (iFVG) Detection"):
         st.markdown("""
-**Phase 2** of the FVG strategy adds detection and trading of **inverted FVGs** — gaps
-that form when a previous FVG zone is fully invalidated and price creates a new gap
-in the opposite direction.
+The strategy also detects and trades **inverted FVGs** — gaps that form when a previous
+FVG zone is fully invalidated and price creates a new gap in the opposite direction.
 
-iFVGs have their own WFO scorer with higher HMM and RV alignment weights
-(`hmm_align: 0.15`, `rv_align: 0.15`) and a lower minimum confidence threshold (0.40)
-because the base win rate for iFVG patterns is 51.8%.
+iFVGs use their own scoring configuration with adjusted weights that emphasize regime
+alignment, reflecting the different statistical characteristics of inverted patterns.
 """)
 
     # ── Entry Logic ──────────────────────────────────────────────────
-    st.subheader("Entry Logic (Signal Pipeline)")
+    st.subheader("Entry Logic (Conceptual Pipeline)")
     st.markdown("""
-`FVG Detected` -> `HMM Gate` -> `Regime Filter` -> `Session Filter (NQ)` -> `FVG Invalidation Check`
--> `Proximity Gate` -> `Rejection Candle` -> `WFO Score (>= 0.45)` -> `Risk Gate` -> **MIDPOINT ENTRY**
+`FVG Detected` -> `Regime Gate` -> `Session Filter` -> `Invalidation Check`
+-> `Proximity Gate` -> `Rejection Candle` -> `Signal Score` -> `Risk Gate` -> **ENTRY**
 """)
 
     _flow_diagram([
-        {"label": "HMM regime gate (crypto only)", "icon": "🧠",
-         "detail": "Bot checks HMM state. If regime is ranging/choppy/unknown, the entire signal "
-                   "generation cycle is skipped. Only volatile (momentum) states proceed."},
+        {"label": "Regime gate (crypto only)", "icon": "🧠",
+         "detail": "Bot checks the market regime classification. If the market is in a calm/ranging "
+                   "state, the entire signal generation cycle is skipped."},
         {"label": "Scan for FVG patterns across timeframes", "icon": "🔍",
-         "detail": "Scans 15m, 1H, 4H, and Daily candles for 3-candle FVG patterns. "
-                   "Minimum gap size: 0.01% (5m) to 0.08% (Daily). Multi-TF confluence weighted."},
+         "detail": "Scans multiple timeframes for 3-candle FVG patterns. Higher timeframe gaps "
+                   "receive greater weight. Minimum gap size thresholds vary by timeframe."},
         {"label": "FVG invalidation + proximity check", "icon": "📊",
          "detail": "Tracked FVGs are checked for invalidation (price closed through zone). "
-                   "Price must be within configured proximity of the gap midpoint."},
+                   "Price must be within a configured proximity of the gap before entry."},
         {"label": "WFO confidence scoring", "icon": "📐",
-         "detail": "9-component weighted score must exceed 0.45 threshold. Components: gap_size, "
-                   "volume, ema_align, rsi_align, struct_bias, displacement, sweep, hmm_align, rv_align."},
-        {"label": "Midpoint entry execution", "icon": "🎯",
-         "detail": "Entry at FVG midpoint = (gap_high + gap_low) / 2. Stop loss at opposite zone boundary "
-                   "with ATR buffer. Take profit at ATR-regime-scaled R:R ratio."},
+         "detail": "Multi-component weighted score must exceed a minimum threshold. Components "
+                   "evaluate gap quality, volume, trend alignment, structure, and regime context."},
+        {"label": "Entry execution", "icon": "🎯",
+         "detail": "Entry at calculated optimal level within the FVG zone. Stop loss at zone "
+                   "boundary with volatility buffer. Take profit scaled by regime."},
     ])
 
     # ── Exit Logic ───────────────────────────────────────────────────
     st.subheader("Exit Conditions")
     st.markdown("""
-| Condition | Details |
-|-----------|---------|
-| **Take Profit** | ATR-regime-scaled R:R (momentum: 1.5x target, choppy: 0.8x target) |
-| **Stop Loss** | FVG zone boundary + ATR buffer (study-matched distance) |
-| **Partial TP** | Partial exit at TP1 reduces position, remainder trails |
+| Condition | Description |
+|-----------|-------------|
+| **Take Profit** | Volatility-regime-scaled target — wider in trends, tighter in ranges |
+| **Stop Loss** | FVG zone boundary with volatility buffer |
+| **Partial TP** | Partial exit at first target, remainder trails |
 | **Trailing Stop** | Activated after partial TP hit |
-| **Stale Exit** | Auto-close after 50 candles without SL/TP hit |
-| **Position Sizing** | Volatility-adjusted: targets 15% annualized vol, half-Kelly, 0.25x-2.0x |
+| **Stale Exit** | Auto-close after configurable time without SL/TP hit |
+| **Position Sizing** | Volatility-adjusted sizing with bounded multipliers |
 """)
 
     # ── Risk Management ──────────────────────────────────────────────
-    st.subheader("Risk Management Rules")
-    rm_cols = st.columns(4)
-    rm_cols[0].metric("Max Daily Trades", "5", help="Prevents overtrading during choppy sessions.")
-    rm_cols[1].metric("Prop Firm DD Cap", "8%", help="Bot halts if account drawdown hits 8%.")
-    rm_cols[2].metric("Daily Loss Limit", "4%", help="Bot stops taking new trades after 4% daily loss.")
-    rm_cols[3].metric("Max SL Distance", "1.5%", help="Prop firm safety rule — no stop further than 1.5% from entry.")
-
+    st.subheader("Risk Management Approach")
     st.markdown("""
-**Additional safeguards:**
-- **Traded zone expiry**: Prevents re-trading the same FVG zone within a configurable window (persisted across restarts)
-- **Momentum validator**: Auto-disables momentum entries if edge disappears over recent trades
-- **Adaptive risk manager**: Self-adjusts confidence thresholds, TP allocation, and R:R targets based on performance
-- **Premature entry analyzer**: Monitors stopped trades for 24h — if price reached TP after SL, tightens entry rules
+- **Daily trade limit** — prevents overtrading during choppy sessions
+- **Account drawdown cap** — bot halts if drawdown exceeds a configured threshold
+- **Daily loss limit** — stops new trades after a daily loss threshold is breached
+- **Maximum stop distance** — enforces a ceiling on stop-loss distance
+- **Traded zone expiry** — prevents re-trading the same FVG zone within a cooldown window
+- **Adaptive risk manager** — self-adjusts thresholds and TP allocation based on recent performance
+- **Premature entry analyzer** — monitors stopped trades to detect timing issues and tighten entry rules
 """)
 
     # ── Key Indicators ───────────────────────────────────────────────
     st.subheader("Key Technical Indicators")
     st.markdown("""
-- **ATR (14-period)**: Stop-loss sizing, take-profit calculation, volatility regime detection
-- **HMM Regime (4-state)**: Momentum Bullish, Momentum Bearish, Ranging, Choppy — gates signal generation
-- **WFO Signal Score (9 components)**: Weighted composite confidence (0.0-1.0) with ML-adaptive weights
-- **EMA Stack (Fast/Slow)**: Trend direction alignment for WFO `ema_align` component
-- **Volume (20-period rolling avg)**: Confirms institutional participation in FVG formation
-- **Multi-Timeframe Priority**: Daily (100) > 4H (75) > 1H (50) > 15m (25) > 5m (10)
-- **RSI (14-period)**: Overbought/oversold alignment for WFO `rsi_align` component
-- **Realized Volatility Percentile**: ATR rank over 50 bars for WFO `rv_align` component
+- **ATR**: Stop-loss sizing, take-profit calculation, volatility regime detection
+- **Regime Classification**: Gates signal generation based on market state
+- **WFO Signal Score**: Weighted composite confidence with ML-adaptive weights
+- **EMA Stack**: Trend direction alignment
+- **Volume**: Confirms institutional participation in FVG formation
+- **Multi-Timeframe Priority**: Higher timeframes carry more weight
+- **RSI**: Overbought/oversold alignment
+- **Volatility Percentile**: ATR rank for regime classification
 """)
 
     # ── Strengths & Weaknesses ───────────────────────────────────────
@@ -328,21 +298,20 @@ because the base win rate for iFVG patterns is 51.8%.
     with c1:
         st.markdown("**Strengths**")
         st.markdown("""
-- HMM gate eliminates 63% lower-expectancy calm-regime trades (crypto)
-- WFO scoring with ML-adaptive weights continuously improves signal quality
-- Midpoint entry provides precise, study-validated entry location
+- Regime gating eliminates low-expectancy calm-market trades
+- WFO scoring with adaptive weights continuously improves signal quality
+- Calculated entry location provides precise, validated positioning
 - Multi-timeframe analysis reduces false signals
 - Adaptive risk manager self-tunes from trade outcomes
-- iFVG detection captures inverted gap opportunities
+- iFVG detection captures additional gap opportunities
 """)
     with c2:
         st.markdown("**Weaknesses**")
         st.markdown("""
-- HMM gate can miss early-trend entries before regime transitions
-- 9-component WFO scoring adds latency to signal evaluation
-- Midpoint entry may not fill if price reverses at zone boundary
+- Regime gate can miss early-trend entries before state transitions
+- Multi-component scoring adds latency to signal evaluation
+- Entry may not fill if price reverses at zone boundary
 - Complex scoring system has more parameters to calibrate
-- iFVG signals have lower base win rate (51.8%) than standard FVGs
 """)
 
 
@@ -351,7 +320,7 @@ because the base win rate for iFVG patterns is 51.8%.
 # ══════════════════════════════════════════════════════════════════════════════
 elif strategy == "Liquidity Raid":
     st.header("Liquidity Raid Strategy")
-    st.caption("Exploits institutional liquidity sweeps: smart money raids stop-loss clusters at session highs/lows, then reverses. Enhanced with gamma regime integration, WFO counter-trend scoring, continuous sweep quality grading, and multi-timeframe entry confirmation.")
+    st.caption("Exploits institutional liquidity sweeps: smart money raids stop-loss clusters at session highs/lows, then reverses. Enhanced with options microstructure data, continuous sweep quality grading, and multi-timeframe entry confirmation.")
 
     st.subheader("Live Performance Snapshot")
     _show_live_summary("Liquidity Raid")
@@ -367,11 +336,11 @@ beyond a known level (session high/low, swing point) to trigger clustered stop-l
 The strategy uses a **state machine** to track the lifecycle of each liquidity level:
 1. **MONITORING**: Session high/low identified, watching for a sweep
 2. **DETECTED**: Price breaks beyond the level (stops triggered)
-3. **CONFIRMED**: Reversal confirmed with displacement and FVG
+3. **CONFIRMED**: Reversal confirmed with displacement and structure
 4. **EXPIRED**: No confirmation within timeout — move on
 
-**Key insight**: The strategy only trades during **kill zones** (London 3-5am ET, NY 8-10:30am ET)
-when institutional activity is highest.
+The strategy only trades during **high-activity windows** (kill zones) when institutional
+participation is at its peak.
 """)
 
     # Visual: Liquidity sweep + reversal
@@ -387,156 +356,141 @@ when institutional activity is highest.
     )
     st.plotly_chart(fig, key="lr_diagram")
 
-    # ── Recent Improvements ──────────────────────────────────────────
-    st.subheader("Recent Improvements")
-    with st.expander("Gamma Regime Integration (Options Microstructure)", expanded=True):
+    # ── Key Components ──────────────────────────────────────────────
+    st.subheader("Key Components")
+    with st.expander("Options Microstructure Integration (Gamma/IV Regime)", expanded=True):
         st.markdown("""
-**What**: The bot queries the **options gamma regime** module for real-time IV (implied volatility),
+**What**: The bot queries an **options microstructure module** for real-time implied volatility (IV),
 DVOL, and gamma flip data. This is used for:
 
-1. **IV-Adaptive Sweep Depth**: Different minimum sweep depth thresholds per IV regime
-2. **Gamma R:R Adjustment**: Take-profit levels scaled by gamma regime after standard dynamic R:R
+1. **IV-Adaptive Sweep Depth**: Different minimum sweep depth thresholds depending on the
+   current IV regime — sweeps need to be more significant in high-volatility environments
+   to filter noise
+2. **Gamma-Informed R:R**: Take-profit levels can be adjusted based on the gamma regime
+   to account for expected price behavior near key options levels
 
-| IV Regime | Min Sweep Depth | R:R Adjustment |
-|-----------|----------------|----------------|
-| LOW (IV < 40) | Baseline | Standard R:R |
-| MEDIUM (IV 40-60) | Higher threshold | 0.75x R:R (tighter) |
-| HIGH (IV > 60) | Highest threshold | Wider R:R (more room) |
-
-**Fallback**: If the gamma module is unavailable, defaults to standard thresholds.
+The system classifies IV into tiers (low, medium, high) and adjusts sweep depth requirements
+and risk/reward targets accordingly. If the options module is unavailable, the bot falls
+back to standard thresholds.
 """)
 
-    with st.expander("WFO Counter-Trend Scoring (4 Components)"):
+    with st.expander("Walk-Forward Counter-Trend Scoring"):
         st.markdown("""
-The Liquidity Raid uses a **counter-trend** WFO scorer — unlike the FVG's trend-alignment approach,
-this scorer grades sweeps by their mean-reversion quality.
+The Liquidity Raid uses a **counter-trend** WFO scorer — unlike trend-following approaches,
+this scorer grades sweeps by their **mean-reversion quality**.
 
-| Component | Weight | What It Measures |
-|-----------|--------|------------------|
-| `sweep_depth_atr` | 0.50 | How deep the sweep penetrated vs ATR (dominant signal) |
-| `counter_struct` | 0.20 | Counter-trend price structure quality |
-| `counter_htf` | 0.15 | Higher timeframe alignment against the sweep direction |
-| `struct_conf` | 0.15 | Structural confirmation of reversal |
+Key scoring dimensions include:
+- **Sweep depth** — how deep the sweep penetrated relative to recent volatility (dominant signal)
+- **Counter-trend structure** — quality of the price structure supporting reversal
+- **Higher timeframe alignment** — whether higher timeframes agree with the reversal thesis
+- **Structural confirmation** — evidence that the reversal is confirmed by market structure
 
-**Minimum confidence**: 0.25 (lower threshold because sweep quality scoring provides additional filtering).
-
-**DVOL Regime Gate**: When DVOL is in the medium range (45-65), the R:R target is scaled by 0.75x
-to account for lower trending potential in moderate volatility.
+Because the sweep quality scorer provides additional filtering, the WFO threshold can be
+set lower than trend-following strategies while maintaining signal quality.
 """)
 
     with st.expander("Continuous Sweep Quality Scoring"):
         st.markdown("""
-Replaces binary sweep detection with a **0-100 continuous score** across four dimensions:
+Replaces binary sweep detection with a **continuous quality score** across multiple dimensions:
 
-1. **Depth** (0.5-1.0): How far price penetrated the session level, normalized by ATR
-2. **Volume** (0.3-1.0): Sweep candle volume vs 20-bar average
-3. **Time Decay** (0.2-1.0): Freshness penalty — 1.0 at 0-1 candles, degrades to 0.2 at 12+ candles
-4. **Confirmation** (0.2-1.0): Body ratio and direction match quality
+1. **Depth**: How far price penetrated the session level, normalized by volatility
+2. **Volume**: Sweep candle volume relative to recent average
+3. **Time Decay**: Freshness penalty — recent sweeps score higher, stale sweeps degrade
+4. **Confirmation**: Body ratio and directional match quality
 
-| Grade | Score Range | Action |
-|-------|-------------|--------|
-| A+ (Excellent) | 80-100 | Trade with full size |
-| A (Very Good) | 65-80 | Trade with standard size |
-| B (Good) | 50-65 | Trade with reduced size |
-| C (Fair) | 35-50 | Consider skipping |
-| D (Poor) | 0-35 | Skip |
+Sweeps are assigned letter grades (A+ through D) based on composite score.
+Higher grades receive larger position sizes; lower grades are skipped entirely.
 """)
 
     with st.expander("Multi-Timeframe Entry Confirmation"):
         st.markdown("""
-**MTF Analysis** scores Daily and 4H alignment with the trade direction:
+**MTF Analysis** scores alignment across higher timeframes with the trade direction:
 
-- **Daily aligned**: EMA stack on Daily chart agrees with trade direction
-- **4H aligned**: 4H price structure supports the reversal thesis
+- **Daily alignment**: EMA stack and structure on the daily chart
+- **4H alignment**: Intermediate timeframe price structure
 
-Two modes:
-- **Soft** (default): Informs confidence and logs alignment, but doesn't reject signals
+Two modes are available:
+- **Soft** (default): Informs confidence and is logged, but doesn't reject signals
 - **Hard**: Rejects counter-trend signals below a score threshold
 
-MTF score, quality label, and alignment flags are included in every signal for ML tracking.
+MTF scores and alignment flags are included in every signal for tracking purposes.
 """)
 
-    with st.expander("5M Pending Execution System"):
+    with st.expander("Pending Execution System"):
         st.markdown("""
-After a 15M sweep is detected, a **pending entry** waits for 5M confirmation before triggering.
+After a sweep is detected on the primary timeframe, a **pending entry** waits for
+lower-timeframe confirmation before triggering.
 
-**5M Confirmation requires:**
+**Confirmation requires:**
 - Correct directional close (bullish for longs, bearish for shorts)
-- Candle range > minimum ATR threshold
-- Entry placed at a pullback from the 5M candle range
+- Candle range exceeding a minimum volatility threshold
+- Entry placed at a pullback from the confirmation candle range
 
-**Max wait**: Limited to a configurable number of 5M candles. If no confirmation arrives,
-the pending sweep expires.
+If no confirmation arrives within a configurable window, the pending sweep expires.
 """)
 
     # ── Entry Logic ──────────────────────────────────────────────────
-    st.subheader("Entry Logic (Signal Pipeline)")
+    st.subheader("Entry Logic (Conceptual Pipeline)")
     st.markdown("""
 `Session Break` -> `Kill Zone` -> `Volume Confirm` -> `Sweep Detected` -> `Depth Score (IV-adaptive)`
--> `Confirmation Candle` -> `MTF Check` -> `SL/TP Calc` -> `WFO Score (>= 0.25)` -> `DVOL R:R Scale` -> **EXECUTE**
+-> `Confirmation Candle` -> `MTF Check` -> `SL/TP Calc` -> `Signal Score` -> `Regime R:R Scale` -> **EXECUTE**
 """)
 
     _flow_diagram([
         {"label": "Identify session levels", "icon": "📍",
-         "detail": "Track Asian (19:00-00:00 ET), London (03:00-08:00 ET), and NY (08:00-16:00 ET) "
-                   "session highs and lows as liquidity targets."},
-        {"label": "Kill zone + gamma regime check", "icon": "⏰",
-         "detail": "Only enter during London (03:00-05:00 ET) or NY (08:00-10:30 ET) kill zones. "
-                   "Fetch gamma regime data for IV-adaptive thresholds."},
+         "detail": "Track session highs and lows from defined time windows (Asian, London, NY) "
+                   "as liquidity targets."},
+        {"label": "Kill zone + regime check", "icon": "⏰",
+         "detail": "Only enter during high-activity kill zone windows. Fetch options regime data "
+                   "for IV-adaptive thresholds."},
         {"label": "Detect sweep + quality scoring", "icon": "💥",
-         "detail": "Price breaks beyond session level. Sweep quality scored 0-100 across depth, "
-                   "volume, time decay, and confirmation dimensions. Grade A+ to D."},
+         "detail": "Price breaks beyond session level. Sweep quality scored across depth, volume, "
+                   "time decay, and confirmation dimensions."},
         {"label": "IV-adaptive depth validation", "icon": "📊",
-         "detail": "Sweep depth must exceed a minimum ATR threshold that varies by IV regime: "
-                   "lower threshold in low IV, higher in high IV environments."},
+         "detail": "Sweep depth must exceed a minimum volatility-normalized threshold that varies "
+                   "by the current IV regime."},
         {"label": "Confirmation + MTF alignment", "icon": "✅",
-         "detail": "Confirmation candle in correct direction. MTF analysis scores Daily and 4H "
-                   "alignment. Graduated short sizing applied for ETH."},
+         "detail": "Confirmation candle in correct direction. MTF analysis scores higher-timeframe "
+                   "alignment with the reversal thesis."},
         {"label": "WFO counter-trend scoring", "icon": "📐",
-         "detail": "4-component WFO score must exceed 0.25. DVOL medium regime (45-65) triggers "
-                   "0.75x R:R scaling. ML Weight Adapter adjusts weights online."},
+         "detail": "Multi-component counter-trend score must exceed threshold. Options regime may "
+                   "scale R:R targets. ML adapter adjusts weights online."},
     ])
 
     # ── Exit Logic ───────────────────────────────────────────────────
     st.subheader("Exit Conditions")
     st.markdown("""
-| Condition | Details |
-|-----------|---------|
-| **Take Profit** | Dynamic 1.5x-2.5x R:R, adjusted by gamma regime and DVOL |
-| **Stop Loss** | ATR-based (2.5x ATR) or sweep-based (1.0 ATR buffer beyond sweep level) |
-| **Trailing Stop** | Stepped: only moves on new high-water marks, 0.5x ATR threshold |
-| **Breakeven Stop** | Moves to breakeven once 1R profit is achieved |
-| **Time Exit** | Auto-close after 6 hours without SL/TP hit |
-| **Volatility Adaptive** | High-vol widens SL by 25%, low-vol tightens by 20% |
-| **Deep Sweep Bonus** | SL distance reduced for exceptionally deep sweeps |
+| Condition | Description |
+|-----------|-------------|
+| **Take Profit** | Dynamic R:R target adjusted by options regime and volatility |
+| **Stop Loss** | Volatility-based or sweep-based, whichever provides better structure |
+| **Trailing Stop** | Stepped trailing — only moves on new high-water marks |
+| **Breakeven Stop** | Moves to breakeven once a profit threshold is achieved |
+| **Time Exit** | Auto-close after a maximum holding period without SL/TP hit |
+| **Volatility Adaptive** | SL widens in high-vol, tightens in low-vol environments |
 """)
 
     # ── Risk Management ──────────────────────────────────────────────
-    st.subheader("Risk Management Rules")
-    rm_cols = st.columns(4)
-    rm_cols[0].metric("Risk Per Trade", "1%", help="Fixed 1% of account equity risked per trade.")
-    rm_cols[1].metric("Max Daily Loss", "4%", help="Bot pauses after 4% account loss in a day.")
-    rm_cols[2].metric("Max Drawdown", "8%", help="Hard stop — bot disables if DD exceeds 8%.")
-    rm_cols[3].metric("Re-entry Attempts", "2", help="Up to 2 re-entries after stop-out, 4-candle cooldown.")
-
+    st.subheader("Risk Management Approach")
     st.markdown("""
-**Additional safeguards:**
-- **Volatility-adjusted sizing**: `VolatilityAdjustedSizer` scales position based on current vol regime
-- **Prop firm SL cap**: Maximum SL distance enforced to stay within prop firm rules
-- **Graduated short sizing (ETH)**: Instead of hard-blocking shorts, position size scales down in bullish structure
-- **Re-entry SL widening**: Re-entry trades get wider stops to account for post-stop volatility
-- **Quant metrics tracked**: Sharpe, Sortino, Calmar, Profit Factor updated in real-time
+- **Fixed risk per trade** — consistent percentage of account equity risked
+- **Daily loss limit** — bot pauses after a configured daily loss threshold
+- **Account drawdown cap** — hard stop if drawdown exceeds maximum
+- **Re-entry system** — limited re-entries after stop-out with cooldown period
+- **Volatility-adjusted sizing** — position scales with current volatility regime
+- **Graduated short sizing** — instead of blocking shorts outright, size scales down in bullish structure
+- **Re-entry SL widening** — re-entry trades get wider stops to account for post-stop volatility
 """)
 
     st.subheader("Key Technical Indicators")
     st.markdown("""
-- **ATR (14-period)**: Dynamic position sizing, SL, trailing stop, and sweep depth normalization
-- **EMA Stack (50/100/200)**: Daily directional bias — Long: 50>100>200, Short: 50<100<200
-- **Sweep Quality Score (0-100)**: 4-dimension continuous grade replacing binary detection
-- **Gamma Regime**: IV percentile, DVOL, gamma flip level from options microstructure
-- **WFO Counter-Trend Score**: 4-component mean-reversion confidence (0.0-1.0)
-- **MTF Alignment**: Daily + 4H structural alignment scoring
-- **Volatility Percentile**: 20-candle rolling percentile for adaptive SL adjustment
+- **ATR**: Dynamic position sizing, SL, trailing stop, and sweep depth normalization
+- **EMA Stack**: Daily directional bias
+- **Sweep Quality Score**: Multi-dimension continuous grade replacing binary detection
+- **Options Regime**: IV percentile, DVOL, gamma flip level from options microstructure
+- **WFO Counter-Trend Score**: Mean-reversion confidence scoring
+- **MTF Alignment**: Higher-timeframe structural alignment scoring
+- **Volatility Percentile**: Rolling percentile for adaptive SL adjustment
 """)
 
     st.subheader("Strengths & Weaknesses")
@@ -544,8 +498,8 @@ the pending sweep expires.
     with c1:
         st.markdown("**Strengths**")
         st.markdown("""
-- Gamma regime adds options microstructure edge to pure price action
-- Continuous sweep quality scoring eliminates low-quality sweeps
+- Options microstructure data adds a unique edge to pure price action
+- Continuous sweep quality scoring eliminates low-quality setups
 - IV-adaptive thresholds prevent trading noise in extreme volatility
 - WFO counter-trend scoring validates reversal quality
 - MTF confirmation reduces false entries
@@ -554,11 +508,10 @@ the pending sweep expires.
     with c2:
         st.markdown("**Weaknesses**")
         st.markdown("""
-- Kill zone restriction limits trading opportunities to ~5 hours/day
-- Gamma data dependency adds a failure point (mitigated by fallback)
-- Low WFO threshold (0.25) relies heavily on sweep quality scorer
-- Session-level detection can be late if Asian session is thin
-- 5M execution delay can miss fast V-reversals
+- Kill zone restriction limits trading to high-activity windows only
+- Options data dependency adds a failure point (mitigated by fallback)
+- Session-level detection can be late if early sessions are thin
+- Lower-timeframe execution delay can miss fast V-reversals
 """)
 
 
@@ -567,7 +520,7 @@ the pending sweep expires.
 # ══════════════════════════════════════════════════════════════════════════════
 elif strategy == "Momentum Mastery":
     st.header("Momentum Mastery Strategy")
-    st.caption("Combines daily EMA directional bias with kill-zone liquidity sweeps and strict confirmation candle quality filters. Enhanced with WFO 6-component scoring, ATR-regime R:R scaling, adaptive risk management, and premature entry analysis.")
+    st.caption("Combines daily EMA directional bias with kill-zone liquidity sweeps and strict confirmation candle quality filters. A trend-following hybrid enhanced with adaptive risk management and premature entry analysis.")
 
     st.subheader("Live Performance Snapshot")
     _show_live_summary("Momentum Mastery")
@@ -582,7 +535,7 @@ a kill zone, and finally enters only when a **high-quality confirmation candle**
 sweep has reversed.
 
 The strategy is deliberately **conservative**: it uses fractal invalidation, candle body quality
-filters, and volume percentile thresholds to avoid false signals. This means fewer trades but
+filters, and volume thresholds to avoid false signals. This means fewer trades but
 higher win rates per entry.
 """)
 
@@ -599,33 +552,32 @@ higher win rates per entry.
     )
     st.plotly_chart(fig, key="mm_diagram")
 
-    # ── Recent Improvements ──────────────────────────────────────────
-    st.subheader("Recent Improvements")
-    with st.expander("WFO 6-Component Momentum Scoring", expanded=True):
+    # ── Key Components ──────────────────────────────────────────────
+    st.subheader("Key Components")
+    with st.expander("WFO Momentum Scoring", expanded=True):
         st.markdown("""
-| Component | Weight | What It Measures |
-|-----------|--------|------------------|
-| `sweep_depth` | 0.30 | Depth of liquidity sweep normalized by ATR (dominant) |
-| `volume_conf` | 0.15 | Confirmation candle volume quality |
-| `ema_align` | 0.15 | EMA stack alignment with trade direction |
-| `confirm_quality` | 0.15 | Confirmation candle body ratio and displacement |
-| `struct_bias` | 0.15 | Price structure (HH/HL or LH/LL) alignment |
-| `atr_bonus` | 0.10 | ATR regime bonus (volatile = 1.0, quiet = -0.5) |
+The Momentum Mastery WFO scorer evaluates signals across multiple weighted components
+tuned for **trend-following with sweep confirmation**:
 
-**Minimum confidence**: 0.35. A rejected signal resets sweep state entirely — no "almost good enough" entries.
+Key scoring dimensions include:
+- **Sweep depth** — depth of the liquidity sweep normalized by volatility (dominant signal)
+- **Volume confirmation** — quality of volume on the confirmation candle
+- **Trend alignment** — EMA stack agreement with trade direction
+- **Confirmation quality** — candle body ratio and displacement strength
+- **Market structure** — whether price structure (higher highs/lows or lower highs/lows) supports the trade
+- **Volatility bonus** — regime-based adjustment favoring volatile conditions
 
-The ML Weight Adapter adjusts component weights based on trade outcomes, retraining every 50 trades.
+A rejected signal resets sweep state entirely — there are no "almost good enough" entries.
+The ML adapter adjusts component weights based on trade outcomes.
 """)
 
     with st.expander("ATR-Regime R:R Scaling"):
         st.markdown("""
 The R:R ratio is dynamically scaled based on the **ATR volatility regime** of recent bars:
 
-| ATR Regime | R:R Adjustment | Rationale |
-|------------|---------------|-----------|
-| QUIET | -0.5 R:R reduction | Lower trending potential in quiet markets |
-| NORMAL | Standard R:R | Baseline behavior |
-| VOLATILE | +1.0 R:R bonus | Higher trending potential justifies wider targets |
+- **Quiet regime**: R:R target is reduced — lower trending potential in quiet markets
+- **Normal regime**: Standard R:R baseline
+- **Volatile regime**: R:R target is boosted — higher trending potential justifies wider targets
 
 This prevents over-reaching in quiet markets (tight TP) while capitalizing on volatile
 conditions (wider TP).
@@ -637,10 +589,10 @@ After a stop-out, the bot stores the stopped trade details and checks for **re-e
 opportunities** before looking for fresh sweeps each cycle.
 
 **Re-entry conditions:**
-- Within configurable candle window of original stop
+- Within a configurable candle window of the original stop
 - Past minimum cooldown period
 - Attempts below maximum re-entry limit
-- Price within 1.5 ATR of original sweep zone
+- Price within a volatility-defined distance of the original sweep zone
 - Fresh confirmation candle present
 
 The sweep state is restored programmatically, allowing the bot to capitalize on setups
@@ -651,74 +603,76 @@ that were "right direction, wrong timing."
         st.markdown("""
 **Adaptive Risk Manager**: Self-adjusts R:R targets and entry thresholds based on historical
 trade outcomes. After every trade, it recalibrates:
-- Confidence threshold (tighter after losses, looser after wins)
-- TP allocation (shifts weight toward TP levels with highest hit rates)
-- R:R targets (calibrated from MFE percentiles: p50 -> TP1, p75 -> TP2)
+- Confidence threshold — tighter after losses, looser after wins
+- TP allocation — shifts weight toward TP levels with highest hit rates
+- R:R targets — calibrated from favorable excursion percentiles
 
-**Premature Entry Analyzer**: Monitors stopped-out trades for 24 hours to check if price
-eventually reached the take profit level. If the "premature entry rate" exceeds thresholds:
-- >30%: Raises requirements for correlated entry conditions
-- >50%: Applies system-wide stricter entry rules
+**Premature Entry Analyzer**: Monitors stopped-out trades to check if price eventually
+reached the take profit level. If the "premature entry rate" exceeds configurable
+thresholds, it progressively tightens entry requirements.
 
-This feedback loop diagnoses "right direction, wrong timing" patterns and tightens
+This feedback loop diagnoses "right direction, wrong timing" patterns and adjusts
 entry criteria accordingly.
 """)
 
-    st.subheader("Entry Logic (Signal Pipeline)")
+    st.subheader("Entry Logic (Conceptual Pipeline)")
     st.markdown("""
 `Kill Zone` -> `Session Levels` -> `EMA Bias` -> `ATR Regime` -> `Regime Filter`
 -> `Re-entry Check` -> `Sweep Detection` -> `Fractal Check` -> `Confirm Candle`
--> `Hybrid SL Calc` -> `WFO Score (>= 0.35)` -> `Adaptive Gate` -> `ML Filter` -> **EXECUTE**
+-> `SL Calc` -> `Signal Score` -> `Adaptive Gate` -> `ML Filter` -> **EXECUTE**
 """)
 
     _flow_diagram([
         {"label": "Establish daily directional bias", "icon": "📈",
-         "detail": "Softened EMA filter produces a quantified trend_strength (0.0-1.0). "
-                   "LONG: 50 > 100 > 200 EMA. SHORT: 50 < 100 < 200. Neutral = no trades."},
+         "detail": "EMA filter produces a quantified trend strength score. "
+                   "Requires EMA stack alignment for directional trades. Neutral = no trades."},
         {"label": "ATR regime classification", "icon": "📊",
-         "detail": "ATR percentile classifies market as QUIET, NORMAL, or VOLATILE. "
-                   "R:R ratio scales accordingly. Blocked regimes can be hard-filtered out."},
+         "detail": "ATR percentile classifies market as quiet, normal, or volatile. "
+                   "R:R ratio scales accordingly."},
         {"label": "Liquidity sweep detection", "icon": "💥",
-         "detail": "Price sweeps session low (longs) or high (shorts). Volume confirmation "
-                   "required. Sweep age limit prevents stale setups."},
+         "detail": "Price sweeps a session level. Volume confirmation required. "
+                   "Sweep age limit prevents stale setups."},
         {"label": "Fractal invalidation check", "icon": "🛡️",
-         "detail": "Count counter-trend fractals since sweep candle. Too many fractals = "
-                   "invalidated structure. Prevents entering stale or broken setups."},
+         "detail": "Counter-trend fractals are counted since the sweep candle. Too many fractals "
+                   "invalidate the structure. Prevents entering stale or broken setups."},
         {"label": "Confirmation candle quality", "icon": "✅",
-         "detail": "Body >= min ATR ratio, correct direction, displacement past sweep price. "
-                   "Volume percentile threshold filters weak confirmations."},
-        {"label": "WFO 6-component scoring", "icon": "📐",
-         "detail": "6 weighted components scored. Minimum 0.35 confidence. "
+         "detail": "Candle body meets minimum quality thresholds, correct direction, displacement "
+                   "past sweep price. Volume filter removes weak confirmations."},
+        {"label": "WFO momentum scoring", "icon": "📐",
+         "detail": "Multi-component weighted score must exceed threshold. "
                    "Rejection resets sweep state entirely — no partial entries."},
     ])
 
     st.subheader("Exit Conditions")
     st.markdown("""
-| Condition | Details |
-|-----------|---------|
-| **Take Profit** | ATR-regime-scaled R:R (QUIET: reduced, VOLATILE: boosted) |
-| **Stop Loss** | Hybrid: sweep-based primary -> ATR fallback -> floor (min) -> cap (max) |
-| **Partial Exit** | At configurable partial R:R level, remainder trails |
+| Condition | Description |
+|-----------|-------------|
+| **Take Profit** | ATR-regime-scaled R:R (reduced in quiet, boosted in volatile) |
+| **Stop Loss** | Hybrid: sweep-based primary -> volatility fallback -> floor -> cap |
+| **Partial Exit** | At configurable level, remainder trails |
 | **Trailing Stop** | Activated after partial exit |
 | **Staleness Exit** | Time/candle-based exit for positions that stall |
 """)
 
-    st.subheader("Risk Management Rules")
-    rm_cols = st.columns(4)
-    rm_cols[0].metric("Risk Per Trade", "1% (vol-adjusted)", help="Volatility-adjusted position sizing.")
-    rm_cols[1].metric("Max Daily Trades", "5", help="Prevents overtrading even during active sessions.")
-    rm_cols[2].metric("SL Floor + Cap", "Active", help="Minimum and maximum SL distance enforced.")
-    rm_cols[3].metric("Re-entry System", "Active", help="Allows re-entry after stop-out with fresh confirmation.")
+    st.subheader("Risk Management Approach")
+    st.markdown("""
+- **Volatility-adjusted risk per trade** — position sizing adapts to current conditions
+- **Daily trade limit** — prevents overtrading even during active sessions
+- **SL floor + cap** — minimum and maximum stop-loss distance enforced
+- **Re-entry system** — allows re-entry after stop-out with fresh confirmation and cooldown
+- **Adaptive risk manager** — self-tunes thresholds from every trade outcome
+- **Premature entry analyzer** — diagnoses systematic timing errors and tightens criteria
+""")
 
     st.subheader("Key Technical Indicators")
     st.markdown("""
-- **EMA Stack (50/100/200)**: Daily chart directional bias with softened filter (trend strength 0-1)
-- **ATR (14-period)**: R:R scaling, SL sizing, sweep depth normalization, regime classification
-- **WFO Score (6 components)**: Momentum-optimized signal confidence (0.0-1.0)
-- **Williams Fractals**: 5-candle high/low fractals for structure invalidation
-- **Candle Body Ratio**: Body/range threshold ensures strong directional conviction
+- **EMA Stack**: Daily chart directional bias with softened filter (trend strength score)
+- **ATR**: R:R scaling, SL sizing, sweep depth normalization, regime classification
+- **WFO Score**: Momentum-optimized signal confidence
+- **Williams Fractals**: High/low fractals for structure invalidation
+- **Candle Body Ratio**: Quality threshold ensures strong directional conviction
 - **Volume Percentile**: Filters weak confirmation candles
-- **ML Trade Filter**: Probability >= 0.45 gate after adaptive threshold
+- **ML Trade Filter**: Probability gate after adaptive threshold
 """)
 
     st.subheader("Strengths & Weaknesses")
@@ -737,7 +691,7 @@ entry criteria accordingly.
         st.markdown("**Weaknesses**")
         st.markdown("""
 - Very selective — low trade frequency can mean missed opportunities
-- Kill zone restriction limits entry windows to ~5 hours/day
+- Kill zone restriction limits entry windows
 - Sweep state reset on WFO rejection can miss borderline good setups
 - Multiple adaptive systems increase parameter complexity
 - Re-entry in same direction may compound directional risk
@@ -749,7 +703,7 @@ entry criteria accordingly.
 # ══════════════════════════════════════════════════════════════════════════════
 elif strategy == "SBS":
     st.header("SBS — Swing Break System / Smart Block Structure")
-    st.caption("The most complex strategy in the portfolio: combines ICT liquidity sweeps with Break of Structure (BOS) confirmation, Fibonacci retracements for precision entries, and a multi-TP trailing stop system. Enhanced with WFO 5-component scoring (highest confidence threshold at 0.48) and a pending entry queue with 15M confirmation.")
+    st.caption("The most complex strategy in the portfolio: combines ICT liquidity sweeps with Break of Structure (BOS) confirmation, Fibonacci retracements for precision entries, and a multi-TP trailing stop system with a pending entry queue and lower-timeframe confirmation.")
 
     st.subheader("Live Performance Snapshot")
     _show_live_summary("SBS")
@@ -761,18 +715,18 @@ elif strategy == "SBS":
 **SBS** stands for **Swing Break System** (describing what it does — trading swing breaks)
 and **Smart Block Structure** (describing what it targets — smart money order blocks).
 
-The strategy identifies institutional order blocks through a 4-stage process:
+The strategy identifies institutional order blocks through a multi-stage process:
 
 1. **Liquidity Sweep**: Price breaks beyond a recent high/low, triggering clustered stops
 2. **Break of Structure (BOS)**: After the sweep, price reverses and breaks a key structure level
    — confirming that smart money has shifted direction
-3. **Fibonacci Retracement**: The bot calculates Fibonacci levels (0.0, 0.236, 0.5, 0.618, 1.0)
-   between the sweep level and the post-BOS swing point
-4. **Second Liquidity Grab**: Price retraces to the 0.618 Fibonacci level ("golden pocket")
-   and shows a rejection — a second grab beyond this level confirms high-conviction entry
+3. **Fibonacci Retracement**: The bot calculates Fibonacci levels between the sweep level and
+   the post-BOS swing point
+4. **Second Liquidity Grab**: Price retraces to a key Fibonacci level and shows a rejection —
+   a second grab confirms high-conviction entry
 
-The strategy uses a **pending entry queue** — setups are detected on the 1H timeframe but
-execution waits for **15M confirmation** (or falls back to 1H after 4 hours).
+The strategy uses a **pending entry queue** — setups are detected on a higher timeframe but
+execution waits for **lower-timeframe confirmation** (or falls back after a timeout).
 """)
 
     # Visual: SBS full lifecycle
@@ -786,71 +740,70 @@ execution waits for **15M confirmation** (or falls back to 1H after 4 hours).
                        font=dict(color="#F44336", size=11))
     fig.add_annotation(x=15, y=106, text="2. Break of Structure", showarrow=True, arrowhead=2,
                        font=dict(color="#FF9800", size=11))
-    fig.add_annotation(x=20, y=100, text="3. 0.618 Fib + 2nd Grab", showarrow=True, arrowhead=2,
+    fig.add_annotation(x=20, y=100, text="3. Fib Retracement + 2nd Grab", showarrow=True, arrowhead=2,
                        font=dict(color="#9C27B0", size=11))
     fig.add_trace(go.Scatter(x=[20], y=[100], mode="markers", name="Entry",
                              marker=dict(size=12, color="#2196F3", symbol="triangle-up")))
 
-    fib_levels = {"1.0 (Sweep)": 96, "0.618": 100, "0.5": 102, "0.236": 105.5, "0.0 (Swing)": 108}
+    # Conceptual Fib levels (illustrative)
+    fib_levels = {"Sweep Level": 96, "Key Fib": 100, "Mid Fib": 102, "Upper Fib": 105.5, "Swing Point": 108}
     for label, level in fib_levels.items():
         fig.add_hline(y=level, line_dash="dot", line_color="rgba(156,39,176,0.3)",
                       annotation_text=label, annotation_position="left")
 
-    fig.add_annotation(x=23, y=105.5, text="TP1 (0.236)", showarrow=True, font=dict(color="#4CAF50"))
-    fig.add_annotation(x=25, y=108, text="TP2 (0.0)", showarrow=True, font=dict(color="#4CAF50"))
+    fig.add_annotation(x=23, y=105.5, text="TP1", showarrow=True, font=dict(color="#4CAF50"))
+    fig.add_annotation(x=25, y=108, text="TP2", showarrow=True, font=dict(color="#4CAF50"))
 
     fig.update_layout(title="SBS Full Trade Lifecycle: Sweep -> BOS -> 2nd Grab -> Multi-TP",
                       template="plotly_dark", height=400, showlegend=False,
                       xaxis_title="Bars", yaxis_title="Price")
     st.plotly_chart(fig, key="sbs_diagram")
 
-    # ── Recent Improvements ──────────────────────────────────────────
-    st.subheader("Recent Improvements")
-    with st.expander("WFO 5-Component Scoring (Highest Threshold)", expanded=True):
+    # ── Key Components ──────────────────────────────────────────────
+    st.subheader("Key Components")
+    with st.expander("WFO Signal Scoring (Highest Threshold)", expanded=True):
         st.markdown("""
-SBS uses the **highest WFO confidence threshold** across all 4 strategies (0.48), reflecting
+SBS uses the **highest WFO confidence threshold** across all strategies, reflecting
 its higher inherent complexity and the need for stronger signal quality.
 
-| Component | Weight | What It Measures |
-|-----------|--------|------------------|
-| `sweep_depth` | 0.30 | Liquidity sweep depth normalized by ATR |
-| `ema_align` | 0.20 | EMA stack alignment with trade direction |
-| `rsi_align` | 0.15 | RSI alignment (momentum confirmation) |
-| `volume_conf` | 0.15 | Volume on sweep and confirmation candles |
-| `struct_bias` | 0.20 | Break of Structure quality and price structure |
+Key scoring dimensions include:
+- **Sweep depth** — liquidity sweep depth normalized by volatility
+- **Trend alignment** — EMA stack agreement with trade direction
+- **Momentum confirmation** — RSI and momentum indicator alignment
+- **Volume confirmation** — volume quality on sweep and confirmation candles
+- **Structural quality** — Break of Structure quality and price structure analysis
 
-**Minimum confidence**: 0.48 — the highest across all strategies.
-
-**No DVOL/ATR gating**: SBS relies on the Fibonacci structure and multi-TP system
-for risk management rather than regime-based gating.
+SBS relies on the Fibonacci structure and multi-TP system for risk management
+rather than regime-based gating used by other strategies.
 """)
 
-    with st.expander("Pending Entry Queue (1H Detection -> 15M Confirmation)"):
+    with st.expander("Pending Entry Queue (Detection -> Confirmation)"):
         st.markdown("""
 SBS's most distinctive feature: **setup detection and execution are decoupled**.
 
-**Detection Phase** (1H timeframe):
+**Detection Phase** (higher timeframe):
 - Sweep + BOS + Fibonacci calculation + second grab detection
 - WFO scoring applied
-- Setup added to `pending_entries` queue (NOT immediately executed)
+- Setup added to pending entries queue (NOT immediately executed)
 
-**Confirmation Phase** (15M timeframe):
-- Each pending entry is checked against the last 16 x 15M candles (4 hours)
-- **15M confirmation**: Candle wicks through the grab level and closes back through it
-  with a bullish/bearish body OR strong wick rejection (wick > 0.5x body)
-- **4H fallback**: If no 15M confirmation within 4 hours, enter at next 1H open
+**Confirmation Phase** (lower timeframe):
+- Each pending entry is checked against recent lower-timeframe candles
+- **Lower-TF confirmation**: candle wicks through the grab level and closes back
+  with a directional body or strong wick rejection
+- **Timeout fallback**: if no lower-TF confirmation within the timeout window,
+  enter at the next higher-TF candle open
 
-**Deduplication**: Duplicate pending entries for the same direction + price level are filtered.
-Entries older than 2 hours are discarded.
+**Deduplication**: Duplicate pending entries for the same direction + price level are
+filtered. Stale entries beyond a maximum age are discarded.
 """)
 
     with st.expander("Second Liquidity Grab Trigger"):
         st.markdown("""
-Instead of entering on the first retracement to the 0.618 Fib level, SBS specifically
+Instead of entering on the first retracement to a key Fibonacci level, SBS specifically
 waits for a **second sweep** beyond that level:
 
 1. After BOS, price retraces toward the sweep origin
-2. A candle that **wicks beyond the 0.618 Fib level** and **closes back through it**
+2. A candle that **wicks beyond the key Fib level** and **closes back through it**
    is the actual entry trigger
 3. This creates a high-conviction "second grab" confirmation
 
@@ -858,70 +811,66 @@ This double-grab pattern filters out weak retracements and ensures the entry zon
 has been tested by institutional order flow before the bot commits capital.
 """)
 
-    st.subheader("Entry Logic (Signal Pipeline)")
+    st.subheader("Entry Logic (Conceptual Pipeline)")
     st.markdown("""
-`1H Sweep` -> `BOS Confirm` -> `Swing Point Found` -> `Fib Levels Calc` -> `2nd Grab Detected`
--> `WFO Score (>= 0.48)` -> `Add to Pending Queue` -> `15M Confirmation (or 4H fallback)` -> **EXECUTE**
+`Sweep Detected` -> `BOS Confirmed` -> `Swing Point Found` -> `Fib Levels Calculated`
+-> `2nd Grab Detected` -> `Signal Score (highest threshold)` -> `Add to Pending Queue`
+-> `Lower-TF Confirmation (or timeout fallback)` -> **EXECUTE**
 """)
 
     _flow_diagram([
-        {"label": "Detect liquidity sweep (1H)", "icon": "💥",
-         "detail": "Price breaks 0.1% beyond recent 50-candle range high (bearish) or low (bullish), "
-                   "triggering clustered stop orders."},
+        {"label": "Detect liquidity sweep", "icon": "💥",
+         "detail": "Price breaks beyond the recent range high or low, triggering "
+                   "clustered stop orders."},
         {"label": "Confirm Break of Structure (BOS)", "icon": "🔄",
-         "detail": "After the sweep, price must close beyond the recent opposite-side structure level. "
-                   "For longs: close > recent high after a low sweep."},
+         "detail": "After the sweep, price must close beyond the recent opposite-side structure "
+                   "level, confirming a directional shift."},
         {"label": "Calculate Fibonacci levels", "icon": "📐",
-         "detail": "Swing range: 1.0 = sweep level, 0.0 = post-BOS swing point. "
-                   "Key levels: 0.618 (entry zone), 0.5 (trail SL 1), 0.236 (TP1), 0.0 (TP2)."},
+         "detail": "Fibonacci retracement levels are calculated between the sweep level and the "
+                   "post-BOS swing point. Key levels define entry zone, TP targets, and trailing SL anchors."},
         {"label": "Detect second liquidity grab", "icon": "🎯",
-         "detail": "Price must wick beyond the 0.618 Fib level and close back through it. "
-                   "This second grab confirms institutional commitment to the reversal."},
-        {"label": "WFO 5-component scoring", "icon": "📐",
-         "detail": "5 weighted components scored. Minimum 0.48 confidence — the highest threshold "
-                   "across all strategies. Failed signals are not queued."},
-        {"label": "15M confirmation or 1H fallback", "icon": "🔬",
-         "detail": "Setup enters pending queue. Best: 15M candle wicks through grab level and closes "
-                   "back (rejection). Fallback: 1H entry after 4 hours without 15M confirmation."},
+         "detail": "Price must wick beyond the key Fibonacci level and close back through it, "
+                   "confirming institutional commitment to the reversal."},
+        {"label": "WFO scoring (highest threshold)", "icon": "📐",
+         "detail": "Multi-component score must exceed the portfolio's highest confidence threshold. "
+                   "Failed signals are not queued."},
+        {"label": "Lower-TF confirmation or fallback", "icon": "🔬",
+         "detail": "Setup enters pending queue. Best case: lower-timeframe candle shows wick rejection "
+                   "at the grab level. Fallback: higher-TF entry after timeout."},
     ])
 
     st.subheader("Exit Conditions — Multi-TP Fibonacci Trailing System")
     st.markdown("""
-| Level | Action | Trailing SL Moves To |
+| Level | Action | Trailing SL Behavior |
 |-------|--------|---------------------|
-| **TP1** (0.236 Fib) | Partial profit taken | SL trails to 0.5 level |
-| **TP2** (0.0 / Swing) | More profit taken | SL trails to 0.236 level |
-| **TP3** (Recent S/R) | Remaining position closed | SL trails to 0.0 level |
-| **Stop Loss** | Full exit | At 1.0 Fib (sweep level) |
-| **Re-entry** | Up to 2 attempts | Configurable window after stop |
+| **TP1** (upper Fibonacci level) | Partial profit taken | SL trails to mid-level |
+| **TP2** (swing point) | More profit taken | SL trails further |
+| **TP3** (recent S/R level) | Remaining position closed | SL at structure level |
+| **Stop Loss** | Full exit | At sweep level |
+| **Re-entry** | Limited attempts | Configurable window after stop |
 """)
 
-    st.subheader("Risk Management Rules")
-    rm_cols = st.columns(4)
-    rm_cols[0].metric("Position Sizing", "ATR-based", help="Dynamic sizing using ATR + confidence weighting.")
-    rm_cols[1].metric("WFO Threshold", "0.48", help="Highest confidence threshold across all strategies.")
-    rm_cols[2].metric("Pending Queue", "4h max", help="Setups expire from pending queue after 4 hours.")
-    rm_cols[3].metric("MFE/MAE Tracking", "Active", help="Every active trade's MFE/MAE updated each loop.")
-
+    st.subheader("Risk Management Approach")
     st.markdown("""
-**Additional safeguards:**
-- **Fibonacci-anchored SL**: Stop placed at structurally meaningful level (sweep origin), not arbitrary ATR distance
-- **Multi-TP cascade**: Progressive trailing through Fib levels eliminates downside risk as trade matures
-- **WFO outcome recording**: Trade results feed back to ML Weight Adapter for continuous weight optimization
-- **Daily/weekly Telegram reports**: Automated performance summaries via background scheduler
-- **Max error auto-restart**: Bot auto-restarts after configurable consecutive error count
+- **Volatility-based position sizing** — dynamic sizing using ATR and confidence weighting
+- **Highest WFO threshold** — most stringent signal quality requirements across all strategies
+- **Pending queue timeout** — setups expire from the pending queue after a maximum age
+- **MFE/MAE tracking** — every active trade's favorable/adverse excursion updated each cycle
+- **Fibonacci-anchored SL** — stop placed at structurally meaningful level, not arbitrary distance
+- **Multi-TP cascade** — progressive trailing through Fib levels eliminates risk as trade matures
+- **WFO outcome recording** — trade results feed back to ML adapter for continuous optimization
 """)
 
     st.subheader("Key Technical Indicators")
     st.markdown("""
-- **ATR (14-period)**: Risk/reward calculations and dynamic position sizing
-- **Fibonacci Retracements (0.0, 0.236, 0.5, 0.618, 1.0)**: Core entry/exit methodology
-- **WFO Score (5 components)**: Signal confidence with 0.48 threshold (highest)
-- **Break of Structure**: 0.1% threshold confirms market structure shift
+- **ATR**: Risk/reward calculations and dynamic position sizing
+- **Fibonacci Retracements**: Core entry/exit methodology — key levels define the entire trade plan
+- **WFO Score**: Signal confidence with highest threshold across all strategies
+- **Break of Structure**: Confirms market structure shift after sweep
 - **Swing Point Detection**: Identifies high/low structures for Fibonacci range
-- **EMA Stack**: Trend direction alignment for WFO `ema_align` component
-- **RSI**: Momentum confirmation for WFO `rsi_align` component
-- **Recent S/R Levels**: 50-candle lookback for TP3 placement
+- **EMA Stack**: Trend direction alignment
+- **RSI**: Momentum confirmation
+- **Recent S/R Levels**: Historical support/resistance for TP placement
 """)
 
     st.subheader("Strengths & Weaknesses")
@@ -931,20 +880,19 @@ has been tested by institutional order flow before the bot commits capital.
         st.markdown("""
 - Pending entry queue decouples detection from execution (higher precision)
 - Second grab trigger provides high-conviction institutional confirmation
-- 15M confirmation reduces false entries significantly
+- Lower-timeframe confirmation reduces false entries significantly
 - Multi-TP Fibonacci cascade maximizes profit extraction
-- Highest WFO threshold (0.48) ensures strongest signal quality
+- Highest WFO threshold ensures strongest signal quality
 - Trailing SL through Fib levels progressively eliminates risk
 """)
     with c2:
         st.markdown("**Weaknesses**")
         st.markdown("""
 - Most complex strategy — more parameters = more calibration needed
-- Pending queue can miss fast V-reversals that don't retrace to 0.618
-- 4H fallback entry sacrifices precision when 15M confirmation fails
+- Pending queue can miss fast V-reversals that don't retrace to key Fib level
+- Timeout fallback entry sacrifices precision when lower-TF confirmation fails
 - Multi-TP exits leave partial positions exposed to adverse moves
-- 1H detection timeframe means slower setup generation
-- No DVOL/ATR regime gating — relies entirely on Fibonacci structure
+- Higher-TF detection means slower setup generation
 """)
 
 
@@ -953,97 +901,82 @@ has been tested by institutional order flow before the bot commits capital.
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown("---")
 st.header("Strategy Comparison Matrix")
-st.caption("Side-by-side comparison of all strategies including recent improvements. Shows how each strategy approaches signal scoring, regime filtering, and risk management differently.")
+st.caption("Side-by-side comparison of all strategies. Shows how each strategy approaches signal detection, regime filtering, and risk management differently.")
 
 comparison_data = {
     "Aspect": [
-        "Primary Entry Signal",
-        "Execution Timeframe",
+        "Primary Edge",
+        "Entry Signal",
+        "Execution Approach",
         "Exit Method",
-        "Risk Per Trade",
         "Stop Loss Method",
         "Session Dependency",
         "Trailing Stop",
         "Re-entry After Stop",
-        "WFO Scoring",
-        "WFO Threshold",
-        "WFO Components",
-        "Regime Gating",
-        "Gamma Integration",
-        "ML Filter",
+        "Signal Scoring",
+        "Regime Filtering",
+        "Options Integration",
         "Adaptive Learning",
-        "Complexity",
+        "Relative Complexity",
     ],
     "FVG": [
-        "3-candle gap + midpoint entry",
-        "15m + HTF confluence",
-        "ATR-regime-scaled R:R",
-        "1% + vol scaling",
-        "FVG boundary + ATR buffer",
-        "24/7 crypto, sessions NQ",
+        "Price delivery inefficiency",
+        "3-candle gap + retracement",
+        "Multi-TF confluence",
+        "Volatility-regime-scaled R:R",
+        "Gap boundary + volatility buffer",
+        "24/7 crypto, sessions for futures",
         "After partial TP",
         "No",
-        "9 components",
-        "0.45 (FVG), 0.40 (iFVG)",
-        "gap, vol, ema, rsi, struct, disp, sweep, hmm, rv",
-        "HMM hard gate (crypto)",
+        "Multi-component (gap, volume, trend, structure, regime)",
+        "Hard gate on calm regimes (crypto)",
         "No",
-        "ML Weight Adapter",
-        "Adaptive Risk + Premature Analyzer",
+        "ML weight adapter + adaptive risk manager",
         "High",
     ],
     "Liquidity Raid": [
+        "Stop-hunt reversal",
         "Session sweep + reversal",
-        "15m / 5m precision",
-        "Dynamic 1.5-2.5x R:R + gamma",
-        "1% fixed",
-        "ATR or sweep-based + IV-adaptive",
+        "Lower-TF precision entry",
+        "Dynamic R:R + options-adjusted",
+        "Volatility-based or sweep-based",
         "Kill zones only",
         "Yes (stepped)",
-        "2 attempts",
-        "4 components (counter-trend)",
-        "0.25",
-        "sweep_depth, counter_struct, counter_htf, struct_conf",
-        "DVOL medium R:R scaling",
-        "IV-adaptive depth + R:R",
-        "ML Weight Adapter",
-        "Quant metrics (Sharpe/Sortino)",
+        "Limited attempts with cooldown",
+        "Counter-trend (sweep depth, structure, HTF, confirmation)",
+        "IV regime scaling",
+        "IV-adaptive depth + R:R scaling",
+        "ML weight adapter + quant metrics",
         "High",
     ],
     "Momentum Mastery": [
-        "EMA bias + sweep + confirm",
-        "15m signals",
+        "Trend + sweep hybrid",
+        "EMA bias + sweep + confirmation",
+        "Signal-based execution",
         "ATR-regime-scaled R:R",
-        "1% vol-adjusted",
-        "Hybrid: sweep -> ATR -> floor -> cap",
+        "Hybrid: sweep -> volatility -> floor -> cap",
         "Kill zones only",
         "After partial exit",
         "Yes (with cooldown)",
-        "6 components (momentum)",
-        "0.35",
-        "sweep_depth, vol, ema, confirm, struct, atr_bonus",
-        "ATR regime filter + blocked regimes",
+        "Momentum-optimized (sweep, volume, trend, confirmation, structure, volatility)",
+        "ATR regime filter",
         "No",
-        "ML Filter (>= 0.45) + Weight Adapter",
-        "Adaptive Risk + Premature Analyzer",
+        "ML filter + weight adapter + adaptive risk + premature analyzer",
         "Medium-High",
     ],
     "SBS": [
+        "Structure break + Fibonacci",
         "Sweep + BOS + Fib 2nd grab",
-        "1H detect, 15m confirm",
-        "Multi-TP Fib trailing SL",
-        "ATR + confidence",
-        "Fibonacci 1.0 level (sweep)",
+        "Pending queue with lower-TF confirmation",
+        "Multi-TP Fib trailing SL cascade",
+        "Fibonacci-anchored (sweep level)",
         "All sessions",
         "Yes (Fib cascade)",
-        "2 attempts",
-        "5 components",
-        "0.48 (highest)",
-        "sweep_depth, ema, rsi, vol, struct_bias",
-        "No regime gate",
+        "Limited attempts",
+        "Highest confidence threshold",
+        "No regime gate (relies on Fibonacci structure)",
         "No",
-        "ML Weight Adapter",
-        "WFO outcome feedback",
+        "ML weight adapter + WFO outcome feedback",
         "Very High",
     ],
 }
@@ -1052,10 +985,10 @@ st.dataframe(
     pd.DataFrame(comparison_data).set_index("Aspect"),
     use_container_width=True,
     column_config={
-        "FVG": st.column_config.TextColumn("FVG", help="Fair Value Gap strategy. Targets institutional price imbalances using multi-timeframe 3-candle gap patterns with HMM regime gating and midpoint entry."),
-        "Liquidity Raid": st.column_config.TextColumn("Liquidity Raid", help="Exploits institutional stop-hunts with gamma regime integration, continuous sweep quality scoring, and counter-trend WFO validation."),
-        "Momentum Mastery": st.column_config.TextColumn("Momentum Mastery", help="Trend-following + sweep hybrid with 6-component WFO scoring, ATR-regime R:R scaling, and adaptive risk management."),
-        "SBS": st.column_config.TextColumn("SBS", help="Most complex strategy: sweep + BOS + Fibonacci entries with pending queue, 15M confirmation, and the highest WFO confidence threshold (0.48)."),
+        "FVG": st.column_config.TextColumn("FVG", help="Fair Value Gap strategy. Targets institutional price imbalances using multi-timeframe gap patterns with regime gating."),
+        "Liquidity Raid": st.column_config.TextColumn("Liquidity Raid", help="Exploits institutional stop-hunts with options microstructure integration and continuous sweep quality scoring."),
+        "Momentum Mastery": st.column_config.TextColumn("Momentum Mastery", help="Trend-following + sweep hybrid with adaptive risk management and premature entry analysis."),
+        "SBS": st.column_config.TextColumn("SBS", help="Most complex strategy: sweep + BOS + Fibonacci entries with pending queue and the highest signal confidence threshold."),
     },
 )
 
@@ -1068,16 +1001,17 @@ infra_cols = st.columns(3)
 with infra_cols[0]:
     st.markdown("**WFO Signal Scorer**")
     st.markdown("""
-    Single shared module with per-strategy configs. ML Weight Adapter
-    uses ridge logistic regression, retrains every 50 outcomes, requires
-    CV accuracy > 0.52. Weight multipliers clamped to [0.5x, 2.0x].
+    Single shared module with per-strategy configurations. An ML weight
+    adapter uses regularized logistic regression and periodically retrains
+    from trade outcomes, keeping weight adjustments within bounded ranges
+    to prevent overfitting.
     """)
 with infra_cols[1]:
     st.markdown("**ML Data Collection**")
     st.markdown("""
-    All bots log entry/exit/MFE/MAE to SQLite via `MLIntegration`.
-    70+ features per trade including WFO confidence, regime state,
-    gamma data, sweep quality, and market context.
+    All bots log entry/exit/MFE/MAE to SQLite. Dozens of features per
+    trade are recorded including signal confidence, regime state,
+    sweep quality, and market context for offline analysis.
     """)
 with infra_cols[2]:
     st.markdown("**Telegram Reporting**")
@@ -1090,7 +1024,7 @@ with infra_cols[2]:
 # ── Live Performance Comparison ───────────────────────────────────────────────
 if not df_all.empty:
     st.subheader("Live Performance Comparison")
-    st.caption("How each strategy is actually performing with real money. Compare against each strategy's design goals above.")
+    st.caption("How each strategy is actually performing with real money.")
 
     rows = []
     for strat in STRATEGIES:
@@ -1121,6 +1055,6 @@ if not df_all.empty:
             "Trades": st.column_config.TextColumn("Trades", help="Total number of live trades executed."),
             "Win Rate": st.column_config.TextColumn("Win Rate", help="Percentage of trades with positive P&L."),
             "Total P&L": st.column_config.TextColumn("Total P&L", help="Cumulative dollar profit or loss."),
-            "Avg R": st.column_config.TextColumn("Avg R", help="Average R-multiple per trade. Above 0.3R is solid."),
-            "Profit Factor": st.column_config.TextColumn("Profit Factor", help="Gross profit / gross loss. Above 1.5 is strong."),
+            "Avg R": st.column_config.TextColumn("Avg R", help="Average R-multiple per trade."),
+            "Profit Factor": st.column_config.TextColumn("Profit Factor", help="Gross profit / gross loss."),
         })
