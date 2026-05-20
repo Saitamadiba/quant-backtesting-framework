@@ -28,9 +28,32 @@ VPS_DB_FILES = {
     "fvg_nq.db":  f"{VPS_REMOTE_BASE}/FVG_Strategy/NQ/nq-usd_enhanced_v3_trades.db",
     "lr_btc.db":  f"{VPS_REMOTE_BASE}/Liquidity_Raid/BTC_V2/btc_liquidity_raid_v2.db",
     "lr_eth.db":  f"{VPS_REMOTE_BASE}/Liquidity_Raid/ETH_V2/eth_liquidity_raid_v2.db",
+    "lr_nq.db":   f"{VPS_REMOTE_BASE}/Liquidity_Raid/NQ_V2/nq_liquidity_raid_v2.db",
+    "lr_sol.db":  f"{VPS_REMOTE_BASE}/Liquidity_Raid/SOL_V2/sol_liquidity_raid_v2.db",
     "mm_btc.db":  f"{VPS_REMOTE_BASE}/Momentum_Mastery/BTC/btc_momentum_mastery_v2.db",
     "mm_eth.db":  f"{VPS_REMOTE_BASE}/Momentum_Mastery/ETH/eth_momentum_mastery_v2.db",
+    "mm_nq.db":   f"{VPS_REMOTE_BASE}/Momentum_Mastery/NQ/nq_momentum_mastery_v2.db",
     "sbs.db":     f"{VPS_REMOTE_BASE}/SBS/bots/core/ml_training_data.db",
+}
+
+# ── LR Shadow DBs (gate-rejected signals tracked as paper trades) ─────────────
+# Populated by the internal strategy core — every signal a gate
+# rejects (IV gate, London-shorts ban, regime block, counter-trend, etc.)
+# becomes a shadow paper trade with TP/SL/TIME_EXIT tracking + a block_reason
+# field so practice can be confronted against the WFO claim that justified
+# each gate.  See dashboard page 23_Shadow_Trades.
+VPS_SHADOW_DB_FILES = {
+    "lr_btc_shadow.db": f"{VPS_REMOTE_BASE}/Liquidity_Raid/BTC_V2/btc_shadow_trades.db",
+    "lr_eth_shadow.db": f"{VPS_REMOTE_BASE}/Liquidity_Raid/ETH_V2/eth_shadow_trades.db",
+    "lr_nq_shadow.db":  f"{VPS_REMOTE_BASE}/Liquidity_Raid/NQ_V2/nq_shadow_trades.db",
+    "lr_sol_shadow.db": f"{VPS_REMOTE_BASE}/Liquidity_Raid/SOL_V2/sol_shadow_trades.db",
+}
+
+SHADOW_DB_STRATEGY_MAP = {
+    "lr_btc_shadow.db": ("Liquidity Raid", "BTC"),
+    "lr_eth_shadow.db": ("Liquidity Raid", "ETH"),
+    "lr_nq_shadow.db":  ("Liquidity Raid", "NQ"),
+    "lr_sol_shadow.db": ("Liquidity Raid", "SOL"),
 }
 
 # ── Remote ML Training DB Mapping ────────────────────────────────────────────
@@ -40,17 +63,21 @@ VPS_ML_FILES = {
     "fvg_nq_ml_training.db":   f"{VPS_REMOTE_BASE}/FVG_Strategy/NQ/ml_training_data.db",
     "lr_btc_ml_training.db":   f"{VPS_REMOTE_BASE}/Liquidity_Raid/BTC_V2/ml_training_data.db",
     "lr_eth_ml_training.db":   f"{VPS_REMOTE_BASE}/Liquidity_Raid/ETH_V2/ml_training_data.db",
+    "lr_nq_ml_training.db":    f"{VPS_REMOTE_BASE}/Liquidity_Raid/NQ_V2/ml_training_data.db",
+    "lr_sol_ml_training.db":   f"{VPS_REMOTE_BASE}/Liquidity_Raid/SOL_V2/ml_training_data.db",
     "mm_btc_ml_training.db":   f"{VPS_REMOTE_BASE}/Momentum_Mastery/BTC/ml_training_data.db",
     "mm_eth_ml_training.db":   f"{VPS_REMOTE_BASE}/Momentum_Mastery/ETH/ml_training_data.db",
+    "mm_nq_ml_training.db":    f"{VPS_REMOTE_BASE}/Momentum_Mastery/NQ/ml_training_data.db",
     "root_ml_training.db":     f"{VPS_REMOTE_BASE}/ml_training_data.db",
 }
 
 # ── Strategy Registry ─────────────────────────────────────────────────────────
 STRATEGIES = {
     "FVG": {"color": "#2196F3", "symbols": ["BTC", "ETH", "NQ"]},
-    "Liquidity Raid": {"color": "#FF9800", "symbols": ["BTC", "ETH"]},
-    "Momentum Mastery": {"color": "#4CAF50", "symbols": ["BTC", "ETH"]},
-    "SBS": {"color": "#9C27B0", "symbols": ["BTC", "ETH", "NQ"]},
+    "Liquidity Raid": {"color": "#FF9800", "symbols": ["BTC", "ETH", "NQ", "SOL"]},
+    "Momentum Mastery": {"color": "#4CAF50", "symbols": ["BTC", "ETH", "NQ"]},
+    "Vol Edge": {"color": "#00BCD4", "symbols": ["BTC", "ETH"]},
+    "SBS": {"color": "#9C27B0", "symbols": ["BTC", "ETH"]},
 }
 
 STRATEGY_COLORS = {s: v["color"] for s, v in STRATEGIES.items()}
@@ -62,8 +89,11 @@ DB_STRATEGY_MAP = {
     "fvg_nq.db":  ("FVG", "NQ"),
     "lr_btc.db":  ("Liquidity Raid", "BTC"),
     "lr_eth.db":  ("Liquidity Raid", "ETH"),
+    "lr_nq.db":   ("Liquidity Raid", "NQ"),
+    "lr_sol.db":  ("Liquidity Raid", "SOL"),
     "mm_btc.db":  ("Momentum Mastery", "BTC"),
     "mm_eth.db":  ("Momentum Mastery", "ETH"),
+    "mm_nq.db":   ("Momentum Mastery", "NQ"),
     "sbs.db":     ("SBS", "ALL"),
 }
 
@@ -74,8 +104,14 @@ BOT_SERVICES = {
     "fvg-nq":  {"strategy": "FVG", "symbol": "NQ"},
     "lr-btc":  {"strategy": "Liquidity Raid", "symbol": "BTC"},
     "lr-eth":  {"strategy": "Liquidity Raid", "symbol": "ETH"},
+    "lr-nq":   {"strategy": "Liquidity Raid", "symbol": "NQ"},
+    "lr-sol":  {"strategy": "Liquidity Raid", "symbol": "SOL"},
     "mm-btc":  {"strategy": "Momentum Mastery", "symbol": "BTC"},
     "mm-eth":  {"strategy": "Momentum Mastery", "symbol": "ETH"},
+    "mm-nq":   {"strategy": "Momentum Mastery", "symbol": "NQ"},
+    "mm-btc-shadow": {"strategy": "Momentum Mastery", "symbol": "BTC-SHADOW"},
+    "straddle-btc":  {"strategy": "Vol Edge", "symbol": "BTC"},
+    "straddle-eth":  {"strategy": "Vol Edge", "symbol": "ETH"},
     "sbs-btc": {"strategy": "SBS", "symbol": "BTC"},
     "sbs-eth": {"strategy": "SBS", "symbol": "ETH"},
 }
@@ -86,8 +122,14 @@ SERVICE_WORK_DIRS = {
     "fvg-nq":  f"{VPS_REMOTE_BASE}/FVG_Strategy/NQ",
     "lr-btc":  f"{VPS_REMOTE_BASE}/Liquidity_Raid/BTC_V2",
     "lr-eth":  f"{VPS_REMOTE_BASE}/Liquidity_Raid/ETH_V2",
+    "lr-nq":   f"{VPS_REMOTE_BASE}/Liquidity_Raid/NQ_V2",
+    "lr-sol":  f"{VPS_REMOTE_BASE}/Liquidity_Raid/SOL_V2",
     "mm-btc":  f"{VPS_REMOTE_BASE}/Momentum_Mastery/BTC",
     "mm-eth":  f"{VPS_REMOTE_BASE}/Momentum_Mastery/ETH",
+    "mm-nq":   f"{VPS_REMOTE_BASE}/Momentum_Mastery/NQ",
+    "mm-btc-shadow": f"{VPS_REMOTE_BASE}/Momentum_Mastery/BTC",
+    "straddle-btc":  f"{VPS_REMOTE_BASE}/Vol_Edge/Straddle_V1",
+    "straddle-eth":  f"{VPS_REMOTE_BASE}/Vol_Edge/Straddle_V1",
     "sbs-btc": f"{VPS_REMOTE_BASE}/SBS/bots/btc",
     "sbs-eth": f"{VPS_REMOTE_BASE}/SBS/bots/eth",
 }
@@ -206,6 +248,26 @@ DEPLOY_BOT_FILES = {
         BASE_DIR / "Momentum_Mastery" / "ETH" / "eth_momentum_mastery_v2.py",
         f"{VPS_REMOTE_BASE}/Momentum_Mastery/ETH/eth_momentum_mastery_v2.py",
     ),
+    "MM NQ": (
+        BASE_DIR / "Momentum_Mastery" / "NQ" / "nq_momentum_mastery_v2.py",
+        f"{VPS_REMOTE_BASE}/Momentum_Mastery/NQ/nq_momentum_mastery_v2.py",
+    ),
+    "LR NQ": (
+        BASE_DIR / "Liquidity_Raid" / "NQ_V2" / "lr_nq.py",
+        f"{VPS_REMOTE_BASE}/Liquidity_Raid/NQ_V2/lr_nq.py",
+    ),
+    "LR SOL": (
+        BASE_DIR / "Liquidity_Raid" / "SOL_V2" / "lr_sol.py",
+        f"{VPS_REMOTE_BASE}/Liquidity_Raid/SOL_V2/lr_sol.py",
+    ),
+    "Straddle BTC": (
+        BASE_DIR / "Vol_Edge" / "Straddle_V1" / "btc_straddle.py",
+        f"{VPS_REMOTE_BASE}/Vol_Edge/Straddle_V1/btc_straddle.py",
+    ),
+    "Straddle ETH": (
+        BASE_DIR / "Vol_Edge" / "Straddle_V1" / "eth_straddle.py",
+        f"{VPS_REMOTE_BASE}/Vol_Edge/Straddle_V1/eth_straddle.py",
+    ),
     "SBS BTC": (
         BASE_DIR / "SBS" / "bots" / "btc" / "sbs_btc.py",
         f"{VPS_REMOTE_BASE}/SBS/bots/btc/sbs_btc.py",
@@ -217,15 +279,20 @@ DEPLOY_BOT_FILES = {
 }
 
 DEPLOY_SERVICE_MAP = {
-    "FVG BTC": "fvg-btc",
-    "FVG ETH": "fvg-eth",
-    "FVG NQ":  "fvg-nq",
-    "LR BTC":  "lr-btc",
-    "LR ETH":  "lr-eth",
-    "MM BTC":  "mm-btc",
-    "MM ETH":  "mm-eth",
-    "SBS BTC": "sbs-btc",
-    "SBS ETH": "sbs-eth",
+    "FVG BTC":      "fvg-btc",
+    "FVG ETH":      "fvg-eth",
+    "FVG NQ":       "fvg-nq",
+    "LR BTC":       "lr-btc",
+    "LR ETH":       "lr-eth",
+    "LR NQ":        "lr-nq",
+    "LR SOL":       "lr-sol",
+    "MM BTC":       "mm-btc",
+    "MM ETH":       "mm-eth",
+    "MM NQ":        "mm-nq",
+    "Straddle BTC": "straddle-btc",
+    "Straddle ETH": "straddle-eth",
+    "SBS BTC":      "sbs-btc",
+    "SBS ETH":      "sbs-eth",
 }
 
 # ── Account Settings ─────────────────────────────────────────────────────────
