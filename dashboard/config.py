@@ -47,6 +47,9 @@ VPS_SHADOW_DB_FILES = {
     "lr_eth_shadow.db": f"{VPS_REMOTE_BASE}/Liquidity_Raid/ETH_V2/eth_shadow_trades.db",
     "lr_nq_shadow.db":  f"{VPS_REMOTE_BASE}/Liquidity_Raid/NQ_V2/nq_shadow_trades.db",
     "lr_sol_shadow.db": f"{VPS_REMOTE_BASE}/Liquidity_Raid/SOL_V2/sol_shadow_trades.db",
+    "mm_btc_shadow.db": f"{VPS_REMOTE_BASE}/Momentum_Mastery/BTC/btc_shadow_trades.db",
+    "mm_eth_shadow.db": f"{VPS_REMOTE_BASE}/Momentum_Mastery/ETH/eth_shadow_trades.db",
+    "mm_nq_shadow.db":  f"{VPS_REMOTE_BASE}/Momentum_Mastery/NQ/nq_shadow_trades.db",
 }
 
 SHADOW_DB_STRATEGY_MAP = {
@@ -54,6 +57,9 @@ SHADOW_DB_STRATEGY_MAP = {
     "lr_eth_shadow.db": ("Liquidity Raid", "ETH"),
     "lr_nq_shadow.db":  ("Liquidity Raid", "NQ"),
     "lr_sol_shadow.db": ("Liquidity Raid", "SOL"),
+    "mm_btc_shadow.db": ("Momentum Mastery", "BTC"),
+    "mm_eth_shadow.db": ("Momentum Mastery", "ETH"),
+    "mm_nq_shadow.db":  ("Momentum Mastery", "NQ"),
 }
 
 # ── Remote ML Training DB Mapping ────────────────────────────────────────────

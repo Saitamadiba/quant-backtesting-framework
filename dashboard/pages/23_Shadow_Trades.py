@@ -79,7 +79,9 @@ def _load_one(local_name: str) -> pd.DataFrame:
     strat, sym = SHADOW_DB_STRATEGY_MAP.get(local_name, ("?", "?"))
     df["strategy"] = strat
     df["symbol"] = sym
-    df["bot"] = f"LR {sym}"
+    # "Liquidity Raid" -> "LR", "Momentum Mastery" -> "MM" (initials of each word)
+    _abbr = "".join(w[0] for w in strat.split()) if strat != "?" else "?"
+    df["bot"] = f"{_abbr} {sym}"
     for c in ("opened_at_utc", "closed_at_utc"):
         if c in df.columns:
             df[c] = pd.to_datetime(df[c], errors="coerce", utc=True)
@@ -96,14 +98,15 @@ st.subheader("Cache status")
 status_cols = st.columns(len(VPS_SHADOW_DB_FILES))
 for i, (name, (strat, sym)) in enumerate(SHADOW_DB_STRATEGY_MAP.items()):
     p = VPS_CACHE_DIR / name
+    _abbr = "".join(w[0] for w in strat.split()) if strat != "?" else "?"
     if p.exists():
         size_kb = round(p.stat().st_size / 1024, 1)
         age_min = int((datetime.now().timestamp() - p.stat().st_mtime) / 60)
         status_cols[i].success(
-            f"LR {sym} · {size_kb} KB · {age_min} min old", icon="🟢"
+            f"{_abbr} {sym} · {size_kb} KB · {age_min} min old", icon="🟢"
         )
     else:
-        status_cols[i].error(f"LR {sym} · not synced", icon="🔴")
+        status_cols[i].error(f"{_abbr} {sym} · not synced", icon="🔴")
 
 
 if all_df.empty:
