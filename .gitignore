@@ -17,6 +17,42 @@ Liquidity_Raid/
 Momentum_Mastery/
 SBS/
 iFVG/
+# straddle / vol bots (configs hold tokens)
+Vol_Edge/
+# ByBit funded-challenge execution code + bybit_client
+HyroTrader/
+# paper-trading daemon
+three_banks/
+
+# ── Shadow / gate modules (reveal gate logic + WFO findings) ─────────────────
+# cross-bot modules (shadow_tracker, trade_event_bus)
+shared/
+shadow_book/
+fvg_shadow/
+ifvg_shadow/
+lr_shadow/
+mm_shadow/
+lr_regime_gate/
+
+# ── Services / infra (secrets, payments, alt-data feeds) ─────────────────────
+# FastAPI payments + telegram broadcaster
+broadcaster/
+flow_aux/
+flow_aux_data/
+_vps_patches/
+
+# ── Proprietary research / configs / tick data / output ──────────────────────
+promoted_configs/
+maker_backtest/
+ofi_study/
+feature_lab/
+tick_data/
+tick_features/
+tick_ingest/
+databases/
+logs/
+reports/
+tools/
 
 # ── Legacy / Archived Code ──────────────────────────────────────────────────
 _OLD_Liquidity_raid_backup/
