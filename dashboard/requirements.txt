@@ -7,3 +7,4 @@ streamlit-autorefresh>=1.0.1
 streamlit-lightweight-charts>=0.7.0
 python-dotenv>=1.0.0
 yfinance>=0.2.0
+QuantLib>=1.42
