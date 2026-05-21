@@ -251,12 +251,21 @@ def _simulate_v2_kernel(
     max_bars,
     buffer_bars, buffer_mult, be_trigger_r, be_buffer_pct,
     time_exit_bars, trail_atr_mult, trail_step_atr,
+    min_trail_lock_r, trail_headroom_frac,
     highs, lows, closes, atrs, has_atrs, n,
 ):
     """JIT-compiled inner loop for V2 trade simulation.
 
-    V2 adds: initial volatility buffer, breakeven trigger, stepped trailing,
-    and time-based exit over V1.
+    V2 adds (over V1): initial volatility buffer, breakeven trigger,
+    stepped trailing, time-based exit, MIN_TRAIL_LOCK_R cost-coverage
+    floor, and TRAIL_HEADROOM_FRAC geometric cap near TP — matches the
+    live LR position_manager.py logic exactly.
+
+    Trail post-processing applied in this order (mirrors live):
+      1. Compute raw trail level: HWM - trail_atr_mult × ATR  (long)
+      2. Geometric cap: if natural trail distance > distance to TP,
+         cap to HWM - trail_headroom_frac × distance_to_TP
+      3. MIN_TRAIL_LOCK_R floor: trail SL ≥ entry + min_lock × risk
 
     Returns
     -------
@@ -354,7 +363,7 @@ def _simulate_v2_kernel(
                         if be_level < stop_loss:
                             stop_loss = be_level
 
-            # --- 3. STEPPED TRAILING ---
+            # --- 3. STEPPED TRAILING (with geometric cap + min-lock floor) ---
             if trailing_active and trail_atr_mult > 0.0 and atr_i > 0.0:
                 if is_long:
                     if h > high_water:
@@ -363,6 +372,27 @@ def _simulate_v2_kernel(
                                high_water - last_trail_price >= trail_step_atr * atr_i)
                     if step_ok:
                         trail_level = high_water - trail_atr_mult * atr_i
+
+                        # Geometric headroom cap (post-mortem trade #130, BTC).
+                        # Only fires when natural trail would exceed remaining
+                        # distance to TP — leaves wide-trail unsafe regimes
+                        # untouched, prevents "trail eats TP" near the target.
+                        if trail_headroom_frac > 0.0 and tp > high_water:
+                            distance_to_tp = tp - high_water
+                            natural_trail_dist = trail_atr_mult * atr_i
+                            if natural_trail_dist > distance_to_tp:
+                                max_trail_dist = trail_headroom_frac * distance_to_tp
+                                capped_level = high_water - max_trail_dist
+                                if capped_level > trail_level:
+                                    trail_level = capped_level
+
+                        # MIN_TRAIL_LOCK_R cost-coverage floor (post-mortem
+                        # trade #115).  Trail SL ≥ entry + min_lock × risk.
+                        if min_trail_lock_r > 0.0:
+                            min_lock_sl = effective_entry + min_trail_lock_r * risk
+                            if min_lock_sl > trail_level:
+                                trail_level = min_lock_sl
+
                         if trail_level > stop_loss:
                             stop_loss = trail_level
                             last_trail_price = high_water
@@ -373,6 +403,23 @@ def _simulate_v2_kernel(
                                last_trail_price - low_water >= trail_step_atr * atr_i)
                     if step_ok:
                         trail_level = low_water + trail_atr_mult * atr_i
+
+                        # Geometric headroom cap (short — mirror).
+                        if trail_headroom_frac > 0.0 and tp < low_water:
+                            distance_to_tp = low_water - tp
+                            natural_trail_dist = trail_atr_mult * atr_i
+                            if natural_trail_dist > distance_to_tp:
+                                max_trail_dist = trail_headroom_frac * distance_to_tp
+                                capped_level = low_water + max_trail_dist
+                                if capped_level < trail_level:
+                                    trail_level = capped_level
+
+                        # MIN_TRAIL_LOCK_R floor (short).
+                        if min_trail_lock_r > 0.0:
+                            min_lock_sl = effective_entry - min_trail_lock_r * risk
+                            if min_lock_sl < trail_level:
+                                trail_level = min_lock_sl
+
                         if trail_level < stop_loss:
                             stop_loss = trail_level
                             last_trail_price = low_water

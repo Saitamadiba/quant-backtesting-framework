@@ -58,6 +58,110 @@ _TRADED = 2
 
 class LiquidityRaidAdapter(StrategyAdapter):
 
+    # Optional per-regime sweep-depth floor (ATR units). When set, the
+    # non-DVOL branch in generate_signals builds min_depth_arr by mapping
+    # each bar's regime → its floor (with min_sweep_atr as the fallback for
+    # any unmapped regime label). Used by run_lr_nq_regime_adaptive.py.
+    _regime_depth_floors: Optional[Dict[str, float]] = None
+
+    # Optional per-asset entry-hour whitelist (ET, 24h ints in 0..23).
+    # When set, the signal loop skips bars whose ET hour is not in this
+    # set, narrowing the existing killzone (London 02-08, NY 08-16).
+    # Motivation: 5y NQ analysis showed entries 04-11 ET are net-negative
+    # (−83R over 5y); restricting to {12,13,14,15} captures the positive
+    # NY-afternoon window (+199R).  See lr_nq_entry_quality_findings.md.
+    _entry_hours_et: Optional[set] = None
+
+    # Optional confidence floor (opt-in).  The composite confidence score
+    # is informational by default ("no hard reject threshold" per the
+    # module docstring).  When this attr is set, the signal loop rejects
+    # signals whose computed `confidence` is below the threshold.  NQ
+    # uses 0.55 to cut the Q1 (mR=−0.075) bucket — see
+    # lr_nq_entry_quality_findings.md.
+    _min_confidence_override: Optional[float] = None
+
+    # Optional per-regime confidence floor (opt-in).  Same mechanic as
+    # _min_confidence_override but keyed on the per-bar regime.  Used
+    # for narrower gates (e.g., NQ: require confidence ≥ 0.61 in
+    # `quiet_trend` only).  Falls back to _min_confidence_override (or
+    # no floor) when regime not in dict.
+    _per_regime_min_confidence: Optional[Dict[str, float]] = None
+
+    # ── Sweep-quality gate (mirrors live the internal strategy core)
+    #  Weights + threshold from the internal strategy core.
+    #  Off by default for backward compat with existing runs; enable via
+    #  `enable_sweep_quality_gate()` to match live bot behaviour.
+    _sq_enabled: bool = False
+    _sq_min_score: float = 40.0
+    _sq_w_depth: float = 0.40
+    _sq_w_volume: float = 0.25
+    _sq_w_time: float = 0.15
+    _sq_w_confirm: float = 0.20
+
+    def enable_sweep_quality_gate(self, min_score: float = 40.0,
+                                   w_depth: float = 0.40,
+                                   w_volume: float = 0.25,
+                                   w_time: float = 0.15,
+                                   w_confirm: float = 0.20):
+        """Enable the 4-component sweep-quality gate (live bot default).
+
+        Matches the internal strategy core:
+            depth_score:   0.5 → 1.0 as sweep depth grows toward 2× ATR
+            volume_score:  0.3 (< avg) → 1.0 (> 2× avg) tiered
+            time_score:    1.0 (fresh) → 0.2 (>12 bars stale) tiered
+            confirm_score: body_ratio × direction_match tiered
+        Weighted → 0-100. Reject if below `min_score` (default 40).
+        """
+        self._sq_enabled = True
+        self._sq_min_score = float(min_score)
+        self._sq_w_depth = float(w_depth)
+        self._sq_w_volume = float(w_volume)
+        self._sq_w_time = float(w_time)
+        self._sq_w_confirm = float(w_confirm)
+
+    def disable_sweep_quality_gate(self):
+        self._sq_enabled = False
+
+    @staticmethod
+    def _sq_depth_score(depth_atr: float) -> float:
+        return min(0.5 + depth_atr / 2.0, 1.0) if depth_atr >= 0 else 0.5
+
+    @staticmethod
+    def _sq_volume_score(vol_ratio: float) -> float:
+        if np.isnan(vol_ratio): return 0.6   # treat missing vol as neutral
+        if vol_ratio < 1.0:  return 0.3
+        if vol_ratio < 1.5:  return 0.6
+        if vol_ratio < 2.0:  return 0.8
+        return 1.0
+
+    @staticmethod
+    def _sq_time_score(candles_since: int) -> float:
+        if candles_since <= 1:  return 1.0
+        if candles_since <= 3:  return 0.8
+        if candles_since <= 6:  return 0.6
+        if candles_since <= 12: return 0.4
+        return 0.2
+
+    @staticmethod
+    def _sq_confirm_score(body_ratio: float, is_direction_match: bool) -> float:
+        if not is_direction_match: return 0.2
+        if body_ratio > 0.7: return 1.0
+        if body_ratio > 0.5: return 0.8
+        if body_ratio > 0.3: return 0.6
+        return 0.4
+
+    def _sq_quality(self, depth_atr: float, vol_ratio: float,
+                    candles_since: int, body_ratio: float,
+                    direction_match: bool) -> float:
+        d = self._sq_depth_score(depth_atr)
+        v = self._sq_volume_score(vol_ratio)
+        t = self._sq_time_score(candles_since)
+        c = self._sq_confirm_score(body_ratio, direction_match)
+        return (d * self._sq_w_depth
+                + v * self._sq_w_volume
+                + t * self._sq_w_time
+                + c * self._sq_w_confirm) * 100.0
+
     @property
     def name(self) -> str:
         return "LiquidityRaid"
@@ -71,6 +175,12 @@ class LiquidityRaidAdapter(StrategyAdapter):
 
         R:R calibrated from MFE analysis: 79.6% of trades reach 0.5R,
         68.7% reach 0.75R, only 58.7% reach 1.0R → 0.5R default target.
+
+        Note: the sweep-quality scorer (live bot Phase-2 feature) is wired
+        but intentionally NOT in the param space.  Empirical WFO showed it
+        overfits IS when tunable — at live's default threshold=40 it is
+        already redundant with min_depth_threshold.  The scorer remains
+        available for metadata + live parity via enable_sweep_quality_gate().
         """
         return [
             ParamSpec("session_lookback",   12,    6,     18,    6,    'int'),
@@ -80,6 +190,10 @@ class LiquidityRaidAdapter(StrategyAdapter):
             ParamSpec("min_body_pct",       0.15,  0.10,  0.25,  0.05),
             ParamSpec("sweep_tolerance",    0.002, 0.001, 0.003, 0.001),
             ParamSpec("min_confidence",     0.25,  0.15,  0.45,  0.05),
+            # Sweep-depth floor (non-DVOL fallback). Live default 0.30 ATR.
+            # Exposed for studies that want to test whether shallow sweeps
+            # are profitable in specific regimes (e.g., ranging on NQ).
+            ParamSpec("min_sweep_atr",      0.30,  0.05,  0.30,  0.05),
         ]
 
     def generate_signals(
@@ -104,6 +218,10 @@ class LiquidityRaidAdapter(StrategyAdapter):
         max_rr = params.get('max_rr', 1.5)
         min_body = params.get('min_body_pct', 0.15)
         min_conf = params.get('min_confidence', 0.35)
+        # Non-DVOL fallback floor for sweep depth (in ATR units). The
+        # DVOL-adaptive branch below still computes its own per-bar floor;
+        # this param only affects the non-DVOL fallback (i.e., NQ).
+        min_sweep_atr = params.get('min_sweep_atr', 0.30)
 
         if max_rr < min_rr:
             max_rr = min_rr
@@ -143,6 +261,35 @@ class LiquidityRaidAdapter(StrategyAdapter):
             htf_bullish = ema50 > ema200
             htf_bearish = ema50 < ema200
 
+        # ── Per-bar regime (vectorised; mirrors live bot classify_regime) ──
+        # Defaults from the internal strategy core.
+        # Live bot blocks LONG in trending_down and SHORT in trending_up
+        # (REGIME_DIRECTION_FILTER_ENABLED default True, config_base.py:308).
+        lookback = 50
+        adx_arr_full = df['ADX'].values if 'ADX' in df.columns else None
+        atr_full = df['ATR'].values
+        close_full = df['Close'].values
+        ema50_full = df['EMA50'].values
+        # Rolling ATR%/Close mean over lookback using pandas for speed.
+        atr_pct_full = atr_full / np.where(close_full > 0, close_full, np.nan)
+        avg_atr_pct_full = pd.Series(atr_pct_full).rolling(lookback).mean().values
+        regime_full = np.full(len(df), 'unknown', dtype=object)
+        valid_regime = ~np.isnan(avg_atr_pct_full) & (close_full > 0) & (atr_full > 0)
+        volatile_mask = valid_regime & (atr_pct_full > avg_atr_pct_full * 1.8)
+        if adx_arr_full is not None:
+            trending_mask = valid_regime & (~volatile_mask) & (adx_arr_full > 30.0)
+            trend_up = trending_mask & (close_full > ema50_full)
+            trend_dn = trending_mask & (close_full <= ema50_full)
+        else:
+            trend_up = np.zeros(len(df), dtype=bool)
+            trend_dn = np.zeros(len(df), dtype=bool)
+        ranging_mask = valid_regime & (~volatile_mask) & (~trend_up) & (~trend_dn)
+        regime_full[volatile_mask] = 'volatile'
+        regime_full[trend_up] = 'trending_up'
+        regime_full[trend_dn] = 'trending_down'
+        regime_full[ranging_mask] = 'ranging'
+        regime_arr = regime_full[sl]
+
         # ── DVOL-based IV-adaptive sweep depth ────────────────────
         has_dvol = 'DVOL' in df.columns
         if has_dvol:
@@ -157,8 +304,32 @@ class LiquidityRaidAdapter(StrategyAdapter):
                 valid_dvol & (dvol >= 45) & (dvol < 65), 0.75, rr_scale_arr
             )
         else:
-            min_depth_arr = np.full(scan_len, 0.30)   # Fix 5: was 0.15
+            # Non-DVOL fallback (e.g., NQ): use the parameterised floor so
+            # studies can sweep this threshold. Default 0.30 matches the
+            # live LR config (config_base.py:244, "Fix 5: was 0.15").
+            if self._regime_depth_floors:
+                # Per-regime depth floor: map each scan bar's regime label
+                # to its floor; fall back to the scalar min_sweep_atr for
+                # any regime not present in the dict (and for 'unknown').
+                floors = self._regime_depth_floors
+                fallback = float(min_sweep_atr)
+                min_depth_arr = np.array(
+                    [float(floors.get(r, fallback)) for r in regime_arr],
+                    dtype=float,
+                )
+            else:
+                min_depth_arr = np.full(scan_len, float(min_sweep_atr))
             rr_scale_arr = np.ones(scan_len)
+
+        # Research override: when `min_sweep_atr_override` is set, it
+        # replaces *whatever* min_depth_arr the branches above chose —
+        # including the hardcoded DVOL-bucket floors (0.25 LOW/HIGH IV,
+        # 0.35 MED IV).  Lets sensitivity studies sweep the depth filter
+        # without touching the live config.  Default None = identical
+        # behaviour to before this knob existed.
+        _override = params.get('min_sweep_atr_override', None)
+        if _override is not None:
+            min_depth_arr = np.full(scan_len, float(_override))
 
         # ── Volatility-Adaptive SL ────────────────────────────────
         has_pctile = 'ATR_Pctile20' in df.columns
@@ -171,6 +342,22 @@ class LiquidityRaidAdapter(StrategyAdapter):
             )
         else:
             sl_vol_mult = np.ones(scan_len)
+
+        # ── Volume ratio for metadata ────────────────────────────
+        has_vol_sma = 'Volume_SMA' in df.columns
+        if has_vol_sma:
+            _volumes = df['Volume'].values[sl]
+            _vol_sma = df['Volume_SMA'].values[sl]
+            _vol_sma_safe = np.maximum(_vol_sma, 1e-10)
+            volume_ratio_arr = _volumes / _vol_sma_safe
+        else:
+            volume_ratio_arr = np.full(scan_len, np.nan)
+
+        # ── ADX / RSI for metadata ───────────────────────────────
+        has_adx = 'ADX' in df.columns
+        adx_arr = df['ADX'].values[sl] if has_adx else np.full(scan_len, np.nan)
+        has_rsi = 'RSI' in df.columns
+        rsi_arr = df['RSI'].values[sl] if has_rsi else np.full(scan_len, np.nan)
 
         # ── Candle properties ─────────────────────────────────────
         candle_range = highs - lows
@@ -211,6 +398,13 @@ class LiquidityRaidAdapter(StrategyAdapter):
         london_lo_sweep_price = 0.0
         london_hi_sweep_price = 0.0
 
+        # Bar indices (relative) when each level first transitioned to SWEEP_DETECTED.
+        # Used by the sweep-quality scorer to compute time-decay.
+        asia_lo_first_bar = -1
+        asia_hi_first_bar = -1
+        london_lo_first_bar = -1
+        london_hi_first_bar = -1
+
         # Current session levels (scalars)
         cur_asia_hi = np.nan
         cur_asia_lo = np.nan
@@ -222,12 +416,18 @@ class LiquidityRaidAdapter(StrategyAdapter):
         last_london_date = None
 
         signals: List[Signal] = []
-        min_cooldown = 4
-        last_sig_rel = -min_cooldown
+        # Live bot imposes no cooldown between signals (removed the false
+        # 4-bar gate that was deflating signal count vs live). Sweep state
+        # machine transitions to _TRADED after a confirmation, which is the
+        # real deduplication.
 
         for rel_i in range(scan_len):
             # Skip if not in killzone
             if not is_kz[rel_i]:
+                continue
+
+            # Optional per-asset entry-hour whitelist (ET).
+            if self._entry_hours_et is not None and int(et_hours_scan[rel_i]) not in self._entry_hours_et:
                 continue
 
             abs_i = s + rel_i
@@ -250,6 +450,8 @@ class LiquidityRaidAdapter(StrategyAdapter):
                     asia_hi_state = _WAITING
                     asia_lo_sweep_price = 0.0
                     asia_hi_sweep_price = 0.0
+                    asia_lo_first_bar = -1
+                    asia_hi_first_bar = -1
                     last_asia_date = asia_date
 
             # London: only update when in NY killzone
@@ -262,6 +464,8 @@ class LiquidityRaidAdapter(StrategyAdapter):
                     london_hi_state = _WAITING
                     london_lo_sweep_price = 0.0
                     london_hi_sweep_price = 0.0
+                    london_lo_first_bar = -1
+                    london_hi_first_bar = -1
                     last_london_date = london_date
 
             # ── Determine directional bias (Fix 3) ────────────────
@@ -279,6 +483,15 @@ class LiquidityRaidAdapter(StrategyAdapter):
                 else:
                     continue  # No bias = no signal
 
+            # ── Regime direction filter (mirrors live bot) ────────
+            # REGIME_DIRECTION_FILTER_ENABLED=True by default in live LR bot.
+            # Live-WFO justification: internal analysis flagged regime-direction mismatches as negative-EV.  Hard-block them.
+            reg = regime_arr[rel_i]
+            if reg == 'trending_up' and bias == -1:
+                continue
+            if reg == 'trending_down' and bias == 1:
+                continue
+
             close_val = closes[rel_i]
             low_val = lows[rel_i]
             high_val = highs[rel_i]
@@ -289,21 +502,25 @@ class LiquidityRaidAdapter(StrategyAdapter):
                 if not np.isnan(cur_asia_lo) and close_val > cur_asia_lo:
                     asia_lo_state = _WAITING
                     asia_lo_sweep_price = 0.0
+                    asia_lo_first_bar = -1
 
             if london_lo_state == _SWEEP_DETECTED:
                 if not np.isnan(cur_london_lo) and close_val > cur_london_lo:
                     london_lo_state = _WAITING
                     london_lo_sweep_price = 0.0
+                    london_lo_first_bar = -1
 
             if asia_hi_state == _SWEEP_DETECTED:
                 if not np.isnan(cur_asia_hi) and close_val < cur_asia_hi:
                     asia_hi_state = _WAITING
                     asia_hi_sweep_price = 0.0
+                    asia_hi_first_bar = -1
 
             if london_hi_state == _SWEEP_DETECTED:
                 if not np.isnan(cur_london_hi) and close_val < cur_london_hi:
                     london_hi_state = _WAITING
                     london_hi_sweep_price = 0.0
+                    london_hi_first_bar = -1
 
             # ── Sweep detection (Fix 2 + Fix 3 bias gate) ─────────
             # LONG bias: check low sweeps (sellside liquidity)
@@ -315,6 +532,7 @@ class LiquidityRaidAdapter(StrategyAdapter):
                         if asia_lo_state == _WAITING:
                             asia_lo_state = _SWEEP_DETECTED
                             asia_lo_sweep_price = low_val
+                            asia_lo_first_bar = rel_i
                         elif low_val < asia_lo_sweep_price:
                             asia_lo_sweep_price = low_val
 
@@ -326,6 +544,7 @@ class LiquidityRaidAdapter(StrategyAdapter):
                         if london_lo_state == _WAITING:
                             london_lo_state = _SWEEP_DETECTED
                             london_lo_sweep_price = low_val
+                            london_lo_first_bar = rel_i
                         elif low_val < london_lo_sweep_price:
                             london_lo_sweep_price = low_val
 
@@ -338,6 +557,7 @@ class LiquidityRaidAdapter(StrategyAdapter):
                         if asia_hi_state == _WAITING:
                             asia_hi_state = _SWEEP_DETECTED
                             asia_hi_sweep_price = high_val
+                            asia_hi_first_bar = rel_i
                         elif high_val > asia_hi_sweep_price:
                             asia_hi_sweep_price = high_val
 
@@ -390,15 +610,41 @@ class LiquidityRaidAdapter(StrategyAdapter):
             if confirmed_level is None:
                 continue
 
-            # ── Cooldown ──────────────────────────────────────────
-            if rel_i - last_sig_rel < min_cooldown:
-                continue
-
             # ── Sweep depth check (Fix 5) ─────────────────────────
             depth = abs(confirmed_sweep_price - confirmed_level_val)
             depth_atr = depth / atr_val
             if depth_atr < min_depth_arr[rel_i]:
                 continue
+
+            # ── Sweep-quality scorer (mirrors live SweepQualityScorer) ──
+            # Default adapter behaviour: score every signal for metadata, but
+            # the live-default threshold=40 is redundant with min_depth (empirically
+            # filters 0% of signals).  Enable enforcement via enable_sweep_quality_gate().
+            sq_score = None
+            sq_threshold = self._sq_min_score if self._sq_enabled else 0.0
+            if self._sq_enabled or True:   # always compute for metadata
+                # Resolve the sweep's first-detection bar for time-decay
+                if confirmed_level == 'asia_low':
+                    first_bar = asia_lo_first_bar
+                elif confirmed_level == 'london_low':
+                    first_bar = london_lo_first_bar
+                else:  # asia_high
+                    first_bar = asia_hi_first_bar
+                candles_since = (rel_i - first_bar) if first_bar >= 0 else 0
+                vol_ratio_val = float(volume_ratio_arr[rel_i]) if has_vol_sma else float('nan')
+                is_dir_match = (confirmed_direction == 'LONG'
+                                and is_bullish[rel_i]) or \
+                               (confirmed_direction == 'SHORT'
+                                and is_bearish[rel_i])
+                sq_score = self._sq_quality(
+                    depth_atr=depth_atr,
+                    vol_ratio=vol_ratio_val,
+                    candles_since=candles_since,
+                    body_ratio=float(body_pct[rel_i]),
+                    direction_match=bool(is_dir_match),
+                )
+                if self._sq_enabled and sq_score < sq_threshold:
+                    continue
 
             # ── Mark level as TRADED ──────────────────────────────
             if confirmed_level == 'asia_low':
@@ -424,6 +670,19 @@ class LiquidityRaidAdapter(StrategyAdapter):
 
             struct_conf_score = float(struct_conf_arr[rel_i]) * 0.15
             confidence = depth_c + struct_score + htf_score + struct_conf_score
+
+            # ── Optional confidence floor (opt-in) ────────────────
+            # Per-regime floor takes precedence; falls back to the
+            # global override; otherwise no filter.
+            if self._per_regime_min_confidence is not None:
+                regime_floor = self._per_regime_min_confidence.get(regime_arr[rel_i])
+                if regime_floor is not None and confidence < regime_floor:
+                    continue
+                elif regime_floor is None and self._min_confidence_override is not None \
+                        and confidence < self._min_confidence_override:
+                    continue
+            elif self._min_confidence_override is not None and confidence < self._min_confidence_override:
+                continue
 
             # ── R:R and entry/exit calculation ────────────────────
             eff_min_rr = min_rr * rr_scale_arr[rel_i]
@@ -458,8 +717,29 @@ class LiquidityRaidAdapter(StrategyAdapter):
                 confidence=confidence,
                 bias='COUNTER' if (struct_score > 0.1 or htf_score > 0) else 'PARTIAL',
                 atr=atr_val,
+                metadata={
+                    'sweep_type': confirmed_level,
+                    'depth_atr': float(depth_atr),
+                    'body_ratio': float(body_pct[rel_i]),
+                    'volume_ratio': float(volume_ratio_arr[rel_i]) if has_vol_sma else None,
+                    'hour_et': int(h_et),
+                    'session': 'london' if is_london[rel_i] else 'ny',
+                    'structure_bias_val': float(sb_val),
+                    'structure_conf_val': float(struct_conf_arr[rel_i]),
+                    'htf_bullish': bool(htf_bullish[rel_i]),
+                    'htf_bearish': bool(htf_bearish[rel_i]),
+                    'adx_val': float(adx_arr[rel_i]) if has_adx and not np.isnan(adx_arr[rel_i]) else None,
+                    'rsi_val': float(rsi_arr[rel_i]) if has_rsi and not np.isnan(rsi_arr[rel_i]) else None,
+                    'atr_pctile20': float(atr_pctile[rel_i]) if has_pctile and not np.isnan(atr_pctile[rel_i]) else None,
+                    'sl_vol_mult': float(sl_vol_mult[rel_i]),
+                    'rr_scale': float(rr_scale_arr[rel_i]),
+                    'min_depth_threshold': float(min_depth_arr[rel_i]),
+                    'sweep_quality_score': float(sq_score) if sq_score is not None else None,
+                    'candle_range_atr': float(candle_range[rel_i] / atr_val),
+                    'close_position_in_range': float((closes[rel_i] - lows[rel_i]) / max(candle_range[rel_i], 1e-10)),
+                    'is_bullish_bar': bool(is_bullish[rel_i]),
+                },
             ))
-            last_sig_rel = rel_i
 
         return signals
 

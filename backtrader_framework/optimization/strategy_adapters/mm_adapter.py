@@ -57,6 +57,12 @@ class MomentumMasteryAdapter(StrategyAdapter):
             ParamSpec("entry_pullback",      0.50,  0.30,  0.70,  0.20),
             ParamSpec("max_confirm_bars",    6,     3,     9,     3,    'int'),
             ParamSpec("min_confidence",      0.35,  0.20,  0.55,  0.05),
+            # Trend-strength floor: skip signals when |EMA50 - EMA200|/close
+            # is below this threshold. Live strategy computes `trend_strength`
+            # in technical_analysis.py:113 but doesn't use it as a hard gate.
+            # 0.0 = disabled (default). Calibrated for studies that want to
+            # require an actual trending regime for mean-reversion sweeps.
+            ParamSpec("min_trend_strength",  0.0,   0.0,   0.020, 0.005),
         ]
 
     def generate_signals(
@@ -76,6 +82,8 @@ class MomentumMasteryAdapter(StrategyAdapter):
         entry_pb = params.get('entry_pullback', 0.50)
         max_confirm = int(params.get('max_confirm_bars', 6))
         min_conf = params.get('min_confidence', 0.35)
+        # Trend-strength floor (continuous regime gate). 0.0 = disabled.
+        min_ts = float(params.get('min_trend_strength', 0.0))
 
         # R:R regime scaling (matches MM config: QUIET 1.5, NORMAL 2.0, VOLATILE 3.0)
         min_rr = max(1.5, base_rr - 0.5)
@@ -168,6 +176,17 @@ class MomentumMasteryAdapter(StrategyAdapter):
             if bias == 'NONE':
                 i += 1
                 continue
+
+            # Trend-strength gate (continuous): require |ema50-ema200|/close
+            # to exceed `min_ts` so we only fire mean-reversion sweeps in
+            # genuinely trending regimes. Default 0.0 → no-op.
+            if min_ts > 0.0:
+                c_i = closes[i]
+                if c_i > 0:
+                    ts = abs(e50 - e200) / c_i
+                    if ts < min_ts:
+                        i += 1
+                        continue
 
             # ── Check for liquidity sweep ───────────────────────────
             sweep_info = _check_sweep(

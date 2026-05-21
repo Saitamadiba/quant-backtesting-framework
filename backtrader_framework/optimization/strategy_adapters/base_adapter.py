@@ -119,3 +119,30 @@ class StrategyAdapter(ABC):
 
     def get_default_params(self) -> Dict[str, Any]:
         return {p.name: p.default for p in self.get_param_space()}
+
+    # ─────────────────────────────────────────────────────────────────
+    # Optional per-window hooks.  Default: no-op.
+    # ─────────────────────────────────────────────────────────────────
+
+    def begin_window(
+        self,
+        train_df: pd.DataFrame,
+        window_id: int,
+        is_trades: Optional[List[Any]] = None,
+    ) -> None:
+        """Called between IS optimization and OOS evaluation.
+
+        Override in subclasses that need per-window adaptation (e.g., to
+        refit a lightweight ML gate on the IS trades of the current window).
+        Runs in the main process, so changes to instance state propagate
+        directly to the OOS simulation.  Default is a no-op.
+        """
+        pass
+
+    def end_window(self, window_id: int) -> None:
+        """Called after OOS evaluation completes.
+
+        Override to clean up per-window state (e.g., discard a per-window
+        ML model so the next window starts fresh).  Default is a no-op.
+        """
+        pass

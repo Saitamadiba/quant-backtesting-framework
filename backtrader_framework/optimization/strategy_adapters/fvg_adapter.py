@@ -1,71 +1,46 @@
 """
-FVG (Fair Value Gap) adapter for WFO engine — v5.
+FVG (Fair Value Gap) adapter for WFO engine — v6.
 
 Pure pandas/numpy signal generation, no backtrader dependency.
-Optimized: vectorized FVG detection with numpy shifted arrays,
-incremental gap tracking with deque for O(active_gaps) per bar.
 
-v5 improvements (over v4) — Profitability Study filters, Mar 2026:
-    - iFVG (Inverted FVG) detection: tracks mitigated FVGs and generates
-      entry signals when price re-touches the inverted zone.
-    - DVOL MED=SKIP removed: MED DVOL is now allowed (positive in regime per internal study). Was a dead zone in prior iterations.
-    - DVOL gates are now strategy-dependent: iFVG reverses direction
-      gates (per internal DVOL study).
-    - HMM regime integration: 2-state GaussianHMM (calm/volatile) fit
-      on warmup data, forward-filtered causally. Intraday prefers
-      per internal regime study.
-    - Realized Vol percentile boost for iFVG (high RV + volatile HMM
-      per internal 2-factor study).
-    - R:R defaults updated: retest 3.0R, iFVG 2.0R (was 1.5 flat).
-    - SL buffer default lowered from 0.5 to 0.3 ATR (internal study).
-    - All signals carry metadata['signal_type'] = 'RETEST' or 'IFVG'.
+v6 improvements (over v5) — Entry Quality & Regime Alignment, Mar 2026:
 
-v4 changes (retained):
-    - Displacement gate REMOVED at entry time (soft confidence only).
-    - Sweep requirement CONVERTED to soft confidence boost (+0.15).
-    - R:R range 0.5-4.0 (was 0.5-3.0); WFO optimizes per window.
+    1. LIMIT-ORDER ENTRY at FVG zone: Signals are generated only when
+       price actually retraces INTO the FVG zone (bar wick penetrates),
+       with entry_price = touch point clamped to the gap zone.
+       Previous: entered at midpoint regardless of actual bar range.
 
-v3 changes (retained):
-    - Trailing stop to breakeven after TP1 (TradeSimulator)
-    - Session filter: London + NY only (07-21 UTC)
-    - Confidence gate at 0.45 default (lowered from 0.55)
+    2. HTF PRIORITIZATION: 4h FVGs are detected alongside 1h, and receive
+       a confidence boost. Larger institutional gaps are more reliable.
 
-v2 changes (retained):
-    - Cross-TF detection: 1h FVGs on 15m data (HTF_1h_* columns)
-    - IV regime gating: DVOL direction filter (crypto only)
-    - Increased minimum gap size (0.2% default)
+    3. iFVG MITIGATION BUFFER: FVGs are only considered "mitigated" when
+       price closes beyond the zone edge by 10% of gap range (buffer).
+       Previous: any close 1 tick beyond killed the FVG.
 
-Signal flow:
-    1. Detect 3-candle imbalance patterns (bullish/bearish FVGs)
-       - On HTF_1h candles if available (cross-TF), else native
-    2. Track active FVGs with age expiry (max_fvg_age bars)
-    3. Track mitigated FVGs (price closed through zone) as iFVGs
-    4. IV regime gate: strategy-dependent direction filter by DVOL
-    5. Session filter: skip bars outside London + NY (07-21 UTC)
-    6. RETEST: enter when price retraces into gap zone
-    7. iFVG: enter when price re-touches mitigated (inverted) zone
-    8. HMM + RV confidence boosts for both signal types
-    9. SL beyond gap boundary + ATR buffer; TP at R:R target
-   10. After TP1 hit, SL trails to breakeven (simulator-level)
+    4. EMA REGIME DIRECTION FILTER: Hard filter — no longs in downtrends
+       (EMA50 < EMA200), no shorts in uptrends. WFO data showed materially better performance in one regime than the other.
 
-Confidence scoring (9 factors):
-    - Gap size relative to price (0-0.20)
-    - Volume confirmation at gap creation (0/0.15)
-    - EMA bias alignment (0/0.15)
-    - RSI alignment (0/0.10)
-    - Structure bias agreement (0/0.10)
-    - Displacement strength (0-0.15)
-    - Liquidity sweep present (0/0.15)
-    - HMM regime alignment (0/hmm_conf_boost)
-    - Realized vol alignment (0/0.10) — iFVG only
+    5. R:R FROM ACTUAL ENTRY: SL/TP computed from the retest touch price,
+       not the idealized midpoint. Risk reflects where the fill actually is.
+
+v5 changes (retained):
+    - iFVG (Inverted FVG) detection and re-touch signals
+    - HMM regime hard gate (volatile only)
+    - DVOL strategy-dependent direction filters
+    - Realized Vol percentile boost for iFVG
+    - R:R defaults: retest 3.0R, iFVG 2.0R
+    - SL buffer 0.3 ATR (internal study)
 
 WFO Results history:
+    v5:  positive WFO result (see internal report)
     v4:  negative WFO result on both assets (see internal report)
-    v3: see internal WFO report
 """
 
 from typing import Dict, List, Any, Optional, Tuple
 from collections import deque
+import logging
+import os
+import pickle
 
 import numpy as np
 import pandas as pd
@@ -77,6 +52,18 @@ from .base_adapter import StrategyAdapter, ParamSpec, Signal
 _DIR_BULL = 0
 _DIR_BEAR = 1
 
+_logger = logging.getLogger(__name__)
+
+# Location of trained FVG momentum models (one per asset, 2-feature LR)
+_FVG_MODEL_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    '..', '..', '..', 'FVG_Strategy', 'models',
+)
+
+# Matches FVG_Strategy/momentum_signal_model.py
+_ML_VOLUME_ROLL = 20
+_ML_DISPLACEMENT_LOOKBACK = 5
+
 
 class FVGAdapter(StrategyAdapter):
 
@@ -86,46 +73,274 @@ class FVGAdapter(StrategyAdapter):
 
     @property
     def default_timeframes(self) -> List[str]:
-        return ["1h", "15m"]
+        return ["15m", "1h"]
 
-    # Study-proven constants (not optimizable — reduces search space)
-    _FIXED_ATR_SL_BUFFER = 0.3     # Study: 0.3 ATR beats 0.5 default
-    _FIXED_RR_RETEST = 3.0         # Study: retest bounce optimal R:R
-    _FIXED_RR_IFVG = 2.0           # Study: iFVG inversion optimal R:R
-    _FIXED_HMM_CONF_BOOST = 0.15   # Study: volatile-state boost
+    # Study-proven constants (not optimizable)
+    _FIXED_ATR_SL_BUFFER = 0.3
+    _FIXED_RR_RETEST = 3.0
+    _FIXED_RR_IFVG = 2.0
+    _FIXED_HMM_CONF_BOOST = 0.15
+
+    # Optional ML filter (live bot's MomentumSignalModel). Off until enable_ml_filter().
+    # NOTE: the production models are fitted on the proprietary training window,
+    # so enabling the filter on historical WFO is a counterfactual ("would the
+    # live filter have helped on this data?"), not a clean OOS test.  Per-window
+    # refit is the clean version; not implemented here.
+    _ml_model = None
+    _ml_scaler = None
+    _ml_threshold: float = 0.55
+    _ml_symbol: Optional[str] = None
+
+    # Per-window-refit slots (Phase 2B).  When set via begin_window(), these
+    # override the globally-loaded production model for one WFO fold.  This
+    # gives an honest out-of-sample test of the ML filter: train on the IS
+    # trades of the current window only, evaluate on OOS.
+    _refit_mode: bool = False          # True while a per-window model is active
+    _refit_model = None
+    _refit_scaler = None
+    _refit_threshold: float = 0.55
+    _refit_min_trades: int = 10        # skip refit below this many IS trades
+
+    def enable_ml_filter(self, symbol: str) -> bool:
+        """Load the live bot's momentum LR model for `symbol` (e.g., "BTC").
+
+        Returns True if the model loaded successfully, False otherwise.
+        Once loaded, `generate_signals` applies a P(win) >= threshold gate
+        on every candidate signal.
+        """
+        # Map our short symbols to FVG model filenames (underscore form).
+        sym_map = {'BTC': 'BTC_USD', 'ETH': 'ETH_USD', 'NQ': 'NQ_USD'}
+        full_sym = sym_map.get(symbol, symbol)
+        path = os.path.join(_FVG_MODEL_DIR, f'momentum_{full_sym}.pkl')
+        if not os.path.exists(path):
+            _logger.warning(f"FVG ML model not found at {path} — filter disabled")
+            self._ml_model = None
+            return False
+        try:
+            with open(path, 'rb') as f:
+                obj = pickle.load(f)
+            self._ml_model = obj['model']
+            self._ml_scaler = obj['scaler']
+            self._ml_threshold = float(obj.get('probability_threshold', 0.55))
+            self._ml_symbol = symbol
+            _logger.info(
+                f"FVG ML filter loaded for {symbol}: threshold={self._ml_threshold}, "
+                f"model={type(self._ml_model).__name__}"
+            )
+            return True
+        except Exception as e:
+            _logger.warning(f"Failed to load FVG ML model for {symbol}: {e}")
+            self._ml_model = None
+            return False
+
+    def disable_ml_filter(self):
+        self._ml_model = None
+        self._ml_scaler = None
+        self._ml_symbol = None
+
+    def enable_per_window_refit(self, min_trades: int = 10):
+        """Enable Phase 2B: refit a fresh 2-feature LR per WFO window.
+
+        This eliminates the look-ahead bias of the live-model approach:
+        instead of applying a globally-trained model to historical OOS
+        windows (which saw those trades during training), we fit a fresh
+        model on each window's IS trades only and evaluate on OOS.
+
+        Caveats:
+        - Per-window IS typically yields 10-50 trades, so each model is
+          small-sample.  If fewer than `min_trades`, the refit is skipped
+          for that window and no ML filter is applied.
+        - Feature direction-alignment check still applies (see _ml_accept).
+        """
+        self._refit_mode = True
+        self._refit_min_trades = int(min_trades)
+        # Ensure the globally-loaded model (if any) doesn't interfere
+        self._ml_model = None
+        self._ml_scaler = None
+        _logger.info(
+            f"FVG per-window-refit ENABLED (min_trades={min_trades})."
+        )
+
+    def disable_per_window_refit(self):
+        self._refit_mode = False
+        self._refit_model = None
+        self._refit_scaler = None
+
+    @staticmethod
+    def _compute_ml_features(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
+        """Pre-compute volume_deviation and displacement_pct arrays over the full df.
+
+        Matches FVG_Strategy/momentum_signal_model.py feature extraction exactly:
+            volume_deviation = current_vol / rolling-mean-of-prior-20-bars
+            displacement_pct = (close - close[-5]) / close[-5]   (signed)
+        """
+        vol = df['Volume'].values
+        close = df['Close'].values
+        n = len(df)
+        # Rolling mean of PRIOR 20 bars (exclusive of current) to match live.
+        vol_shift = pd.Series(vol).shift(1)
+        vol_mean = vol_shift.rolling(_ML_VOLUME_ROLL, min_periods=_ML_VOLUME_ROLL).mean().values
+        safe_mean = np.where((vol_mean > 0) & ~np.isnan(vol_mean), vol_mean, np.nan)
+        vol_dev = vol / safe_mean
+        # Replace NaN with 1.0 (live model's fallback when data insufficient)
+        vol_dev = np.where(np.isnan(vol_dev), 1.0, vol_dev)
+        # 5-bar signed displacement
+        close_prev = pd.Series(close).shift(_ML_DISPLACEMENT_LOOKBACK).values
+        disp = np.where(
+            (close_prev > 0) & ~np.isnan(close_prev),
+            (close - close_prev) / close_prev, 0.0,
+        )
+        return vol_dev, disp
+
+    def _ml_accept(self, vol_dev: float, disp: float, direction: str) -> bool:
+        """Return True if the signal passes the ML filter (or filter is off).
+
+        Prefers the per-window refit model when active; falls back to the
+        globally-loaded production model; returns True if neither is set.
+        Applies direction-alignment check before the probability threshold.
+        """
+        # Pick which model applies: window-refit overrides global.
+        if self._refit_mode:
+            model = self._refit_model
+            scaler = self._refit_scaler
+            thresh = self._refit_threshold
+            if model is None:
+                # Window had too few IS trades to fit; let all signals through.
+                return True
+        elif self._ml_model is not None:
+            model = self._ml_model
+            scaler = self._ml_scaler
+            thresh = self._ml_threshold
+        else:
+            return True
+        # Direction alignment (matches momentum_signal_model._model_detect).
+        if direction == 'LONG' and disp <= 0:
+            return False
+        if direction == 'SHORT' and disp >= 0:
+            return False
+        feat = np.array([[vol_dev, disp]])
+        scaled = scaler.transform(feat)
+        p_win = model.predict_proba(scaled)[0, 1]
+        return bool(p_win >= thresh)
+
+    # ────────────────────────────────────────────────────────────
+    #  Per-window hooks (Phase 2B)
+    # ────────────────────────────────────────────────────────────
+
+    def begin_window(self, train_df, window_id, is_trades=None):
+        """Fit a fresh 2-feature LR on the current window's IS trades.
+
+        Features : (volume_deviation, displacement_pct) at each trade's
+                   entry bar — identical to the live model's features.
+        Label    : 1 if trade's r_multiple_after_costs > 0 else 0.
+
+        No-op if per-window-refit is not enabled (default).
+        """
+        if not self._refit_mode:
+            return
+        # Drop any previous window's model first
+        self._refit_model = None
+        self._refit_scaler = None
+        if is_trades is None or len(is_trades) < self._refit_min_trades:
+            _logger.debug(
+                f"[window {window_id}] refit skipped: "
+                f"{0 if is_trades is None else len(is_trades)} IS trades "
+                f"< {self._refit_min_trades} min"
+            )
+            return
+        try:
+            from sklearn.linear_model import LogisticRegression
+            from sklearn.preprocessing import StandardScaler
+        except ImportError:
+            _logger.warning("sklearn not available; per-window refit disabled")
+            return
+
+        vol_dev_arr, disp_arr = self._compute_ml_features(train_df)
+        # Map each trade's entry_time back to a bar index in train_df.
+        # (The IS trades were simulated on train_df, so indices align.)
+        idx = train_df.index
+        X, y = [], []
+        for t in is_trades:
+            try:
+                bar = idx.get_loc(t.entry_time)
+            except (KeyError, TypeError):
+                continue
+            if bar < 0 or bar >= len(vol_dev_arr):
+                continue
+            v = vol_dev_arr[bar]
+            d = disp_arr[bar]
+            if not np.isfinite(v) or not np.isfinite(d):
+                continue
+            X.append([v, d])
+            y.append(1 if t.r_multiple_after_costs > 0 else 0)
+
+        if len(X) < self._refit_min_trades:
+            _logger.debug(
+                f"[window {window_id}] refit skipped: only {len(X)} usable "
+                f"feature rows after cleaning"
+            )
+            return
+        # Need both classes present for LR.fit to work
+        if len(set(y)) < 2:
+            _logger.debug(
+                f"[window {window_id}] refit skipped: IS trades all "
+                f"{'winners' if y[0]==1 else 'losers'} — LR needs both classes"
+            )
+            return
+
+        X_arr = np.asarray(X, dtype=float)
+        y_arr = np.asarray(y, dtype=int)
+        try:
+            scaler = StandardScaler().fit(X_arr)
+            X_sc = scaler.transform(X_arr)
+            model = LogisticRegression(solver='lbfgs', max_iter=500).fit(X_sc, y_arr)
+        except Exception as e:
+            _logger.warning(f"[window {window_id}] refit failed: {e}")
+            return
+
+        self._refit_model = model
+        self._refit_scaler = scaler
+        # Pick a threshold: use 0.55 (matches live default) unless that would
+        # reject every trade.  Degenerate IS sets can produce always-low or
+        # always-high probas; adjust threshold to the median predicted proba
+        # in that case so we still filter something.
+        try:
+            probs = model.predict_proba(X_sc)[:, 1]
+            base = 0.55
+            if probs.max() < base:
+                base = float(np.median(probs))
+            self._refit_threshold = base
+        except Exception:
+            self._refit_threshold = 0.55
+        _logger.debug(
+            f"[window {window_id}] refit fit on {len(X)} trades "
+            f"(win_rate={y_arr.mean():.1%}, threshold={self._refit_threshold:.3f})"
+        )
+
+    def end_window(self, window_id):
+        """Drop the per-window model after OOS evaluation completes."""
+        self._refit_model = None
+        self._refit_scaler = None
 
     def get_param_space(self) -> List[ParamSpec]:
-        """Parameter space for Fair Value Gap detection and entry.
-
-        Study-proven filter values (atr_sl_buffer, rr_target, ifvg_rr_target,
-        hmm_conf_boost) are fixed as class constants — not part of the search
-        space. This keeps the grid at 5 dims for stable optimization with
-        150 random samples.
-        """
+        """Parameter space — kept small for stable WFO (72 combos full grid)."""
         return [
-            ParamSpec("min_gap_pct",      0.002,  0.001, 0.005, 0.001),
-            ParamSpec("max_fvg_age",      50,     20,    80,    20,    'int'),
-            ParamSpec("min_confidence",   0.45,   0.30,  0.65,  0.05),
+            ParamSpec("min_gap_pct",     0.002,  0.001, 0.004, 0.001),     # 4 values
+            ParamSpec("max_fvg_age",     50,     30,    70,    20, 'int'),  # 3 values
+            ParamSpec("min_confidence",  0.40,   0.30,  0.50,  0.10),      # 3 values
+            ParamSpec("regime_filter",   1,      0,     1,     1,  'int'),  # 2 values
         ]
 
     # ────────────────────────────────────────────────────────────
-    #  HMM helpers (cached per DataFrame to avoid re-fitting per param combo)
+    #  HMM helpers (cached per DataFrame)
     # ────────────────────────────────────────────────────────────
 
-    # Class-level HMM cache: avoids re-fitting when the same df is passed
-    # across multiple param combos in a WFO window.
     _hmm_cache_id: int = -1
     _hmm_cache_states: Optional[np.ndarray] = None
 
     @classmethod
     def _fit_hmm_states(cls, df: pd.DataFrame, warmup_pct: float) -> Optional[np.ndarray]:
-        """Fit 2-state GaussianHMM on warmup data and forward-filter the rest.
-
-        Returns array of state indices (0=calm, 1=volatile) or None on failure.
-        Uses only causal (forward-filter) inference — no future leakage.
-        Results are cached per DataFrame id to avoid refitting 150x per window.
-        """
-        # Cache hit: same DataFrame object → return cached result
+        """Fit 2-state GaussianHMM on warmup data and forward-filter the rest."""
         df_id = id(df)
         if cls._hmm_cache_id == df_id and cls._hmm_cache_states is not None:
             return cls._hmm_cache_states
@@ -156,12 +371,11 @@ class FVGAdapter(StrategyAdapter):
             hmm = GaussianHMM(n_states=2, max_iter=100, tol=1e-4)
             hmm.fit((warmup_feat - mu) / std)
 
-            # Forward filter full data (standardised with warmup stats)
             X_full = features.copy()
             nan_rows = np.isnan(X_full).any(axis=1)
             X_full[nan_rows] = mu
             probs = hmm.forward_filter((X_full - mu) / std)
-            states = np.argmax(probs, axis=1)  # 0=calm, 1=volatile
+            states = np.argmax(probs, axis=1)
 
             cls._hmm_cache_id = df_id
             cls._hmm_cache_states = states
@@ -177,28 +391,25 @@ class FVGAdapter(StrategyAdapter):
     # ────────────────────────────────────────────────────────────
 
     @staticmethod
-    def _build_htf_1h_bars(df: pd.DataFrame) -> Optional[Tuple[np.ndarray, ...]]:
-        """Extract unique 1h bars from forward-filled HTF_1h_* columns.
+    def _build_htf_bars(df: pd.DataFrame, prefix: str) -> Optional[Tuple[np.ndarray, ...]]:
+        """Extract unique HTF bars from forward-filled columns.
 
-        Returns (htf_highs, htf_lows, htf_closes, bar_end_idx) where
-        bar_end_idx[k] is the last native-TF index belonging to 1h bar k.
-        Returns None if HTF columns are missing.
+        Works for any prefix: 'HTF_1h_' or 'HTF_4h_'.
+        Returns (htf_highs, htf_lows, htf_closes, bar_start_indices, bar_end_idx)
+        or None if columns are missing.
         """
-        needed = ['HTF_1h_High', 'HTF_1h_Low', 'HTF_1h_Close', 'HTF_1h_Open']
+        needed = [f'{prefix}High', f'{prefix}Low', f'{prefix}Close', f'{prefix}Open']
         if not all(c in df.columns for c in needed):
             return None
 
-        htf_close = df['HTF_1h_Close'].values
-        htf_high = df['HTF_1h_High'].values
-        htf_low = df['HTF_1h_Low'].values
+        htf_close = df[f'{prefix}Close'].values
+        htf_high = df[f'{prefix}High'].values
+        htf_low = df[f'{prefix}Low'].values
 
-        # Identify 1h bar boundaries: where HTF_1h_Close changes value
-        # (forward-fill means all bars within a 1h candle share the same close)
         n = len(df)
         if n < 4:
             return None
 
-        # Find indices where the 1h bar changes
         change_mask = np.zeros(n, dtype=bool)
         change_mask[0] = True
         change_mask[1:] = (htf_close[1:] != htf_close[:-1]) | (htf_high[1:] != htf_high[:-1])
@@ -208,12 +419,10 @@ class FVGAdapter(StrategyAdapter):
         if n_bars < 3:
             return None
 
-        # For each 1h bar, grab the OHLC from the first native bar in that group
         htf_highs = htf_high[bar_start_indices]
         htf_lows = htf_low[bar_start_indices]
         htf_closes = htf_close[bar_start_indices]
 
-        # bar_end_idx: last native index of each 1h bar
         bar_end_idx = np.empty(n_bars, dtype=np.int64)
         bar_end_idx[:-1] = bar_start_indices[1:] - 1
         bar_end_idx[-1] = n - 1
@@ -230,11 +439,12 @@ class FVGAdapter(StrategyAdapter):
         min_gap: float,
         vol_mean_20: np.ndarray,
         volumes: np.ndarray,
+        htf_source: str = '1h',
     ) -> List[tuple]:
-        """Detect FVGs on 1h bars and map activation to native-TF indices.
+        """Detect FVGs on HTF bars and map activation to native-TF indices.
 
         Returns list of (activation_native_idx, direction, gap_high, gap_low,
-                         vol_conf, gap_pct).
+                         vol_conf, gap_pct, htf_source).
         """
         n_bars = len(htf_highs)
         fvgs = []
@@ -252,16 +462,14 @@ class FVGAdapter(StrategyAdapter):
                 if gap_size > 0:
                     gp = gap_size / mid_p
                     if gp >= min_gap:
-                        # Activation: after 3rd 1h candle closes
                         act_idx = int(bar_end_idx[k])
-                        # Volume check at mid candle
                         mid_native = int(bar_start_indices[k - 1])
                         vm = vol_mean_20[mid_native] if mid_native < len(vol_mean_20) else np.nan
                         vol_conf = (
                             not np.isnan(vm) and vm > 0
                             and volumes[mid_native] > vm * 1.2
                         )
-                        fvgs.append((act_idx, _DIR_BULL, gap_high, gap_low, vol_conf, gp))
+                        fvgs.append((act_idx, _DIR_BULL, gap_high, gap_low, vol_conf, gp, htf_source))
 
             # Bearish FVG: candle[k-2].low > candle[k].high
             if htf_lows[k - 2] > htf_highs[k]:
@@ -278,12 +486,12 @@ class FVGAdapter(StrategyAdapter):
                             not np.isnan(vm) and vm > 0
                             and volumes[mid_native] > vm * 1.2
                         )
-                        fvgs.append((act_idx, _DIR_BEAR, gap_high, gap_low, vol_conf, gp))
+                        fvgs.append((act_idx, _DIR_BEAR, gap_high, gap_low, vol_conf, gp, htf_source))
 
         return fvgs
 
     # ────────────────────────────────────────────────────────────
-    #  Main signal generation
+    #  Main signal generation (v6)
     # ────────────────────────────────────────────────────────────
 
     def generate_signals(
@@ -296,14 +504,13 @@ class FVGAdapter(StrategyAdapter):
         """
         Generate FVG trade signals over [scan_start_idx, scan_end_idx).
 
-        Detects FVGs on 1h candles (cross-TF) when HTF_1h columns exist,
-        otherwise on native timeframe. Produces both RETEST and iFVG signals
-        with strategy-dependent IV regime gating and HMM confidence boosts.
+        v6: Limit-order entry, HTF cascade, regime filter, iFVG buffer,
+        entry-based R:R.
         """
         min_gap = params.get('min_gap_pct', 0.002)
         max_age = int(params.get('max_fvg_age', 50))
-        min_conf = params.get('min_confidence', 0.45)
-        # Fixed study-proven values (not in param search space)
+        min_conf = params.get('min_confidence', 0.40)
+        regime_filter = bool(params.get('regime_filter', 1))
         atr_buf = self._FIXED_ATR_SL_BUFFER
         rr_target = self._FIXED_RR_RETEST
         ifvg_rr = self._FIXED_RR_IFVG
@@ -333,62 +540,74 @@ class FVGAdapter(StrategyAdapter):
         has_structure = 'StructureBias' in df.columns
         struct_bias = df['StructureBias'].values if has_structure else None
 
-        # ── DVOL for IV regime gating ───────────────────────────
         has_dvol = 'DVOL' in df.columns
         dvol = df['DVOL'].values if has_dvol else None
 
-        # ── HMM regime states ──────────────────────────────────
         warmup_pct = params.get('hmm_warmup_pct', 0.30)
         hmm_states = self._fit_hmm_states(df, warmup_pct)
         has_hmm = hmm_states is not None
 
-        # ── Realized vol percentile ─────────────────────────────
         has_rv = 'RV_Percentile' in df.columns
         rv_pctile = df['RV_Percentile'].values if has_rv else None
 
-        # Rolling 20-bar volume mean
         vol_series = pd.Series(volumes)
         vol_mean_20 = vol_series.rolling(20, min_periods=10).mean().values
 
-        # ── FVG Detection: cross-TF or native ──────────────────
-        htf_result = self._build_htf_1h_bars(df)
-        use_cross_tf = htf_result is not None
+        # ML filter features (computed once per df; no-op if filter disabled).
+        # Required for both the global model and the per-window refit mode.
+        _ml_active = (self._ml_model is not None) or self._refit_mode
+        if _ml_active:
+            ml_vol_dev, ml_disp = self._compute_ml_features(df)
+        else:
+            ml_vol_dev = ml_disp = None
+
+        # ── FVG Detection: HTF cascade (4h → 1h → native) ─────
+        # FVG tuple format: (bar, dir, gh, gl, vol_conf, gap_pct, htf_source)
+        htf_fvg_list: List[tuple] = []
+
+        # Try 4h first (strongest institutional signal)
+        htf_4h = self._build_htf_bars(df, 'HTF_4h_')
+        if htf_4h is not None:
+            htf_highs, htf_lows, htf_closes, bar_starts, bar_ends = htf_4h
+            fvgs_4h = self._detect_htf_fvgs(
+                htf_highs, htf_lows, htf_closes, bar_starts, bar_ends,
+                min_gap * 0.5,  # 4h gaps are larger absolute, lower pct threshold
+                vol_mean_20, volumes, htf_source='4h',
+            )
+            htf_fvg_list.extend(fvgs_4h)
+
+        # Then 1h
+        htf_1h = self._build_htf_bars(df, 'HTF_1h_')
+        if htf_1h is not None:
+            htf_highs, htf_lows, htf_closes, bar_starts, bar_ends = htf_1h
+            fvgs_1h = self._detect_htf_fvgs(
+                htf_highs, htf_lows, htf_closes, bar_starts, bar_ends,
+                min_gap, vol_mean_20, volumes, htf_source='1h',
+            )
+            htf_fvg_list.extend(fvgs_1h)
+
+        use_cross_tf = len(htf_fvg_list) > 0
 
         active_fvgs: deque = deque()
-        # iFVG tracking: mitigated FVGs with inverted polarity
-        # Tuple: (mitigation_bar, inv_direction, gap_high, gap_low, vol_conf, gap_pct)
         mitigated_fvgs: deque = deque()
 
         if use_cross_tf:
-            # Pre-compute all 1h FVGs and seed the deque
-            htf_highs, htf_lows, htf_closes, bar_starts, bar_ends = htf_result
-            htf_fvg_list = self._detect_htf_fvgs(
-                htf_highs, htf_lows, htf_closes,
-                bar_starts, bar_ends,
-                min_gap, vol_mean_20, volumes,
-            )
-            # Sort by activation index and convert to iterator
             htf_fvg_list.sort(key=lambda x: x[0])
             htf_fvg_iter_idx = 0
-        else:
-            # Native-TF vectorized FVG detection masks
-            bull_fvg_mask = np.zeros(n, dtype=bool)
-            bear_fvg_mask = np.zeros(n, dtype=bool)
-            if n >= 3:
-                bull_fvg_mask[2:] = highs[:-2] < lows[2:]
-                bear_fvg_mask[2:] = lows[:-2] > highs[2:]
+
+        # Native-TF detection (fallback when no HTF columns)
+        bull_fvg_mask = np.zeros(n, dtype=bool)
+        bear_fvg_mask = np.zeros(n, dtype=bool)
+        if not use_cross_tf and n >= 3:
+            bull_fvg_mask[2:] = highs[:-2] < lows[2:]
+            bear_fvg_mask[2:] = lows[:-2] > highs[2:]
 
         # ── Main loop ───────────────────────────────────────────
         signals: List[Signal] = []
         min_cooldown = 4
         last_sig_idx = -min_cooldown
-
-        # First-touch-only: track FVG bars that already generated a signal
         used_fvg_bars: set = set()
         used_ifvg_bars: set = set()
-
-        # Track which FVGs got mitigated this bar (avoid duplicates)
-        _mitigated_ids: set = set()
 
         loop_start = max(2, s - max_age)
 
@@ -397,7 +616,6 @@ class FVGAdapter(StrategyAdapter):
 
             # ── Register new FVGs ───────────────────────────────
             if use_cross_tf:
-                # Activate any 1h FVGs whose 3rd candle closed at or before bar i
                 while htf_fvg_iter_idx < len(htf_fvg_list):
                     fvg = htf_fvg_list[htf_fvg_iter_idx]
                     if fvg[0] <= i:
@@ -406,7 +624,6 @@ class FVGAdapter(StrategyAdapter):
                     else:
                         break
             else:
-                # Native-TF FVG registration
                 if bull_fvg_mask[i]:
                     gap_high = lows[i]
                     gap_low = highs[i - 2]
@@ -416,11 +633,8 @@ class FVGAdapter(StrategyAdapter):
                         gp = gap_size / mid_p
                         if gp >= min_gap:
                             vm = vol_mean_20[i - 1]
-                            vol_conf = (
-                                not np.isnan(vm) and vm > 0
-                                and volumes[i - 1] > vm * 1.2
-                            )
-                            active_fvgs.append((i, _DIR_BULL, gap_high, gap_low, vol_conf, gp))
+                            vol_conf = not np.isnan(vm) and vm > 0 and volumes[i - 1] > vm * 1.2
+                            active_fvgs.append((i, _DIR_BULL, gap_high, gap_low, vol_conf, gp, 'native'))
 
                 if bear_fvg_mask[i]:
                     gap_high = lows[i - 2]
@@ -431,38 +645,35 @@ class FVGAdapter(StrategyAdapter):
                         gp = gap_size / mid_p
                         if gp >= min_gap:
                             vm = vol_mean_20[i - 1]
-                            vol_conf = (
-                                not np.isnan(vm) and vm > 0
-                                and volumes[i - 1] > vm * 1.2
-                            )
-                            active_fvgs.append((i, _DIR_BEAR, gap_high, gap_low, vol_conf, gp))
+                            vol_conf = not np.isnan(vm) and vm > 0 and volumes[i - 1] > vm * 1.2
+                            active_fvgs.append((i, _DIR_BEAR, gap_high, gap_low, vol_conf, gp, 'native'))
 
-            # Pop expired from front (deque is sorted by activation index)
+            # Pop expired
             while active_fvgs and (i - active_fvgs[0][0]) > max_age:
                 active_fvgs.popleft()
             while mitigated_fvgs and (i - mitigated_fvgs[0][0]) > max_age:
                 mitigated_fvgs.popleft()
 
-            # ── Check for mitigation → move to iFVG deque ───────
-            _mitigated_ids.clear()
+            # ── Check for mitigation → iFVG (with buffer) ───────
             new_active: deque = deque()
             for fvg_tuple in active_fvgs:
-                fvg_bar, fvg_dir, fvg_gh, fvg_gl, fvg_vc, fvg_gp = fvg_tuple
-                # Bullish FVG mitigated: close below gap_low
-                if fvg_dir == _DIR_BULL and close_i < fvg_gl:
+                fvg_bar, fvg_dir, fvg_gh, fvg_gl, fvg_vc, fvg_gp, fvg_src = fvg_tuple
+                gap_range = fvg_gh - fvg_gl
+                mit_buffer = gap_range * 0.10  # v6: 10% buffer
+
+                if fvg_dir == _DIR_BULL and close_i < (fvg_gl - mit_buffer):
                     mitigated_fvgs.append(
-                        (i, _DIR_BEAR, fvg_gh, fvg_gl, fvg_vc, fvg_gp)
+                        (i, _DIR_BEAR, fvg_gh, fvg_gl, fvg_vc, fvg_gp, fvg_src)
                     )
-                # Bearish FVG mitigated: close above gap_high
-                elif fvg_dir == _DIR_BEAR and close_i > fvg_gh:
+                elif fvg_dir == _DIR_BEAR and close_i > (fvg_gh + mit_buffer):
                     mitigated_fvgs.append(
-                        (i, _DIR_BULL, fvg_gh, fvg_gl, fvg_vc, fvg_gp)
+                        (i, _DIR_BULL, fvg_gh, fvg_gl, fvg_vc, fvg_gp, fvg_src)
                     )
                 else:
                     new_active.append(fvg_tuple)
             active_fvgs = new_active
 
-            # Skip fill checks for pre-scan bars
+            # Skip pre-scan bars
             if i < s:
                 continue
             if i - last_sig_idx < min_cooldown:
@@ -472,9 +683,8 @@ class FVGAdapter(StrategyAdapter):
             if not (atr_val > 0) or np.isnan(atr_val):
                 continue
 
-            # ── IV regime determination ─────────────────────────
-            # MED is allowed per internal study
-            iv_regime = None  # None = no data, 'LOW', 'MED', 'HIGH'
+            # ── IV regime ─────────────────────────────────────
+            iv_regime = None
             if has_dvol:
                 dv = dvol[i]
                 if not np.isnan(dv):
@@ -485,30 +695,24 @@ class FVGAdapter(StrategyAdapter):
                     else:
                         iv_regime = 'HIGH'
 
-            # ── Displacement (soft score only, no hard gate) ─────
+            # ── Displacement (soft) ───────────────────────────
             disp_lookback = 5
             if i >= disp_lookback:
                 ref_close = closes[i - disp_lookback]
-                if ref_close > 0:
-                    price_change = (close_i - ref_close) / ref_close
-                else:
-                    price_change = 0.0
+                price_change = (close_i - ref_close) / ref_close if ref_close > 0 else 0.0
             else:
                 price_change = 0.0
 
-            # ── Session filter: equity only (NQ = no DVOL data) ──
-            # Study showed crypto profits across all hours → no session
-            # filter for crypto. NQ/equities use London + NY (07-21 UTC).
+            # ── Session filter (NQ only) ──────────────────────
             if not has_dvol:
                 bar_time = df.index[i]
                 if hasattr(bar_time, 'hour'):
-                    hour = bar_time.hour
-                    if not (7 <= hour < 21):
+                    if not (7 <= bar_time.hour < 21):
                         continue
 
             # ── Liquidity sweep detection ─────────────────────
             sweep_lookback = 20
-            bull_sweep = True   # Default true if insufficient data
+            bull_sweep = True
             bear_sweep = True
             if i >= sweep_lookback + 5:
                 struct_start = i - sweep_lookback - 5
@@ -522,24 +726,27 @@ class FVGAdapter(StrategyAdapter):
             high_i = highs[i]
             low_i = lows[i]
 
-            # ── HMM hard gate: only trade during volatile regime ───
-            # Study: volatile state dominates profitable combos.
-            # Skip calm-state bars entirely (hard gate, not soft boost).
-            if has_hmm and hmm_states[i] == 0:  # calm
+            # ── HMM hard gate ─────────────────────────────────
+            if has_hmm and hmm_states[i] == 0:
                 continue
 
-            # ── RETEST: Check each active FVG for fill entry ────
+            # ── EMA regime state (for direction filter) ────────
+            ema_bull = has_ema and ema50[i] > ema200[i]
+            ema_bear = has_ema and ema50[i] < ema200[i]
+
+            # ═══════════════════════════════════════════════════
+            #  RETEST: Check active FVGs for RETRACEMENT entry
+            # ═══════════════════════════════════════════════════
             best_signal: Optional[Signal] = None
             best_conf = -1.0
-            best_fvg_bar = -1  # track which FVG produced best signal
+            best_fvg_bar = -1
 
             for fvg_tuple in active_fvgs:
-                fvg_bar, fvg_dir, fvg_gh, fvg_gl, fvg_vc, fvg_gp = fvg_tuple
+                fvg_bar, fvg_dir, fvg_gh, fvg_gl, fvg_vc, fvg_gp, fvg_src = fvg_tuple
 
                 age = i - fvg_bar
                 if age < 2:
                     continue
-                # First-touch-only: skip FVGs that already produced a signal
                 if fvg_bar in used_fvg_bars:
                     continue
 
@@ -547,16 +754,30 @@ class FVGAdapter(StrategyAdapter):
                 if gap_range <= 0:
                     continue
 
-                # Zone touch check — matches study methodology
-                # Study: any bar whose range touches the gap zone triggers
+                # v6 IMPROVEMENT 1: RETRACEMENT entry (not just zone touch)
+                # Price must retrace INTO the FVG zone.
+                fvg_mid = (fvg_gh + fvg_gl) / 2.0
+
                 if fvg_dir == _DIR_BULL:
-                    if not (low_i <= fvg_gh and high_i >= fvg_gl):
-                        continue
+                    # Bullish: need price to retrace DOWN into the gap
+                    if low_i > fvg_gh:
+                        continue  # bar never reached the gap
                     direction = 'LONG'
+                    # Entry = where price actually touched, clamped to gap zone
+                    touch_price = max(fvg_gl, min(fvg_mid, low_i))
                 else:
-                    if not (high_i >= fvg_gl and low_i <= fvg_gh):
-                        continue
+                    # Bearish: need price to retrace UP into the gap
+                    if high_i < fvg_gl:
+                        continue  # bar never reached the gap
                     direction = 'SHORT'
+                    touch_price = min(fvg_gh, max(fvg_mid, high_i))
+
+                # v6 IMPROVEMENT 4: EMA regime direction filter
+                if regime_filter and has_ema:
+                    if ema_bear and direction == 'LONG':
+                        continue
+                    if ema_bull and direction == 'SHORT':
+                        continue
 
                 # ── Retest IV regime direction gate ──────────
                 if iv_regime == 'LOW' and direction == 'SHORT':
@@ -564,22 +785,18 @@ class FVGAdapter(StrategyAdapter):
                 if iv_regime == 'HIGH' and direction == 'LONG':
                     continue
 
-                # ── Confidence scoring (7 base + HMM + RV) ──
-                # 1. Gap size relative to price (0-0.20)
-                confidence = min(fvg_gp / 0.005, 1.0) * 0.20
+                # ── Confidence scoring (9 factors) ───────────
+                confidence = min(fvg_gp / 0.005, 1.0) * 0.20  # gap size
 
-                # 2. Volume confirmation (0/0.15)
                 if fvg_vc:
-                    confidence += 0.15
+                    confidence += 0.15  # volume
 
-                # 3. EMA bias alignment (0/0.15)
                 if has_ema:
                     if direction == 'LONG' and ema50[i] > ema200[i]:
                         confidence += 0.15
                     elif direction == 'SHORT' and ema50[i] < ema200[i]:
                         confidence += 0.15
 
-                # 4. RSI alignment (0/0.10)
                 if has_rsi:
                     r = rsi[i]
                     if direction == 'LONG' and 30 <= r <= 55:
@@ -587,7 +804,6 @@ class FVGAdapter(StrategyAdapter):
                     elif direction == 'SHORT' and 45 <= r <= 70:
                         confidence += 0.10
 
-                # 5. Structure bias (0/0.10)
                 if has_structure:
                     sb = struct_bias[i]
                     if direction == 'LONG' and sb > 0:
@@ -595,26 +811,24 @@ class FVGAdapter(StrategyAdapter):
                     elif direction == 'SHORT' and sb < 0:
                         confidence += 0.10
 
-                # 6. Displacement strength (0-0.15) — soft score, no gate
-                abs_disp = abs(price_change)
-                disp_score = min(abs_disp / 0.015, 1.0) * 0.15
-                confidence += disp_score
+                confidence += min(abs(price_change) / 0.015, 1.0) * 0.15  # displacement
 
-                # 7. Liquidity sweep present (0/0.15) — soft boost, no gate
                 if direction == 'LONG' and bull_sweep:
                     confidence += 0.15
                 elif direction == 'SHORT' and bear_sweep:
                     confidence += 0.15
 
-                # 8. HMM is now a hard gate (above), no soft boost needed
+                # v6 IMPROVEMENT 2: HTF confidence boost
+                if fvg_src == '4h':
+                    confidence += 0.15
+                elif fvg_src == '1h':
+                    confidence += 0.05
 
                 if confidence < min_conf:
                     continue
 
-                # ── Entry / SL / TP ─────────────────────────
-                # Entry at gap midpoint — matches study
-                # SL buffer = max(30% gap, 0.3 ATR) — matches study
-                entry = (fvg_gh + fvg_gl) / 2.0
+                # v6 IMPROVEMENT 5: Entry/SL/TP from actual touch price
+                entry = touch_price
                 sl_buf = max(gap_range * atr_buf, atr_val * atr_buf)
 
                 if direction == 'LONG':
@@ -637,19 +851,11 @@ class FVGAdapter(StrategyAdapter):
 
                 if confidence > best_conf:
                     best_conf = confidence
-                    ema_aligned = False
-                    if has_ema:
-                        ema_aligned = (
-                            (direction == 'LONG' and ema50[i] > ema200[i]) or
-                            (direction == 'SHORT' and ema50[i] < ema200[i])
-                        )
+                    ema_aligned = ema_bull if direction == 'LONG' else ema_bear
                     struct_aligned = False
                     if has_structure:
                         sb = struct_bias[i]
-                        struct_aligned = (
-                            (direction == 'LONG' and sb > 0) or
-                            (direction == 'SHORT' and sb < 0)
-                        )
+                        struct_aligned = (direction == 'LONG' and sb > 0) or (direction == 'SHORT' and sb < 0)
 
                     hmm_st = int(hmm_states[i]) if has_hmm else -1
                     best_signal = Signal(
@@ -664,28 +870,43 @@ class FVGAdapter(StrategyAdapter):
                         confidence=confidence,
                         bias='ALIGNED' if (ema_aligned and struct_aligned) else 'PARTIAL',
                         atr=atr_val,
-                        metadata={'signal_type': 'RETEST', 'hmm_state': hmm_st},
+                        metadata={
+                            'signal_type': 'RETEST',
+                            'hmm_state': hmm_st,
+                            'htf_source': fvg_src,
+                            'touch_price': float(touch_price),
+                            'fvg_mid': float(fvg_mid),
+                        },
                     )
                     best_fvg_bar = fvg_bar
 
             if best_signal is not None:
-                signals.append(best_signal)
-                used_fvg_bars.add(best_fvg_bar)  # first-touch-only
-                last_sig_idx = i
-                continue  # one signal per bar
+                # ML gate (global model OR per-window refit)
+                if _ml_active and ml_vol_dev is not None:
+                    if not self._ml_accept(
+                        float(ml_vol_dev[i]), float(ml_disp[i]),
+                        best_signal.direction,
+                    ):
+                        best_signal = None
+                if best_signal is not None:
+                    signals.append(best_signal)
+                    used_fvg_bars.add(best_fvg_bar)
+                    last_sig_idx = i
+                    continue
 
-            # ── iFVG: Check mitigated FVGs for re-touch entry ───
+            # ═══════════════════════════════════════════════════
+            #  iFVG: Check mitigated FVGs for re-touch entry
+            # ═══════════════════════════════════════════════════
             best_ifvg: Optional[Signal] = None
             best_ifvg_conf = -1.0
             best_ifvg_bar = -1
 
             for ifvg_tuple in mitigated_fvgs:
-                mit_bar, inv_dir, ifvg_gh, ifvg_gl, ifvg_vc, ifvg_gp = ifvg_tuple
+                mit_bar, inv_dir, ifvg_gh, ifvg_gl, ifvg_vc, ifvg_gp, ifvg_src = ifvg_tuple
 
                 age = i - mit_bar
                 if age < 2:
                     continue
-                # First-touch-only
                 if mit_bar in used_ifvg_bars:
                     continue
 
@@ -693,34 +914,38 @@ class FVGAdapter(StrategyAdapter):
                 if gap_range <= 0:
                     continue
 
-                # Re-touch fill zone check (inverted polarity)
-                # Re-touch zone check — matches study methodology
+                # v6: Retracement entry for iFVG too
+                ifvg_mid = (ifvg_gh + ifvg_gl) / 2.0
+
                 if inv_dir == _DIR_BULL:
-                    # Originally bearish, now support → LONG
-                    if not (low_i <= ifvg_gh and high_i >= ifvg_gl):
+                    if low_i > ifvg_gh:
                         continue
                     direction = 'LONG'
+                    touch_price = max(ifvg_gl, min(ifvg_mid, low_i))
                 else:
-                    # Originally bullish, now resistance → SHORT
-                    if not (high_i >= ifvg_gl and low_i <= ifvg_gh):
+                    if high_i < ifvg_gl:
                         continue
                     direction = 'SHORT'
+                    touch_price = min(ifvg_gh, max(ifvg_mid, high_i))
 
-                # ── iFVG-specific DVOL gates (REVERSED) ──────
-                # HIGH DVOL preferred for iFVG per internal study, allow ALL
-                # MED DVOL allows ALL (per internal study)
-                # LOW DVOL: only SHORT (inverse of retest)
+                # v6: EMA regime filter for iFVG
+                if regime_filter and has_ema:
+                    if ema_bear and direction == 'LONG':
+                        continue
+                    if ema_bull and direction == 'SHORT':
+                        continue
+
+                # iFVG DVOL gates (reversed)
                 if iv_regime == 'LOW' and direction == 'LONG':
                     continue
 
-                # ── RV hard gate for iFVG: rv>=50th pctile ──
-                # Study: hmm=volatile + rv=high preferred per internal study
+                # RV hard gate for iFVG
                 if has_rv and rv_pctile is not None:
                     rv_val = rv_pctile[i]
                     if not np.isnan(rv_val) and rv_val < 0.50:
                         continue
 
-                # ── Confidence scoring (7 base + RV boost) ──
+                # Confidence scoring
                 confidence = min(ifvg_gp / 0.005, 1.0) * 0.20
 
                 if ifvg_vc:
@@ -746,28 +971,29 @@ class FVGAdapter(StrategyAdapter):
                     elif direction == 'SHORT' and sb < 0:
                         confidence += 0.10
 
-                abs_disp = abs(price_change)
-                confidence += min(abs_disp / 0.015, 1.0) * 0.15
+                confidence += min(abs(price_change) / 0.015, 1.0) * 0.15
 
                 if direction == 'LONG' and bull_sweep:
                     confidence += 0.15
                 elif direction == 'SHORT' and bear_sweep:
                     confidence += 0.15
 
-                # 8. HMM is now a hard gate (above), no soft boost needed
-
-                # 9. RV: high realized vol is strongest iFVG filter
+                # RV boost
                 if has_rv and rv_pctile is not None and not np.isnan(rv_pctile[i]):
                     if rv_pctile[i] >= 0.50:
                         confidence += 0.10
 
+                # HTF boost
+                if ifvg_src == '4h':
+                    confidence += 0.15
+                elif ifvg_src == '1h':
+                    confidence += 0.05
+
                 if confidence < min_conf:
                     continue
 
-                # ── Entry / SL / TP (iFVG R:R) ──────────────
-                # Entry at gap midpoint — matches study
-                # SL buffer = max(30% gap, 0.3 ATR) — matches study
-                entry = (ifvg_gh + ifvg_gl) / 2.0
+                # v6: Entry from touch price
+                entry = touch_price
                 sl_buf = max(gap_range * atr_buf, atr_val * atr_buf)
 
                 if direction == 'LONG':
@@ -790,19 +1016,11 @@ class FVGAdapter(StrategyAdapter):
 
                 if confidence > best_ifvg_conf:
                     best_ifvg_conf = confidence
-                    ema_aligned = False
-                    if has_ema:
-                        ema_aligned = (
-                            (direction == 'LONG' and ema50[i] > ema200[i]) or
-                            (direction == 'SHORT' and ema50[i] < ema200[i])
-                        )
+                    ema_aligned = ema_bull if direction == 'LONG' else ema_bear
                     struct_aligned = False
                     if has_structure:
                         sb = struct_bias[i]
-                        struct_aligned = (
-                            (direction == 'LONG' and sb > 0) or
-                            (direction == 'SHORT' and sb < 0)
-                        )
+                        struct_aligned = (direction == 'LONG' and sb > 0) or (direction == 'SHORT' and sb < 0)
 
                     hmm_st = int(hmm_states[i]) if has_hmm else -1
                     rv_val = float(rv_pctile[i]) if has_rv and not np.isnan(rv_pctile[i]) else -1.0
@@ -822,13 +1040,23 @@ class FVGAdapter(StrategyAdapter):
                             'signal_type': 'IFVG',
                             'hmm_state': hmm_st,
                             'rv_pctile': rv_val,
+                            'htf_source': ifvg_src,
+                            'touch_price': float(touch_price),
                         },
                     )
                     best_ifvg_bar = mit_bar
 
             if best_ifvg is not None:
+                # ML gate (global model OR per-window refit)
+                if _ml_active and ml_vol_dev is not None:
+                    if not self._ml_accept(
+                        float(ml_vol_dev[i]), float(ml_disp[i]),
+                        best_ifvg.direction,
+                    ):
+                        best_ifvg = None
+            if best_ifvg is not None:
                 signals.append(best_ifvg)
-                used_ifvg_bars.add(best_ifvg_bar)  # first-touch-only
+                used_ifvg_bars.add(best_ifvg_bar)
                 last_sig_idx = i
 
         return signals

@@ -15,7 +15,7 @@ DUCKDB_PATH = DUCKDB_DIR / "trading_data.duckdb"
 SQLITE_ML_DB = BASE_DIR / "ml_training_data.db"
 
 # Supported symbols and timeframes
-SYMBOLS = ['BTC', 'ETH']
+SYMBOLS = ['BTC', 'ETH', 'SOL']
 TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '4h', '1d']
 PRIMARY_TIMEFRAMES = ['15m', '1h', '4h']
 
@@ -25,6 +25,7 @@ BINANCE_KLINES_ENDPOINT = "/klines"
 BINANCE_SYMBOLS = {
     'BTC': 'BTCUSDT',
     'ETH': 'ETHUSDT',
+    'SOL': 'SOLUSDT',
 }
 
 # Session times (Eastern Time — America/New_York)

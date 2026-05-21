@@ -129,6 +129,20 @@ class IndicatorEngine:
         except Exception:
             pass  # columns won't exist; FVG adapter falls back to native TF
 
+        # ── 4H OHLCV for cross-TF FVG detection ──────────────────
+        # v6: Higher-timeframe FVGs are more reliable (institutional)
+        try:
+            ohlcv_4h = df[['Open', 'High', 'Low', 'Close']].resample('4h').agg({
+                'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last',
+            }).dropna()
+            if len(ohlcv_4h) >= 20:
+                df['HTF_4h_Open'] = ohlcv_4h['Open'].reindex(df.index, method='ffill')
+                df['HTF_4h_High'] = ohlcv_4h['High'].reindex(df.index, method='ffill')
+                df['HTF_4h_Low'] = ohlcv_4h['Low'].reindex(df.index, method='ffill')
+                df['HTF_4h_Close'] = ohlcv_4h['Close'].reindex(df.index, method='ffill')
+        except Exception:
+            pass
+
         # ── Price Structure Bias (Swing HH/HL/LH/LL) ─────────────
         # Leading indicator: reacts to reversals before EMA cross.
         # +1.0 = LONG, -1.0 = SHORT, 0.0 = NEUTRAL

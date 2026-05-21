@@ -28,9 +28,16 @@ logger = logging.getLogger(__name__)
 try:
     from .numba_kernels import (
         _mc_bootstrap_ci_kernel, _mc_equity_fan_kernel, HAS_NUMBA as _HAS_NUMBA,
+        _simulate_v2_kernel as _SIM_V2_KERNEL,
+        OUTCOME_LOSS as _OC_LOSS, OUTCOME_BREAKEVEN as _OC_BE,
+        OUTCOME_WIN_TRAIL as _OC_WIN_TRAIL, OUTCOME_WIN_TP as _OC_WIN_TP,
+        OUTCOME_TIME_EXIT as _OC_TIME_EXIT, OUTCOME_TIMEOUT as _OC_TIMEOUT,
     )
 except ImportError:
     _HAS_NUMBA = False
+    _SIM_V2_KERNEL = None
+    _OC_LOSS = 0; _OC_BE = 1; _OC_WIN_TRAIL = 4; _OC_WIN_TP = 5
+    _OC_TIME_EXIT = 6; _OC_TIMEOUT = 7
 
 # DuckDB path
 _BASE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -57,13 +64,18 @@ class TransactionCosts:
     def for_asset(cls, symbol: str) -> 'TransactionCosts':
         """Return asset-specific transaction costs calibrated to real exchange fees.
 
-        BTC: Bybit/Binance perpetual futures (taker 0.055%, tight spread).
-        NQ:  CME micro futures.
+        BTC/ETH: Binance/Bybit perpetual futures (taker 0.055%, tight spread).
+        SOL:     Binance perpetual futures — wider spread + higher slippage
+                 due to lower book depth than BTC/ETH (typical 0.02-0.05% spread,
+                 perp taker 0.055%, slippage scaled up for ~$10-50M ADTV liquidity).
+        NQ:      CME micro futures.
         """
         if symbol == 'NQ':
             return cls(spread_pct=0.0001, commission_pct=0.0002, slippage_pct=0.0001)
         if symbol in ('BTC', 'ETH'):
             return cls(spread_pct=0.0001, commission_pct=0.00055, slippage_pct=0.0001)
+        if symbol == 'SOL':
+            return cls(spread_pct=0.00025, commission_pct=0.00055, slippage_pct=0.00025)
         return cls()
 
 
@@ -98,6 +110,32 @@ class WFOConfig:
     hmm_position_sizing: bool = False  # Scale OOS R-multiples by HMM sizing
     parallel: bool = True            # Multiprocess grid/random combo evaluation
     n_workers: int = 0               # Worker processes (0 = auto = cpu_count - 1)
+
+    # Regime classifier selection (2026-05-08).
+    #   'old4' → ADX/EMA-based 4-regime classifier (RegimeDetector.classify),
+    #            labels: trending_up/trending_down/ranging/volatile.
+    #   'new5' → Choppiness-Index/ATR-pct-based 5-regime classifier
+    #            (regime_classifier.classify_rule_based), labels:
+    #            quiet_chop/quiet_trend/normal_chop/normal_trend/vol_expansion.
+    # The new classifier produces a finer-grained vol axis (calibrated for
+    # crypto via the BTC LR audit) and a Choppiness-Index trend axis.
+    regime_mode: str = 'old4'
+
+    # V2 trade simulator selection (2026-05-09).
+    # When True, TradeSimulator dispatches to the v2 numba kernel which
+    # mirrors the live LR position_manager.py: BE trigger, stepped trailing,
+    # MIN_TRAIL_LOCK_R cost floor, TRAIL_HEADROOM_FRAC geometric cap.
+    # Closes the trail-simulation gap so trail-related changes can be
+    # WFO-validated.  Default off — preserves legacy v1 (TP1+ATR-trail) behavior.
+    use_v2_simulator: bool = False
+    v2_be_trigger_r: float = 1.0          # BREAKEVEN_TRIGGER_R
+    v2_be_buffer_pct: float = 0.001       # BREAKEVEN_BUFFER_PCT
+    v2_trail_step_atr: float = 0.5        # STEP_THRESHOLD_ATR
+    v2_min_trail_lock_r: float = 0.0      # MIN_TRAIL_LOCK_R
+    v2_trail_headroom_frac: float = 0.0   # TRAIL_HEADROOM_FRAC
+    v2_initial_buffer_bars: int = 0       # INITIAL_BUFFER_CANDLES (0 = off)
+    v2_initial_buffer_mult: float = 1.0   # INITIAL_BUFFER_MULTIPLIER
+    v2_time_exit_bars: int = 0            # 0 = off (uses max_bars instead)
 
     @classmethod
     def for_timeframe(cls, timeframe: str, **kwargs) -> 'WFOConfig':
@@ -430,11 +468,29 @@ class IndicatorEngine:
 # ================================================================
 
 class RegimeDetector:
-    """Classify market regime (trending_up/down, ranging, volatile) from indicator state."""
+    """Classify market regime from indicator state.
+
+    Two classifiers supported:
+      - OLD 4-regime (default): ADX/EMA-based, labels trending_up/down,
+        ranging, volatile.
+      - NEW 5-regime: when df has a 'Regime_New' column (precomputed via
+        regime_classifier.classify_rule_based when WFOConfig.regime_mode
+        == 'new5'), classify() returns that label directly.
+    """
 
     @staticmethod
     def classify(df: pd.DataFrame, idx: int) -> str:
-        """Return the regime string for bar at idx using ADX, ATR, and EMA lookback."""
+        """Return the regime string for bar at idx."""
+        # NEW 5-regime path — used when the engine has populated the column.
+        if 'Regime_New' in df.columns:
+            if idx < 0 or idx >= len(df):
+                return 'unknown'
+            label = df['Regime_New'].iloc[idx]
+            if isinstance(label, str) and label:
+                return label
+            return 'unknown'
+
+        # Legacy OLD 4-regime path (untouched).
         if idx < 50:
             return 'unknown'
         window = df.iloc[max(0, idx - 50):idx + 1]
@@ -461,7 +517,66 @@ class RegimeDetector:
 # ================================================================
 
 class TradeSimulator:
-    """Simulate trade execution with spread, commission, slippage, and TP/SL logic."""
+    """Simulate trade execution with spread, commission, slippage, and TP/SL logic.
+
+    Class-level v2 toggle: when WFOEngine.run() finds ``cfg.use_v2_simulator=True``
+    it sets ``_v2_active=True`` and stuffs trail params here.  ``simulate()``
+    then dispatches to ``simulate_v2()`` which calls ``_simulate_v2_kernel``
+    (matches live LR position_manager.py — BE trigger, stepped trail,
+    MIN_TRAIL_LOCK_R, TRAIL_HEADROOM_FRAC).  Default off → legacy v1 path.
+    """
+
+    _v2_active: bool = False
+    _v2_be_trigger_r: float = 1.0
+    _v2_be_buffer_pct: float = 0.001
+    _v2_trail_step_atr: float = 0.5
+    _v2_min_trail_lock_r: float = 0.0
+    _v2_trail_headroom_frac: float = 0.0
+    _v2_initial_buffer_bars: int = 0
+    _v2_initial_buffer_mult: float = 1.0
+    _v2_time_exit_bars: int = 0
+
+    @classmethod
+    def configure_v2(cls, cfg: 'WFOConfig') -> None:
+        """Sync v2 trail parameters from a WFOConfig.  No-op if v2 disabled."""
+        cls._v2_active = bool(getattr(cfg, 'use_v2_simulator', False)) and (_SIM_V2_KERNEL is not None)
+        cls._v2_be_trigger_r = float(getattr(cfg, 'v2_be_trigger_r', 1.0))
+        cls._v2_be_buffer_pct = float(getattr(cfg, 'v2_be_buffer_pct', 0.001))
+        cls._v2_trail_step_atr = float(getattr(cfg, 'v2_trail_step_atr', 0.5))
+        cls._v2_min_trail_lock_r = float(getattr(cfg, 'v2_min_trail_lock_r', 0.0))
+        cls._v2_trail_headroom_frac = float(getattr(cfg, 'v2_trail_headroom_frac', 0.0))
+        cls._v2_initial_buffer_bars = int(getattr(cfg, 'v2_initial_buffer_bars', 0))
+        cls._v2_initial_buffer_mult = float(getattr(cfg, 'v2_initial_buffer_mult', 1.0))
+        cls._v2_time_exit_bars = int(getattr(cfg, 'v2_time_exit_bars', 0))
+
+    @staticmethod
+    def inject_v2_metadata(signals, cfg: 'WFOConfig'):
+        """Stamp v2 trail params into each Signal's metadata.
+
+        Call this on every list of signals coming out of an adapter so that
+        when the signals are pickled to worker processes, the trail params
+        travel with them.  Workers re-import the wfo_engine module with
+        default class state, so they cannot rely on configure_v2() — but
+        they DO see signal.metadata.  No-op when use_v2_simulator is False.
+        """
+        if not getattr(cfg, 'use_v2_simulator', False):
+            return signals
+        v2_meta = {
+            'v2_be_trigger_r': float(getattr(cfg, 'v2_be_trigger_r', 1.0)),
+            'v2_be_buffer_pct': float(getattr(cfg, 'v2_be_buffer_pct', 0.001)),
+            'v2_trail_step_atr': float(getattr(cfg, 'v2_trail_step_atr', 0.5)),
+            'v2_min_trail_lock_r': float(getattr(cfg, 'v2_min_trail_lock_r', 0.0)),
+            'v2_trail_headroom_frac': float(getattr(cfg, 'v2_trail_headroom_frac', 0.0)),
+            'v2_initial_buffer_bars': int(getattr(cfg, 'v2_initial_buffer_bars', 0)),
+            'v2_initial_buffer_mult': float(getattr(cfg, 'v2_initial_buffer_mult', 1.0)),
+            'v2_time_exit_bars': int(getattr(cfg, 'v2_time_exit_bars', 0)),
+        }
+        for sig in signals:
+            if hasattr(sig, 'metadata'):
+                if sig.metadata is None:
+                    sig.metadata = {}
+                sig.metadata.update(v2_meta)
+        return signals
 
     @staticmethod
     def simulate(
@@ -480,6 +595,16 @@ class TradeSimulator:
         ``_atrs`` is provided, the stop-loss trails at ``trail_atr_mult × ATR``
         from the high/low water mark after TP1 is hit (instead of simple breakeven).
         """
+        # Dispatch to v2 (live-faithful trail) when WFOConfig.use_v2_simulator
+        # was set on the engine.  Falls through to legacy v1 below otherwise.
+        if TradeSimulator._v2_active and _SIM_V2_KERNEL is not None:
+            return TradeSimulator.simulate_v2(
+                signal, df, costs,
+                max_bars=max_bars, window_id=window_id,
+                is_oos=is_oos, regime=regime,
+                _highs=_highs, _lows=_lows, _closes=_closes, _atrs=_atrs,
+            )
+
         idx = signal['idx']
         direction = signal['direction']
         entry_price = signal['entry_price']
@@ -621,6 +746,118 @@ class TradeSimulator:
             is_oos=is_oos,
             regime=regime,
             cost_deducted=total_cost,
+        )
+
+    @staticmethod
+    def simulate_v2(
+        signal: Dict, df: pd.DataFrame, costs: TransactionCosts,
+        max_bars: int = 168, window_id: int = 0,
+        is_oos: bool = True, regime: str = 'unknown',
+        _highs: np.ndarray = None, _lows: np.ndarray = None,
+        _closes: np.ndarray = None, _atrs: np.ndarray = None,
+    ) -> Optional[TradeResult]:
+        """V2 trade simulation — live-faithful trail.
+
+        Calls ``_simulate_v2_kernel`` (numba JIT) with trail params drawn
+        from class-level state populated by ``configure_v2()``.  Mirrors
+        the live LR position_manager.py: BE trigger, stepped trail with
+        ATR step, MIN_TRAIL_LOCK_R cost floor, TRAIL_HEADROOM_FRAC cap.
+
+        Returns a TradeResult or None for invalid signals.
+        """
+        idx = signal['idx']
+        direction = signal['direction']
+        entry_price = signal['entry_price']
+        stop_loss = signal['stop_loss']
+        tp1 = signal['take_profit_1']
+        tp2 = signal.get('take_profit_2') or tp1
+        risk = signal['risk']
+
+        n = len(df)
+        if risk <= 0 or idx + 1 >= n:
+            return None
+
+        highs = _highs if _highs is not None else df['High'].values
+        lows = _lows if _lows is not None else df['Low'].values
+        closes = _closes if _closes is not None else df['Close'].values
+        atrs = _atrs if _atrs is not None else (
+            df['ATR'].values if 'ATR' in df.columns else np.zeros(n)
+        )
+        has_atrs = atrs is not None and len(atrs) > 0
+
+        is_long = direction == 'LONG'
+        # The kernel needs a single TP — use the higher (TP2) so the
+        # trail-vs-TP race operates on the final target like the live bot.
+        kernel_tp = tp2
+
+        meta = signal.get('metadata', {}) or {}
+        trail_atr_mult = float(meta.get('trail_atr_mult', 0))
+
+        # Trail params read from signal metadata FIRST so they survive the
+        # pickle/spawn boundary into worker processes.  Class state is the
+        # in-main-process fallback (set by configure_v2()).  When the engine
+        # injects v2 params into signal metadata after generate_signals(),
+        # workers see the correct values.
+        be_trigger_r = float(meta.get('v2_be_trigger_r', TradeSimulator._v2_be_trigger_r))
+        be_buffer_pct = float(meta.get('v2_be_buffer_pct', TradeSimulator._v2_be_buffer_pct))
+        trail_step_atr = float(meta.get('v2_trail_step_atr', TradeSimulator._v2_trail_step_atr))
+        min_trail_lock_r = float(meta.get('v2_min_trail_lock_r', TradeSimulator._v2_min_trail_lock_r))
+        trail_headroom_frac = float(meta.get('v2_trail_headroom_frac', TradeSimulator._v2_trail_headroom_frac))
+        initial_buffer_bars = int(meta.get('v2_initial_buffer_bars', TradeSimulator._v2_initial_buffer_bars))
+        initial_buffer_mult = float(meta.get('v2_initial_buffer_mult', TradeSimulator._v2_initial_buffer_mult))
+        time_exit_bars_meta = int(meta.get('v2_time_exit_bars', TradeSimulator._v2_time_exit_bars))
+        time_exit_bars = time_exit_bars_meta if time_exit_bars_meta > 0 else 0
+
+        oc, exit_price, bars_held, mfe, mae, raw_r, total_cost, final_sl = _SIM_V2_KERNEL(
+            idx, is_long, entry_price, stop_loss, kernel_tp, risk,
+            costs.spread_pct, costs.commission_pct, costs.slippage_pct,
+            max_bars,
+            initial_buffer_bars,
+            initial_buffer_mult,
+            be_trigger_r,
+            be_buffer_pct,
+            time_exit_bars,
+            trail_atr_mult,
+            trail_step_atr,
+            min_trail_lock_r,
+            trail_headroom_frac,
+            highs, lows, closes, atrs, has_atrs, n,
+        )
+
+        if exit_price is None or exit_price < 0:
+            return None
+
+        outcome_map = {
+            _OC_LOSS: 'loss',
+            _OC_BE: 'breakeven',
+            _OC_WIN_TRAIL: 'win_trail',
+            _OC_WIN_TP: 'win_tp2',
+            _OC_TIME_EXIT: 'time_exit',
+            _OC_TIMEOUT: 'timeout',
+        }
+        outcome_str = outcome_map.get(int(oc), 'unknown')
+
+        return TradeResult(
+            entry_time=signal['time'],
+            exit_time=df.index[min(idx + bars_held, n - 1)],
+            direction=direction,
+            entry_price=entry_price,
+            exit_price=float(exit_price),
+            stop_loss=float(final_sl),
+            take_profit_1=tp1,
+            take_profit_2=tp2,
+            outcome=outcome_str,
+            r_multiple=float(raw_r),
+            r_multiple_after_costs=float(raw_r - total_cost),
+            bars_held=int(bars_held),
+            confidence=signal.get('confidence', 0.5),
+            bias=signal.get('bias', 'COUNTER'),
+            mfe=float(mfe),
+            mae=float(mae),
+            window_id=window_id,
+            is_oos=is_oos,
+            regime=regime,
+            cost_deducted=float(total_cost),
         )
 
 
@@ -993,6 +1230,42 @@ class WFOEngine:
         if len(full_df) < cfg.min_train_bars + cfg.test_window_bars:
             return self._empty_result(symbol, timeframe, 'insufficient_data_after_warmup')
 
+        # 2a. Configure v2 trade simulator (live-faithful trail).  No-op when
+        # cfg.use_v2_simulator is False.  Class-level state on TradeSimulator.
+        TradeSimulator.configure_v2(cfg)
+
+        # 2b. Precompute new 5-regime labels if requested.  Done ONCE here so
+        # RegimeDetector.classify() can index into df['Regime_New'] in O(1)
+        # at every call site.  Asset-specific thresholds via
+        # RuleThresholds.for_asset(symbol) — BTC/ETH use the default crypto
+        # thresholds; NQ and SOL get their own based on each asset's ATR
+        # distribution.  Skipped silently when regime_mode == 'old4'.
+        if getattr(cfg, 'regime_mode', 'old4') == 'new5':
+            try:
+                import sys as _sys, os as _os
+                _root = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+                if _root not in _sys.path:
+                    _sys.path.insert(0, _root)
+                from regime_classifier import (
+                    compute_features as _rc_compute,
+                    classify_rule_based as _rc_classify,
+                    RuleThresholds as _RuleThresholds,
+                )
+                _lc = full_df.rename(columns={'High': 'high', 'Low': 'low',
+                                              'Close': 'close', 'Open': 'open',
+                                              'Volume': 'volume'})
+                _feats = _rc_compute(_lc[['open', 'high', 'low', 'close', 'volume']])
+                _thr = _RuleThresholds.for_asset(symbol)
+                full_df['Regime_New'] = _rc_classify(_feats, thr=_thr).values
+                logger.info(
+                    f"5-regime classifier engaged for {symbol}: "
+                    f"thresholds quiet<{_thr.quiet_max*100:.2f}%, "
+                    f"moderate<{_thr.moderate_max*100:.2f}%, "
+                    f"elevated<{_thr.elevated_max*100:.2f}%"
+                )
+            except Exception as _e:
+                logger.warning(f"5-regime classifier failed, falling back to OLD 4-regime: {_e}")
+
         # 3. Generate param grid
         param_specs = self.adapter.get_param_space()
         if cfg.grid_mode == 'random':
@@ -1118,6 +1391,7 @@ class WFOEngine:
                         signals = self.adapter.generate_signals(
                             train_df, params, scan_start, scan_end,
                         )
+                        TradeSimulator.inject_v2_metadata(signals, cfg)
                         trades = []
                         for sig in signals:
                             trade = TradeSimulator.simulate(
@@ -1153,6 +1427,7 @@ class WFOEngine:
                     best_signals = self.adapter.generate_signals(
                         train_df, best_params, scan_start, scan_end,
                     )
+                    TradeSimulator.inject_v2_metadata(best_signals, cfg)
                     for sig in best_signals:
                         trade = TradeSimulator.simulate(
                             sig.to_dict(), train_df, cfg.costs,
@@ -1209,6 +1484,7 @@ class WFOEngine:
                     )
                     if trades is None:
                         signals = self.adapter.generate_signals(train_df, params, scan_start, scan_end)
+                        TradeSimulator.inject_v2_metadata(signals, cfg)
                         trades = []
                         for sig in signals:
                             trade = TradeSimulator.simulate(
@@ -1237,11 +1513,23 @@ class WFOEngine:
 
         self._all_window_combo_scores.append(all_combo_scores)
 
+        # --- Optional per-window hook (e.g., FVG ML refit) ---
+        # Runs in main process between IS and OOS; state changes propagate
+        # to OOS simulation.  Default adapter implementation is no-op.
+        try:
+            self.adapter.begin_window(train_df, w_id, is_trades=best_is_trades)
+        except Exception as _e:
+            logger.warning(f"begin_window hook failed for window {w_id}: {_e}")
+
         # --- OOS Evaluation with best params ---
         oos_scan_start = test_start - train_start
         oos_scan_end = min(test_end - train_start, len(test_df_with_history) - 20)
 
         if oos_scan_end <= oos_scan_start:
+            try:
+                self.adapter.end_window(w_id)
+            except Exception:
+                pass
             return
 
         # Try execute_signals (stateful adapter) first for OOS
@@ -1255,6 +1543,7 @@ class WFOEngine:
             oos_signals = self.adapter.generate_signals(
                 test_df_with_history, best_params, oos_scan_start, oos_scan_end,
             )
+            TradeSimulator.inject_v2_metadata(oos_signals, cfg)
 
             oos_highs = test_df_with_history['High'].values
             oos_lows = test_df_with_history['Low'].values
@@ -1321,6 +1610,12 @@ class WFOEngine:
             'param_stability': param_stability,
             'hmm_regime': hmm_assessment,
         })
+
+        # End-of-window cleanup hook
+        try:
+            self.adapter.end_window(w_id)
+        except Exception as _e:
+            logger.warning(f"end_window hook failed for window {w_id}: {_e}")
 
     def _score_trades(self, trades: List[TradeResult]) -> float:
         """Score a set of trades using the configured optimization metric."""
@@ -1621,7 +1916,13 @@ class WFOEngine:
 #  REGIME-ADAPTIVE WFO ENGINE
 # ================================================================
 
-ALL_REGIMES = ['trending_up', 'trending_down', 'ranging', 'volatile', 'unknown']
+# Both 4-regime (old) and 5-regime (new, 2026-05-08) labels.  Engine handles
+# either set; empty buckets in the inactive set produce zero-trade aggregates
+# which downstream reports filter out.
+ALL_REGIMES = [
+    'trending_up', 'trending_down', 'ranging', 'volatile', 'unknown',
+    'quiet_chop', 'quiet_trend', 'normal_chop', 'normal_trend', 'vol_expansion',
+]
 
 
 class RegimeAdaptiveWFO(WFOEngine):
@@ -1668,6 +1969,42 @@ class RegimeAdaptiveWFO(WFOEngine):
 
         if len(full_df) < cfg.min_train_bars + cfg.test_window_bars:
             return self._empty_result(symbol, timeframe, 'insufficient_data_after_warmup')
+
+        # 2a. Configure v2 trade simulator (live-faithful trail).  No-op when
+        # cfg.use_v2_simulator is False.  Class-level state on TradeSimulator.
+        TradeSimulator.configure_v2(cfg)
+
+        # 2b. Precompute new 5-regime labels if requested.  Done ONCE here so
+        # RegimeDetector.classify() can index into df['Regime_New'] in O(1)
+        # at every call site.  Asset-specific thresholds via
+        # RuleThresholds.for_asset(symbol) — BTC/ETH use the default crypto
+        # thresholds; NQ and SOL get their own based on each asset's ATR
+        # distribution.  Skipped silently when regime_mode == 'old4'.
+        if getattr(cfg, 'regime_mode', 'old4') == 'new5':
+            try:
+                import sys as _sys, os as _os
+                _root = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+                if _root not in _sys.path:
+                    _sys.path.insert(0, _root)
+                from regime_classifier import (
+                    compute_features as _rc_compute,
+                    classify_rule_based as _rc_classify,
+                    RuleThresholds as _RuleThresholds,
+                )
+                _lc = full_df.rename(columns={'High': 'high', 'Low': 'low',
+                                              'Close': 'close', 'Open': 'open',
+                                              'Volume': 'volume'})
+                _feats = _rc_compute(_lc[['open', 'high', 'low', 'close', 'volume']])
+                _thr = _RuleThresholds.for_asset(symbol)
+                full_df['Regime_New'] = _rc_classify(_feats, thr=_thr).values
+                logger.info(
+                    f"5-regime classifier engaged for {symbol}: "
+                    f"thresholds quiet<{_thr.quiet_max*100:.2f}%, "
+                    f"moderate<{_thr.moderate_max*100:.2f}%, "
+                    f"elevated<{_thr.elevated_max*100:.2f}%"
+                )
+            except Exception as _e:
+                logger.warning(f"5-regime classifier failed, falling back to OLD 4-regime: {_e}")
 
         # 3. Generate param grid
         param_specs = self.adapter.get_param_space()
@@ -1806,6 +2143,7 @@ class RegimeAdaptiveWFO(WFOEngine):
             )
             if trades is None:
                 signals = self.adapter.generate_signals(train_df, params, scan_start, scan_end)
+                TradeSimulator.inject_v2_metadata(signals, cfg)
                 trades = []
                 for sig in signals:
                     regime = RegimeDetector.classify(df, train_start + sig.idx)
@@ -1909,6 +2247,7 @@ class RegimeAdaptiveWFO(WFOEngine):
                 seg_signals = self.adapter.generate_signals(
                     test_df_with_history, seg_params, seg_start_idx, seg_end_idx,
                 )
+                TradeSimulator.inject_v2_metadata(seg_signals, cfg)
                 for sig in seg_signals:
                     trade = TradeSimulator.simulate(
                         sig.to_dict(), test_df_with_history, cfg.costs,
