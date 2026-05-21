@@ -54,6 +54,21 @@ logs/
 reports/
 tools/
 
+# ── Proprietary root scripts (WFO runners, replays, research, infra) ──────────
+# Public surface stays: wfo_signal_scorer.py, README, pyproject, requirements,
+# the validation notebook. Everything below reveals edge / params / infra.
+/run_*.py
+/replay_*.py
+/regime_classifier.py
+/flowaux_proxy.py
+/compare_live_vs_wfo.py
+/mm_wfo_retag.py
+/wfo_regime_retag.py
+/wfo_promotion_gate.py
+/build_wfo_report.py
+/*_results.json
+/untitled.txt
+
 # ── Legacy / Archived Code ──────────────────────────────────────────────────
 _OLD_Liquidity_raid_backup/
 February_9th/
