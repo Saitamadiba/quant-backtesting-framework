@@ -301,6 +301,12 @@ DEPLOY_SERVICE_MAP = {
     "SBS ETH":      "sbs-eth",
 }
 
+# ── Macro Data (Macro Context page) ──────────────────────────────────────────
+# FRED needs a free API key (https://fred.stlouisfed.org/docs/api/api_key.html).
+# Put it in dashboard/.env as FRED_API_KEY=... — never hardcode it here.
+# World Bank + the yfinance market-macro series are keyless.
+FRED_API_KEY = os.getenv("FRED_API_KEY", "")
+
 # ── Account Settings ─────────────────────────────────────────────────────────
 INITIAL_BALANCE = int(os.getenv("INITIAL_BALANCE", "10000"))
 
