@@ -301,9 +301,10 @@ VPS_DB_FILES = {
 # Section 4: Strategy registry
 STRATEGIES = {
     "FVG":              {"color": "#2196F3", "symbols": ["BTC", "ETH", "NQ"]},
-    "Liquidity Raid":   {"color": "#FF9800", "symbols": ["BTC", "ETH"]},
-    "Momentum Mastery": {"color": "#4CAF50", "symbols": ["BTC", "ETH"]},
-    "SBS":              {"color": "#9C27B0", "symbols": ["BTC", "ETH", "NQ"]},
+    "Liquidity Raid":   {"color": "#FF9800", "symbols": ["BTC", "ETH", "NQ", "SOL"]},
+    "Momentum Mastery": {"color": "#4CAF50", "symbols": ["BTC", "ETH", "NQ"]},
+    "Vol Edge":         {"color": "#00BCD4", "symbols": ["BTC", "ETH"]},
+    "SBS":              {"color": "#9C27B0", "symbols": ["BTC", "ETH"]},
 }
 
 # Section 5: Database → strategy+symbol mapping

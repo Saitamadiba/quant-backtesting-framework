@@ -897,6 +897,78 @@ has been tested by institutional order flow before the bot commits capital.
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Vol Edge (Short-Straddle Volatility Harvesting)
+# ══════════════════════════════════════════════════════════════════════════════
+elif strategy == "Vol Edge":
+    st.header("Vol Edge — Short-Straddle Volatility Harvesting")
+    st.caption("Sells at-the-money straddles to harvest the variance risk premium "
+               "(implied vol > realised vol), delta-hedged daily. Short-vol, not directional.")
+
+    _show_live_summary("Vol Edge")
+
+    st.subheader("Core Thesis")
+    st.markdown("""
+Unlike the directional sweep strategies (FVG / LR / MM), **Vol Edge does not bet on price
+direction.** It harvests the **variance risk premium (VRP)** — the persistent tendency for
+option-implied volatility (Deribit **DVOL**) to price *above* subsequently-realised volatility.
+
+When that gap is positive and implied vol is calm, selling an at-the-money **straddle**
+(call + put) collects option time-decay (**theta**) faster than the position bleeds to actual
+price movement (**gamma**). The position is kept **delta-neutral** by hedging with spot/perp
+daily, so the P&L driver is *vol mispricing* — not where BTC/ETH goes.
+""")
+
+    st.subheader("Entry Gates (evaluated once per UTC day)")
+    st.markdown("""
+- **DVOL < 50** — only sell vol in a *low / calm* implied-vol regime (don't sell into a vol spike).
+- **VRP > −5** — implied vol (DVOL) must exceed 30-day realised vol by a margin (the edge harvested).
+- **No open straddle** — a single position at a time.
+- **Daily / weekly R-cap not tripped** — circuit breakers at −3R (day) and −7R (week).
+""")
+
+    st.subheader("Instrument Selection & Vega Sizing")
+    st.markdown("""
+- **Strikes**: ATM call + put at the strike nearest spot (on the Deribit strike grid).
+- **Expiry**: target ~7 DTE, bounded 4–12 days (Deribit Friday weeklies fall in this band).
+- **Vega-targeted sizing**: the number of straddle units is chosen so that position vega ≤
+  **2% of equity** (BTC) / 5% (ETH) per vol-point. Risk here is measured in *vega*, not notional.
+""")
+
+    _pipeline_diagram(
+        ["DVOL < 50 (calm IV)", "VRP > −5 (IV richer than RV)", "No open position",
+         "R-caps OK", "Pick ATM straddle ~7 DTE", "Vega-size the units"],
+        final="SELL STRADDLE",
+    )
+
+    st.subheader("Daily Lifecycle & Exits")
+    st.markdown("""
+At each UTC daily tick (plus a faster intraday safety tick) the bot:
+
+1. **Re-marks** both legs at the current vol (live: Deribit mark; backtest: Black-Scholes at DVOL).
+2. **Delta-hedges** — trades spot/perp to bring net delta back inside ±5%-delta per unit (gamma scalping).
+3. **Vega-drawdown stop** — closes everything if mark-to-market loss exceeds ~10 vol-points (≈ −1R).
+4. **Time-stop** — closes 24h before expiry to avoid pin risk; otherwise legs settle at intrinsic.
+""")
+
+    st.subheader("Strengths & Weaknesses")
+    _ve_a, _ve_b = st.columns(2)
+    with _ve_a:
+        st.markdown("**Strengths**")
+        st.markdown("""
+- Non-directional — return stream is uncorrelated with the sweep strategies.
+- Positive carry (theta) on every calm day.
+- Vega-capped sizing bounds the risk taken per position.
+""")
+    with _ve_b:
+        st.markdown("**Weaknesses**")
+        st.markdown("""
+- Short-vol is negatively skewed: many small steady gains, occasional large loss on a vol spike.
+- Daily hedging incurs spot fees + slippage (the cost of gamma scalping).
+- Depends on Deribit data + options liquidity; pin risk concentrates near expiry.
+""")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Comparative Summary
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown("---")
@@ -979,6 +1051,21 @@ comparison_data = {
         "ML weight adapter + WFO outcome feedback",
         "Very High",
     ],
+    "Vol Edge": [
+        "Variance risk premium (short vol)",
+        "DVOL < 50 + VRP > −5 (calm IV, IV richer than RV)",
+        "Daily-rebalanced delta hedge (gamma scalp)",
+        "Vega-drawdown stop / 24h pre-expiry time-stop",
+        "Vega-drawdown (~10 vol-pts ≈ −1R)",
+        "Daily UTC tick (24/7, not session-gated)",
+        "No (continuous delta re-hedge instead)",
+        "No (one straddle at a time)",
+        "None — rules-based vol gate",
+        "IV-regime gate (DVOL < 50)",
+        "Native — sells ATM straddles on Deribit",
+        "No",
+        "Medium (options pricing + hedging)",
+    ],
 }
 
 st.dataframe(
@@ -989,6 +1076,7 @@ st.dataframe(
         "Liquidity Raid": st.column_config.TextColumn("Liquidity Raid", help="Exploits institutional stop-hunts with options microstructure integration and continuous sweep quality scoring."),
         "Momentum Mastery": st.column_config.TextColumn("Momentum Mastery", help="Trend-following + sweep hybrid with adaptive risk management and premature entry analysis."),
         "SBS": st.column_config.TextColumn("SBS", help="Most complex strategy: sweep + BOS + Fibonacci entries with pending queue and the highest signal confidence threshold."),
+        "Vol Edge": st.column_config.TextColumn("Vol Edge", help="Non-directional short-straddle strategy: harvests the variance risk premium by selling ATM options when implied vol is calm and richer than realised, delta-hedged daily."),
     },
 )
 

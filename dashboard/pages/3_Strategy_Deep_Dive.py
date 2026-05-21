@@ -670,6 +670,59 @@ SBS focuses on **WFO outcome feedback** as its primary learning mechanism:
 """)
 
 
+    # ══════════════════════════════════════════════════════════════════
+    # Vol Edge Architecture
+    # ══════════════════════════════════════════════════════════════════
+    elif strategy == "Vol Edge":
+        st.header("Vol Edge — Short Straddle: Architecture Blueprint")
+
+        st.subheader("The Big Picture")
+        st.markdown("""
+Vol Edge is the portfolio's only **non-directional, options-based** strategy. It runs a short
+at-the-money straddle on Deribit (BTC / ETH weeklies), delta-hedged daily, to harvest the
+variance risk premium. Its risk and P&L are measured in **vega** and **theta** — not in the
+price-direction R-multiples the sweep strategies use.
+""")
+
+        st.subheader("Core Modules")
+        st.markdown("""
+- **`straddle_strategy.py`** — entry-gate + lifecycle engine (DVOL / VRP gating, vega sizing,
+  daily re-hedge, vega-stop, time-stop).
+- **`options_pricer.py`** — Black-Scholes pricing + greeks (delta, gamma, vega, theta) for
+  marking legs and computing the hedge.
+- **`vol_metrics.py`** — DVOL, 30-day realised vol, and VRP computation.
+- **`deribit_client.py`** — live Deribit market data and (in live mode) order placement.
+- **`position_manager.py`** — straddle-position + accumulated-hedge bookkeeping.
+- **`bot_runner.py`** — daily + intraday tick scheduler.
+""")
+
+        st.subheader("Daily Tick Lifecycle")
+        st.markdown("""
+The defining architectural feature is the **once-per-UTC-day rebalance loop** (with a faster
+intraday safety tick):
+
+1. **Mark** — re-price both legs at the current sigma.
+2. **Hedge** — compute net delta (call + put + existing hedge), trade spot/perp to pull it
+   back inside the hedge band (±5%-delta per unit). This is the gamma-scalping mechanic.
+3. **Risk checks** — vega-drawdown stop (~10 vol-pts ≈ −1R) and time-stop (flat 24h pre-expiry).
+4. **Settle** — at expiry, legs settle at intrinsic; residual hedge unwound at the index print.
+""")
+
+        st.subheader("Risk Controls")
+        st.markdown("""
+- **Vega cap** — sized so position vega ≤ 2% (BTC) / 5% (ETH) of equity per vol-point.
+- **Daily R-kill −3R, weekly R-kill −7R** — circuit breakers that halt new entries.
+- **Pin-risk avoidance** — always flat 24h before expiry.
+- **Calm-IV-only entry** — DVOL < 50 keeps the bot from selling into a vol spike.
+""")
+
+        st.info(
+            "Vol Edge runs as `straddle-btc` / `straddle-eth` on the VPS — the newest live "
+            "strategy. Currently paper-trading off the Deribit data feed; live execution "
+            "requires Deribit API keys."
+        )
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # ANALYTICS TAB (preserved from original page)
 # ══════════════════════════════════════════════════════════════════════════════
