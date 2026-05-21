@@ -307,6 +307,18 @@ DEPLOY_SERVICE_MAP = {
 # World Bank + the yfinance market-macro series are keyless.
 FRED_API_KEY = os.getenv("FRED_API_KEY", "")
 
+# ── Broker — Alpaca (Broker panel, READ-ONLY paper) ──────────────────────────
+# Put paper-trading keys in dashboard/.env as ALPACA_API_KEY / ALPACA_SECRET_KEY
+# — never hardcode them.  The dashboard panel is read-only; it never places
+# orders.  ALPACA_PAPER stays True until you deliberately go live.
+ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
+ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
+ALPACA_PAPER = os.getenv("ALPACA_PAPER", "true").lower() in ("1", "true", "yes")
+ALPACA_BASE_URL = (
+    "https://paper-api.alpaca.markets" if ALPACA_PAPER
+    else "https://api.alpaca.markets"
+)
+
 # ── Account Settings ─────────────────────────────────────────────────────────
 INITIAL_BALANCE = int(os.getenv("INITIAL_BALANCE", "10000"))
 
