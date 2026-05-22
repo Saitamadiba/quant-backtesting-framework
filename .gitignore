@@ -147,3 +147,10 @@ package-lock.json
 
 # ── Logs ────────────────────────────────────────────────────────────────────
 *.log
+
+# Private bot-repo overlay (separate git-dir; see bots-git wrapper)
+.git-bots/
+bots-git
+
+# Local agent state
+.claude/
