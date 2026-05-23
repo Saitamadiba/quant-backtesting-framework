@@ -403,6 +403,23 @@ class FaithfulLiquidityRaidAdapter:
     def get_param_space(self):
         return self.base.get_param_space()
 
+    def __getattr__(self, name):
+        """Forward any attribute we don't override to the wrapped adapter.
+
+        The WFO engine calls more than the four-method "public surface" we
+        explicitly delegate (``name`` / ``default_timeframes`` /
+        ``get_param_space`` / ``generate_signals``): it also reaches for
+        ``get_default_params``, ``begin_window`` / ``end_window``,
+        ``execute_signals``, and anything new it grows. Forwarding via
+        ``__getattr__`` is more robust than enumerating them.
+
+        Guard against infinite recursion before ``self.base`` is set during
+        ``__init__`` — without it, ``__getattr__('base')`` would recurse.
+        """
+        if name == "base":
+            raise AttributeError(name)
+        return getattr(self.base, name)
+
     # ── Cache + filter ───────────────────────────────────────────────
     def _ctx_for(self, df: pd.DataFrame):
         key = id(df)

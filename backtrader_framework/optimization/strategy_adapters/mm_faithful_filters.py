@@ -126,6 +126,15 @@ class FaithfulMMAdapter:
     def get_param_space(self):
         return self.base.get_param_space()
 
+    def __getattr__(self, name):
+        """Forward any unforwarded attribute to the wrapped adapter — the
+        WFO engine reaches for ``get_default_params``, ``begin_window`` /
+        ``end_window``, ``execute_signals`` etc. Guards recursion before
+        ``self.base`` is set during ``__init__``."""
+        if name == "base":
+            raise AttributeError(name)
+        return getattr(self.base, name)
+
     # ── Cache + filter ───────────────────────────────────────────────
     def _ctx_for(self, df: pd.DataFrame):
         key = id(df)
