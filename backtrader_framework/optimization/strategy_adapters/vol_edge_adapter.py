@@ -117,6 +117,12 @@ class VolEdgeAdapter(StrategyAdapter):
             ParamSpec("edge_c_min_rr",           0.4,  0.3,  0.7,  0.1),
             ParamSpec("edge_c_max_per_day",      2,    1,    3,    1, 'int'),
             ParamSpec("edge_c_iv_low_threshold", 45.0, 40.0, 55.0, 5.0),
+            # VRP floor for the Edge C / live Edge S regime gate.  Default 0.0
+            # preserves the historic adapter behavior (DVOL > RV30 strictly);
+            # live straddle bots use -5.0 (allow DVOL within 5 vol-pts below
+            # RV30).  Set to -5 via the FaithfulVolEdgeAdapter wrapper for a
+            # live-matching WFO; range widened to let WFO explore both regimes.
+            ParamSpec("edge_c_min_vrp",          0.0,  -10.0, 5.0,  2.5),
         ]
 
     # --------------------------------------------------------------
@@ -150,6 +156,7 @@ class VolEdgeAdapter(StrategyAdapter):
         c_min_rr   = float(params.get("edge_c_min_rr", 0.4))
         c_max_day  = int(params.get("edge_c_max_per_day", 2))
         iv_low     = float(params.get("edge_c_iv_low_threshold", 45.0))
+        c_min_vrp  = float(params.get("edge_c_min_vrp", 0.0))
 
         # Sprint 1+2 controls.  Defaults are chosen to PRESERVE sample size
         # while still implementing the highest-confidence optimizations:
@@ -168,7 +175,7 @@ class VolEdgeAdapter(StrategyAdapter):
         momentum_kill = float(params.get("momentum_kill_pct", 0.05))    # #8 LOOSE
 
         # Pre-compute causal daily aggregates and intraday context.
-        ctx = self._build_context(df, tf, iv_low_threshold=iv_low)
+        ctx = self._build_context(df, tf, iv_low_threshold=iv_low, min_vrp=c_min_vrp)
 
         opens  = df['Open'].values
         highs  = df['High'].values
@@ -404,7 +411,8 @@ class VolEdgeAdapter(StrategyAdapter):
 
     @staticmethod
     def _build_context(df: pd.DataFrame, tf: str,
-                       iv_low_threshold: float) -> Dict[str, np.ndarray]:
+                       iv_low_threshold: float,
+                       min_vrp: float = 0.0) -> Dict[str, np.ndarray]:
         """
         Pre-compute every per-bar / per-day quantity Edge B and Edge C need.
 
@@ -515,7 +523,7 @@ class VolEdgeAdapter(StrategyAdapter):
         regime_active_per_day = np.where(
             np.isnan(dvol_today_prev) | np.isnan(vrp_prev),
             False,
-            (dvol_today_prev < iv_low_threshold) & (vrp_prev > 0.0),
+            (dvol_today_prev < iv_low_threshold) & (vrp_prev > min_vrp),
         )
         regime_active_per_bar = pd.Series(
             regime_active_per_day, index=unique_days,
