@@ -714,16 +714,48 @@ class TradeSimulator:
         if exit_price is None:
             return None
 
+        # ── Partial-TP support (MM live: PARTIAL_EXIT_ENABLED) ───────────────
+        # When metadata['partial_exit_pct'] > 0, the live position-manager
+        # closes that fraction at TP1 and lets the rest run to TP2 / BE /
+        # timeout.  Net R = frac × R_at_TP1 + (1-frac) × R_at_remaining_exit.
+        # The existing simulator already moves the SL to effective_entry on
+        # TP1-hit (line 659/687), which matches live MOVE_SL_TO_BE=True; the
+        # only missing piece was the partial-close R computation.
+        partial_pct = float(meta.get('partial_exit_pct', 0))
+        partial_active = partial_pct > 0 and tp1_hit
+        if partial_active:
+            # Fix exit_price for the 'win_tp1' (timeout-after-TP1) outcome:
+            # the existing simulator assumes the full position closes at TP1,
+            # but with partial-TP the *remaining* portion is still in the
+            # market and would exit at the last bar's close.
+            if outcome == 'win_tp1':
+                last_idx = min(idx + max_bars - 1, n - 1)
+                exit_price = closes[last_idx]
+
         if is_long:
             raw_r = (exit_price - effective_entry) / risk
         else:
             raw_r = (effective_entry - exit_price) / risk
+
+        if partial_active:
+            if is_long:
+                r_partial = (tp1 - effective_entry) / risk
+            else:
+                r_partial = (effective_entry - tp1) / risk
+            # `raw_r` above is the R for the remaining (post-TP1) portion;
+            # combine with the locked-in partial R for the trade total.
+            raw_r = partial_pct * r_partial + (1 - partial_pct) * raw_r
 
         # Entry spread+slippage already in effective_entry (line 456-457),
         # so only charge commission for entry to avoid double-counting.
         entry_comm = entry_price * costs.commission_pct
         exit_cost = exit_price * (costs.spread_pct + costs.commission_pct + costs.slippage_pct)
         total_cost = (entry_comm + exit_cost) / risk if risk > 0 else 0
+        if partial_active:
+            # Partial close at TP1 incurs its own exit-side costs on the
+            # closed fraction.
+            partial_exit_cost = tp1 * (costs.spread_pct + costs.commission_pct + costs.slippage_pct)
+            total_cost += partial_pct * partial_exit_cost / risk if risk > 0 else 0
 
         return TradeResult(
             entry_time=signal['time'],

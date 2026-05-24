@@ -103,7 +103,17 @@ class FaithfulMMAdapter:
                  base: Optional[Any] = None,
                  *, blocked_regimes: Iterable[str] = ("quiet_trend", "quiet_chop"),
                  block_bands: Iterable[str] = (),
+                 partial_exit_pct: float = 0.5,
                  ):
+        """
+        partial_exit_pct : fraction of position closed at TP1 (default 0.5
+            mirrors live ``PARTIAL_EXIT_PCT`` on the BTC config). 0.0 disables
+            partial-TP entirely (signals exit the simulator's existing
+            trail-after-TP1 path). The simulator reads this from each signal's
+            ``metadata['partial_exit_pct']`` (see TradeSimulator.simulate).
+            Live BTC PARTIAL_EXIT_RR_FRAC=0.5 vs adapter's tp1 at 1.0×rr is a
+            known approximation — see the internal partial-exit study.
+        """
         if base is None:
             from .mm_adapter import MomentumMasteryAdapter as _Base
             base = _Base()
@@ -111,6 +121,7 @@ class FaithfulMMAdapter:
         self.symbol = symbol
         self.blocked_regimes = tuple(blocked_regimes)
         self.block_bands = tuple(block_bands)
+        self.partial_exit_pct = float(partial_exit_pct)
         # Caches keyed by id(df) — same trick as the LR faithful adapter.
         self._cache: dict = {}
 
@@ -191,5 +202,10 @@ class FaithfulMMAdapter:
                 # Stash for telemetry.
                 md = getattr(sig, "metadata", None) or {}
                 sig.metadata = dict(md, dvol=dvol_at, band=dvol_band(dvol_at))
+            # Wire partial-TP into the simulator via metadata. Read by
+            # TradeSimulator.simulate() to do frac × R_at_TP1 + (1-frac) × R_at_remaining.
+            if self.partial_exit_pct > 0:
+                md = getattr(sig, "metadata", None) or {}
+                sig.metadata = dict(md, partial_exit_pct=self.partial_exit_pct)
             survivors.append(sig)
         return survivors
