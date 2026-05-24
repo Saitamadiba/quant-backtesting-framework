@@ -436,6 +436,13 @@ class FaithfulLiquidityRaidAdapter:
         else:
             df_dv = attach_dvol(df.drop(columns=["DVOL"], errors="ignore"),
                                 self.symbol)
+        # Normalise index dtype/tz so `df_dv.loc[df_dv.index <= ets]` doesn't
+        # blow up on duckdb-loaded frames whose index is datetime64[us] —
+        # pandas 2.x rejects mixed-precision comparisons. Pick ns+UTC, the
+        # format every other downstream call already uses.
+        if str(df_dv.index.dtype) != "datetime64[ns, UTC]":
+            df_dv = df_dv.copy()
+            df_dv.index = pd.to_datetime(df_dv.index, utc=True)
         ctx = {
             "df": df_dv,
             "regime_arr": compute_regimes(df_dv),

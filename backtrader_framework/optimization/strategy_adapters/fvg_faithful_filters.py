@@ -121,6 +121,10 @@ class FaithfulFVGAdapter:
         else:
             df_dv = attach_dvol(df.drop(columns=["DVOL"], errors="ignore"),
                                 self.symbol)
+        # Normalise index dtype/tz — see lr_faithful_filters._ctx_for for why.
+        if str(df_dv.index.dtype) != "datetime64[ns, UTC]":
+            df_dv = df_dv.copy()
+            df_dv.index = pd.to_datetime(df_dv.index, utc=True)
         # Skip the proprietary regime compute if no regimes are blocked —
         # live FVG doesn't gate by regime, so this is a no-op for all
         # default-configured FVG runs.

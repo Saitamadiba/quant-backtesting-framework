@@ -148,6 +148,10 @@ class FaithfulMMAdapter:
         else:
             df_dv = attach_dvol(df.drop(columns=["DVOL"], errors="ignore"),
                                 self.symbol)
+        # Normalise index dtype/tz — see lr_faithful_filters._ctx_for for why.
+        if str(df_dv.index.dtype) != "datetime64[ns, UTC]":
+            df_dv = df_dv.copy()
+            df_dv.index = pd.to_datetime(df_dv.index, utc=True)
         ctx = {
             "df": df_dv,
             "regime_arr": compute_regimes_new5(df_dv, self.symbol),
