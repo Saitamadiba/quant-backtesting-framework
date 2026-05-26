@@ -154,3 +154,6 @@ bots-git
 
 # Local agent state
 .claude/
+
+# Phase 2 BTC displacement bot (live on VPS)
+Displacement/
