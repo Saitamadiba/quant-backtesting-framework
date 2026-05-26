@@ -157,3 +157,15 @@ bots-git
 
 # Phase 2 BTC displacement bot (live on VPS)
 Displacement/
+
+# Research artifacts (saved browser tabs / chat exports) — may contain
+# personal email + ad-hoc IPs referenced in conversation
+quant_skills/
+
+# Proprietary root-level scripts — WFO scorer + ML weight adapter consumed
+# by every bot's signal pipeline; lives in the private repo
+wfo_signal_scorer.py
+
+# Tests for proprietary modules (shared/, Liquidity_Raid/, etc.) — live
+# in the private repo alongside the modules they cover
+tests/

@@ -222,6 +222,32 @@ class LiquidityRaidAdapter(StrategyAdapter):
         # DVOL-adaptive branch below still computes its own per-bar floor;
         # this param only affects the non-DVOL fallback (i.e., NQ).
         min_sweep_atr = params.get('min_sweep_atr', 0.30)
+        # Research knob — disables the hardcoded regime-direction block at
+        # lines 491-494 so counter-trend signals (LONG in trending_down,
+        # SHORT in trending_up) come through.  Used by the skipped-sweep
+        # redemption study (an internal counter-trend study).
+        disable_regime_filter = bool(params.get('disable_regime_direction_filter', False))
+        # Research knobs (internal): bias-gate options + EMA-stretch
+        # mean-reversion check + configurable ADX threshold.  Used by
+        # an internal options/bias study to compare Options
+        # A/B/C of the May-23 missed-reversal post-mortem.
+        bias_mode = str(params.get('bias_mode', 'structure_default'))
+        # 'structure_default' = current logic; 'fast_4h_ema20' = 4H EMA20
+        # slope; 'disabled' irrelevant (use force_bias for Option C);
+        # 'trend_confidence' = P1-M3b composite gate — reads
+        #   df['ComposLong'] / df['ComposShort'] (pre-attached by the
+        #   feature_lab study driver) and emits bias when composite ≥
+        #   tc_threshold on the dominant side.  See
+        #   an internal trend-confidence study.
+        tc_threshold = float(params.get('tc_threshold', 55.0))
+        force_bias = params.get('force_bias', None)
+        # 1 = always LONG-scan (low sweeps); -1 = always SHORT-scan;
+        # None = use bias_mode logic.  Option C = run twice w/ +1, -1.
+        mean_revers_stretch_min = params.get(
+            'mean_reversion_ema_stretch_min_atr', None)
+        # When not None: require |price-EMA50|/ATR >= this on the
+        # correct side (BUY: price below; SELL: price above).
+        regime_adx_threshold = float(params.get('regime_adx_threshold', 30.0))
 
         if max_rr < min_rr:
             max_rr = min_rr
@@ -277,7 +303,7 @@ class LiquidityRaidAdapter(StrategyAdapter):
         valid_regime = ~np.isnan(avg_atr_pct_full) & (close_full > 0) & (atr_full > 0)
         volatile_mask = valid_regime & (atr_pct_full > avg_atr_pct_full * 1.8)
         if adx_arr_full is not None:
-            trending_mask = valid_regime & (~volatile_mask) & (adx_arr_full > 30.0)
+            trending_mask = valid_regime & (~volatile_mask) & (adx_arr_full > regime_adx_threshold)
             trend_up = trending_mask & (close_full > ema50_full)
             trend_dn = trending_mask & (close_full <= ema50_full)
         else:
@@ -289,6 +315,38 @@ class LiquidityRaidAdapter(StrategyAdapter):
         regime_full[trend_dn] = 'trending_down'
         regime_full[ranging_mask] = 'ranging'
         regime_arr = regime_full[sl]
+
+        # ── 4H EMA20 slope (for bias_mode='fast_4h_ema20') ────────
+        # Pre-compute once; reindex back to 15m grid via forward-fill.
+        # Slope = (EMA20 - EMA20[3 bars ago]) / EMA20[3 bars ago].
+        # 3 4H bars = 12h lookback — much faster reaction than EMA50/200
+        # stack but still noise-resistant.  Only computed when needed.
+        if bias_mode == 'fast_4h_ema20':
+            _h4 = df['Close'].resample('4h').last().to_frame('close')
+            _h4['ema20'] = _h4['close'].ewm(span=20, adjust=False).mean()
+            _h4['slope'] = _h4['ema20'].diff(3) / _h4['ema20'].shift(3)
+            _h4_slope_full = _h4['slope'].reindex(df.index, method='ffill').values
+            h4_slope_sl = _h4_slope_full[sl]
+        else:
+            h4_slope_sl = None
+
+        # ── Trend Confidence composite (for bias_mode='trend_confidence') ──
+        # The composite_long/short series must be pre-attached to df by
+        # the study driver (the WFO engine doesn't synthesize them).
+        # See the internal strategy core.
+        if bias_mode == 'trend_confidence':
+            if 'ComposLong' not in df.columns or 'ComposShort' not in df.columns:
+                raise ValueError(
+                    "bias_mode='trend_confidence' requires df['ComposLong'] "
+                    "and df['ComposShort'] pre-attached. Use "
+                    "Liquidity_Raid.core.trend_confidence.compute_scores_vectorized "
+                    "to compute and attach them before calling generate_signals."
+                )
+            compos_long_sl = df['ComposLong'].values[sl]
+            compos_short_sl = df['ComposShort'].values[sl]
+        else:
+            compos_long_sl = None
+            compos_short_sl = None
 
         # ── DVOL-based IV-adaptive sweep depth ────────────────────
         has_dvol = 'DVOL' in df.columns
@@ -468,29 +526,68 @@ class LiquidityRaidAdapter(StrategyAdapter):
                     london_hi_first_bar = -1
                     last_london_date = london_date
 
-            # ── Determine directional bias (Fix 3) ────────────────
-            sb = structure_bias[rel_i]
-            if sb > 0:
-                bias = 1   # LONG
-            elif sb < 0:
-                bias = -1  # SHORT
-            else:
-                # Fall back to EMA
-                if ema50[rel_i] > ema200[rel_i]:
+            # ── Determine directional bias ────────────────────────
+            # Mode 1 (structure_default): current logic — StructureBias
+            # primary, EMA50 vs EMA200 fallback.
+            # Mode 2 (fast_4h_ema20): 4H EMA20 slope sign.
+            # Force-bias overrides (used by Option C: run twice as +1, -1).
+            if force_bias is not None:
+                bias = int(force_bias)
+            elif bias_mode == 'fast_4h_ema20':
+                _slope = h4_slope_sl[rel_i] if h4_slope_sl is not None else 0.0
+                if np.isnan(_slope) or _slope == 0:
+                    continue
+                bias = 1 if _slope > 0 else -1
+            elif bias_mode == 'trend_confidence':
+                _cl = compos_long_sl[rel_i] if compos_long_sl is not None else float('nan')
+                _cs = compos_short_sl[rel_i] if compos_short_sl is not None else float('nan')
+                if np.isnan(_cl) or np.isnan(_cs):
+                    continue
+                if _cl >= tc_threshold and _cl > _cs:
                     bias = 1
-                elif ema50[rel_i] < ema200[rel_i]:
+                elif _cs >= tc_threshold and _cs > _cl:
                     bias = -1
                 else:
-                    continue  # No bias = no signal
+                    continue
+            else:  # structure_default
+                sb = structure_bias[rel_i]
+                if sb > 0:
+                    bias = 1   # LONG
+                elif sb < 0:
+                    bias = -1  # SHORT
+                else:
+                    if ema50[rel_i] > ema200[rel_i]:
+                        bias = 1
+                    elif ema50[rel_i] < ema200[rel_i]:
+                        bias = -1
+                    else:
+                        continue
+
+            # ── Mean-reversion EMA-stretch gate (port from live) ──
+            # Foundational LR check: BUY requires price BELOW EMA50;
+            # SELL requires price ABOVE.  Default None = disabled.
+            # See [[lr_foundational_fixes_may23]].
+            if mean_revers_stretch_min is not None:
+                _atr_now = atrs[rel_i]
+                if _atr_now and _atr_now > 0:
+                    _ema50_now = ema50[rel_i]
+                    _price_now = closes[rel_i]
+                    if bias == 1:
+                        _stretch = (_ema50_now - _price_now) / _atr_now
+                    else:
+                        _stretch = (_price_now - _ema50_now) / _atr_now
+                    if _stretch < float(mean_revers_stretch_min):
+                        continue
 
             # ── Regime direction filter (mirrors live bot) ────────
             # REGIME_DIRECTION_FILTER_ENABLED=True by default in live LR bot.
             # Live-WFO justification: internal analysis flagged regime-direction mismatches as negative-EV.  Hard-block them.
             reg = regime_arr[rel_i]
-            if reg == 'trending_up' and bias == -1:
-                continue
-            if reg == 'trending_down' and bias == 1:
-                continue
+            if not disable_regime_filter:
+                if reg == 'trending_up' and bias == -1:
+                    continue
+                if reg == 'trending_down' and bias == 1:
+                    continue
 
             close_val = closes[rel_i]
             low_val = lows[rel_i]
