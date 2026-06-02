@@ -72,6 +72,18 @@ class LiquidityRaidAdapter(StrategyAdapter):
     # NY-afternoon window (+199R).  See lr_nq_entry_quality_findings.md.
     _entry_hours_et: Optional[set] = None
 
+    # Optional extra kill-zone hour set (ET, 24h ints in 0..23). When set,
+    # the killzone WIDENS to include these hours in addition to the base
+    # LDN (2-7) + NY (8-15) window — the inverse of _entry_hours_et's
+    # narrowing role. Default None = zero behavior change for all existing
+    # callers. Used by an internal WFO study to test
+    # whether admitting ASIA hours (19-01 ET) produces a profitable bucket
+    # under current rules. NB: still constrained by _entry_hours_et if
+    # both are set (intersect-then-extend semantics: extra hours bypass
+    # _entry_hours_et to allow targeted research without dropping the
+    # production whitelist).
+    _extra_kz_hours: Optional[set] = None
+
     # Optional confidence floor (opt-in).  The composite confidence score
     # is informational by default ("no hard reject threshold" per the
     # module docstring).  When this attr is set, the signal loop rejects
@@ -436,6 +448,12 @@ class LiquidityRaidAdapter(StrategyAdapter):
         is_london = (et_hours_scan >= 2) & (et_hours_scan < 8)
         is_ny     = (et_hours_scan >= 8) & (et_hours_scan < 16)
         is_kz     = is_london | is_ny
+
+        # Optional widening — admit research-mode hours (e.g. ASIA 19-01 ET)
+        # without losing the LDN+NY base. Default None = no-op for prod.
+        if self._extra_kz_hours:
+            is_extra = np.isin(et_hours_scan, np.array(list(self._extra_kz_hours)))
+            is_kz = is_kz | is_extra
 
         # ── Pre-compute single-session levels lookup ──────────────
         all_highs = df['High'].values

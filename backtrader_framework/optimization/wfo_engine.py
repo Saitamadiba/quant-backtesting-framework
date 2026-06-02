@@ -1715,7 +1715,11 @@ class WFOEngine:
                 kurt_val = float(_sp_stats.kurtosis(r_vals, fisher=False))
                 dsr = deflated_sharpe_ratio(
                     observed_sr=oos_stats.get('sharpe_per_trade', 0),
-                    num_trials=n_combos * max(len(self.window_results), 1),
+                    # Multiple-testing breadth = the param-grid size searched
+                    # per window, NOT grid × n_windows: each window re-fits the
+                    # SAME grid, so the count of distinct strategies tried is
+                    # n_combos. Multiplying by windows over-deflated the SR.
+                    num_trials=n_combos,
                     n_returns=len(oos),
                     skewness=skew_val,
                     kurtosis=kurt_val,

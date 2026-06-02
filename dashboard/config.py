@@ -26,10 +26,12 @@ VPS_DB_FILES = {
     "fvg_btc.db": f"{VPS_REMOTE_BASE}/FVG_Strategy/BTC/btc-usd_enhanced_v3_trades.db",
     "fvg_eth.db": f"{VPS_REMOTE_BASE}/FVG_Strategy/ETH/eth-usd_enhanced_v3_trades.db",
     "fvg_nq.db":  f"{VPS_REMOTE_BASE}/FVG_Strategy/NQ/nq-usd_enhanced_v3_trades.db",
-    "lr_btc.db":  f"{VPS_REMOTE_BASE}/Liquidity_Raid/BTC_V2/btc_liquidity_raid_v2.db",
-    "lr_eth.db":  f"{VPS_REMOTE_BASE}/Liquidity_Raid/ETH_V2/eth_liquidity_raid_v2.db",
+    # LR BTC/ETH/SOL point at the HyroTrader $10k FUNDED ByBit sub-account
+    # (real fills) to match the funded recap; NQ has no ByBit bot so stays paper.
+    "lr_btc.db":  f"{VPS_REMOTE_BASE}/HyroTrader/lr_bybit_funded_10k.db",
+    "lr_eth.db":  f"{VPS_REMOTE_BASE}/HyroTrader/lr_eth_bybit_funded_10k.db",
     "lr_nq.db":   f"{VPS_REMOTE_BASE}/Liquidity_Raid/NQ_V2/nq_liquidity_raid_v2.db",
-    "lr_sol.db":  f"{VPS_REMOTE_BASE}/Liquidity_Raid/SOL_V2/sol_liquidity_raid_v2.db",
+    "lr_sol.db":  f"{VPS_REMOTE_BASE}/HyroTrader/lr_sol_bybit_funded_10k.db",
     "mm_btc.db":  f"{VPS_REMOTE_BASE}/Momentum_Mastery/BTC/btc_momentum_mastery_v2.db",
     "mm_eth.db":  f"{VPS_REMOTE_BASE}/Momentum_Mastery/ETH/eth_momentum_mastery_v2.db",
     "mm_nq.db":   f"{VPS_REMOTE_BASE}/Momentum_Mastery/NQ/nq_momentum_mastery_v2.db",
@@ -50,6 +52,15 @@ VPS_SHADOW_DB_FILES = {
     "mm_btc_shadow.db": f"{VPS_REMOTE_BASE}/Momentum_Mastery/BTC/btc_shadow_trades.db",
     "mm_eth_shadow.db": f"{VPS_REMOTE_BASE}/Momentum_Mastery/ETH/eth_shadow_trades.db",
     "mm_nq_shadow.db":  f"{VPS_REMOTE_BASE}/Momentum_Mastery/NQ/nq_shadow_trades.db",
+    # ── Hybrid paper-bot shadow DBs (2026-05-31) — collect off-window + BTC-regime-block
+    #     signals from the 7 no-Deribit-data LR paper bots (XRP + 6 majors).
+    "lr_xrp_paper_shadow.db":  f"{VPS_REMOTE_BASE}/Liquidity_Raid/XRP_V2/xrp_shadow_trades.db",
+    "lr_bnb_paper_shadow.db":  f"{VPS_REMOTE_BASE}/Liquidity_Raid/BNB_V2/bnb_shadow_trades.db",
+    "lr_doge_paper_shadow.db": f"{VPS_REMOTE_BASE}/Liquidity_Raid/DOGE_V2/doge_shadow_trades.db",
+    "lr_avax_paper_shadow.db": f"{VPS_REMOTE_BASE}/Liquidity_Raid/AVAX_V2/avax_shadow_trades.db",
+    "lr_link_paper_shadow.db": f"{VPS_REMOTE_BASE}/Liquidity_Raid/LINK_V2/link_shadow_trades.db",
+    "lr_dot_paper_shadow.db":  f"{VPS_REMOTE_BASE}/Liquidity_Raid/DOT_V2/dot_shadow_trades.db",
+    "lr_bch_paper_shadow.db":  f"{VPS_REMOTE_BASE}/Liquidity_Raid/BCH_V2/bch_shadow_trades.db",
 }
 
 SHADOW_DB_STRATEGY_MAP = {
@@ -60,6 +71,15 @@ SHADOW_DB_STRATEGY_MAP = {
     "mm_btc_shadow.db": ("Momentum Mastery", "BTC"),
     "mm_eth_shadow.db": ("Momentum Mastery", "ETH"),
     "mm_nq_shadow.db":  ("Momentum Mastery", "NQ"),
+    # Hybrid paper-bot shadows — labelled "LR Paper" to keep them visually
+    # distinct from the live-bot shadows.
+    "lr_xrp_paper_shadow.db":  ("LR Paper", "XRP"),
+    "lr_bnb_paper_shadow.db":  ("LR Paper", "BNB"),
+    "lr_doge_paper_shadow.db": ("LR Paper", "DOGE"),
+    "lr_avax_paper_shadow.db": ("LR Paper", "AVAX"),
+    "lr_link_paper_shadow.db": ("LR Paper", "LINK"),
+    "lr_dot_paper_shadow.db":  ("LR Paper", "DOT"),
+    "lr_bch_paper_shadow.db":  ("LR Paper", "BCH"),
 }
 
 # ── Remote ML Training DB Mapping ────────────────────────────────────────────

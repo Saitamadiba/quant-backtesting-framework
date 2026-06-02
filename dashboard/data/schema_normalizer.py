@@ -217,11 +217,15 @@ def normalize_lr_mm(db_path: Path, strategy: str, symbol: str) -> pd.DataFrame:
     # Direction
     sig_map = {"BUY": "Long", "SELL": "Short", "buy": "Long", "sell": "Short",
                "LONG": "Long", "SHORT": "Short", "long": "Long", "short": "Short"}
-    df["direction"] = raw["signal_type"].str.strip().map(sig_map).fillna("Unknown")
+    # Use .get with safe defaults: options DBs (e.g. bull-put spreads) lack
+    # signal_type / entry_price and would otherwise KeyError here and break the
+    # whole live-trades load. Missing -> direction "Unknown", entry_price NaN.
+    df["direction"] = (raw.get("signal_type", pd.Series("", index=raw.index))
+                       .astype(str).str.strip().map(sig_map).fillna("Unknown"))
 
-    df["entry_time"] = pd.to_datetime(raw["timestamp"], errors="coerce")
+    df["entry_time"] = pd.to_datetime(raw.get("timestamp"), errors="coerce")
     df["exit_time"] = pd.to_datetime(raw.get("exit_timestamp"), errors="coerce")
-    df["entry_price"] = raw["entry_price"].astype(float)
+    df["entry_price"] = raw.get("entry_price", pd.Series(float("nan"), index=raw.index)).astype(float)
     df["exit_price"] = raw.get("exit_price", pd.Series(dtype=float)).astype(float)
     df["stop_loss"] = raw.get("stop_loss", pd.Series(dtype=float)).astype(float)
     df["take_profit"] = raw.get("take_profit", pd.Series(dtype=float)).astype(float)

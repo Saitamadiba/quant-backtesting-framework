@@ -47,24 +47,33 @@ def deflated_sharpe_ratio(
     if num_trials <= 1 or n_returns <= 1:
         return {'deflated_sr': observed_sr, 'p_value': 0.5, 'is_significant': False}
 
-    # Expected maximum Sharpe ratio under null hypothesis (multiple testing correction)
-    # E[max(SR)] ≈ sqrt(2 * log(N)) - (log(pi) + log(log(N))) / (2 * sqrt(2 * log(N)))
-    euler_mascheroni = 0.5772156649
     log_n = np.log(num_trials)
 
-    if log_n > 0:
-        e_max_sr = np.sqrt(2 * log_n) - (np.log(np.pi) + np.log(log_n)) / (2 * np.sqrt(2 * log_n))
-    else:
-        e_max_sr = 0.0
-
-    # Standard deviation of SR estimator (corrected for non-normality)
-    # Var(SR) ≈ (1 + 0.5*SR^2 - skew*SR + (kurt-3)/4 * SR^2) / (n-1)
+    # Standard deviation of the Sharpe estimator (Lo 2002, corrected for
+    # non-normality). Var(SR) ≈ (1 − skew·SR + (kurt−1)/4·SR²)/(n−1), written
+    # below in the equivalent (1 + 0.5·SR² − skew·SR + (kurt−3)/4·SR²) form.
+    # Under H0 (all trials have SR=0) this also approximates the cross-trial
+    # dispersion of Sharpe, which scales E[max SR] below.
     excess_kurt = kurtosis - 3.0
     sr_var = (1.0 + 0.5 * observed_sr**2 - skewness * observed_sr +
               excess_kurt / 4.0 * observed_sr**2) / max(n_returns - 1, 1)
     sr_std = np.sqrt(max(sr_var, 1e-10))
 
-    # PSR (Probabilistic Sharpe Ratio) against the expected max
+    # Expected maximum Sharpe under the null across `num_trials` searches.
+    # The bracket is the expected max of N standard normals; it MUST be scaled
+    # by sr_std to land in Sharpe units (Bailey & López de Prado 2014). The
+    # prior version omitted this scaling — subtracting a ~3-4 (std-normal-unit)
+    # quantity from a ~0.3 Sharpe — which produced absurd deflated-SR values
+    # (e.g. -87).
+    if log_n > 0:
+        expected_max_z = (np.sqrt(2 * log_n)
+                          - (np.log(np.pi) + np.log(log_n))
+                          / (2 * np.sqrt(2 * log_n)))
+    else:
+        expected_max_z = 0.0
+    e_max_sr = sr_std * expected_max_z
+
+    # Deflated Sharpe = PSR tested against the deflated benchmark E[max SR].
     test_stat = (observed_sr - e_max_sr) / sr_std
     p_value = 1.0 - stats.norm.cdf(test_stat)
 
