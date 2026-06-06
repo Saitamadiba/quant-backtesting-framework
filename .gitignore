@@ -10,6 +10,12 @@
 *.pem
 *.key
 credentials.json
+# OFCS paper/live bot Telegram creds (token + chat_id) — NEVER commit
+iquant_telegram.json
+*_telegram_creds.json
+# systemd EnvironmentFile drop-ins holding tokens/allowlist — NEVER commit
+*.env
+iquant.env
 
 # ── Proprietary Strategy Bots (live trading code) ────────────────────────────
 FVG_Strategy/
@@ -169,3 +175,9 @@ wfo_signal_scorer.py
 # Tests for proprietary modules (shared/, Liquidity_Raid/, etc.) — live
 # in the private repo alongside the modules they cover
 tests/
+
+# Telegram bot API tokens — secrets, MUST never be committed. A leaked bot
+# token lets anyone hijack the bot (send as it / redirect signals).
+Telegram_bots_API_tokens.txt
+# Editor lock files (LibreOffice/Office) that shadow open documents
+.~lock.*#
