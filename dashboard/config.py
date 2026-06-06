@@ -61,6 +61,17 @@ VPS_SHADOW_DB_FILES = {
     "lr_link_paper_shadow.db": f"{VPS_REMOTE_BASE}/Liquidity_Raid/LINK_V2/link_shadow_trades.db",
     "lr_dot_paper_shadow.db":  f"{VPS_REMOTE_BASE}/Liquidity_Raid/DOT_V2/dot_shadow_trades.db",
     "lr_bch_paper_shadow.db":  f"{VPS_REMOTE_BASE}/Liquidity_Raid/BCH_V2/bch_shadow_trades.db",
+    # ── LRR shadow scanner (2026-06-02) — single multi-asset DB. Different
+    #    schema (table=lrr_signals, asset column per-row); the page's
+    #    _load_one detects the filename and applies the schema-bridge.
+    "lrr_shadow_trades.db":    f"{VPS_REMOTE_BASE}/HyroTrader/lrr_shadow_trades.db",
+    # ── Manual trades synced from ByBit funded sub-account (2026-06-04) —
+    #    every trade NOT placed by a bot, auto-tagged with the nearest
+    #    strategy signal (FVG/LR/MM ±30min) and labelled "Manual <TAG> SYM"
+    #    in the dashboard. Schema-bridge in _load_one converts table name
+    #    + a few column renames so the existing KPI/RR/regime machinery
+    #    applies unchanged.
+    "manual_trades.db":        f"{VPS_REMOTE_BASE}/HyroTrader/manual_trades.db",
 }
 
 SHADOW_DB_STRATEGY_MAP = {
@@ -80,6 +91,12 @@ SHADOW_DB_STRATEGY_MAP = {
     "lr_link_paper_shadow.db": ("LR Paper", "LINK"),
     "lr_dot_paper_shadow.db":  ("LR Paper", "DOT"),
     "lr_bch_paper_shadow.db":  ("LR Paper", "BCH"),
+    # LRR scanner is single-DB multi-asset. The sentinel symbol "MULTI" tells
+    # the page's loader that the asset is in the row, not the file mapping.
+    "lrr_shadow_trades.db":    ("LRR Shadow", "MULTI"),
+    # Manual trades — single multi-asset DB; per-row strategy_tag (set by
+    # the sync script's auto-tagger) becomes the bot label downstream.
+    "manual_trades.db":        ("Manual", "MULTI"),
 }
 
 # ── Remote ML Training DB Mapping ────────────────────────────────────────────
