@@ -74,6 +74,40 @@ VPS_SHADOW_DB_FILES = {
     "manual_trades.db":        f"{VPS_REMOTE_BASE}/HyroTrader/manual_trades.db",
 }
 
+# ── Knife bot DBs (forward-shadow detector + funded maker/taker arms) ─────────
+# The "knife" catches over-extended liquidity sweeps (8-bar extreme break) and
+# fades them back. Three live arms write separate DBs on the VPS:
+#   • knife_shadow.db   — read-only forward-shadow detector (ORIGINAL): records
+#       every break + frozen-model score + hypothetical MAKER fill. table=episodes
+#   • knife_funded_maker / taker / 100k — funded bots that place real (or DRY)
+#       orders; entry_mode column distinguishes maker (post-only limit) vs taker
+#       (market). table=funded_trades
+# Not synced by default (no local copy until the page's Sync button runs).
+VPS_KNIFE_DB_FILES = {
+    "knife_shadow.db":       f"{VPS_REMOTE_BASE}/HyroTrader/knife_shadow.db",
+    "knife_funded_maker.db": f"{VPS_REMOTE_BASE}/HyroTrader/knife_bybit_funded.db",
+    "knife_funded_taker.db": f"{VPS_REMOTE_BASE}/HyroTrader/knife_bybit_funded_taker.db",
+    "knife_funded_100k.db":  f"{VPS_REMOTE_BASE}/HyroTrader/knife_bybit_funded_100k.db",
+}
+
+# Frozen knife-detector v1 spec (features, K-window, folds, score cut, dev AUC).
+KNIFE_SPEC_PATH = BASE_DIR / "feature_lab" / "_ml_imports" / "knife_detector_v1_spec.json"
+# Offline research corpora the page reads when the VPS isn't synced.
+#   • SCOUT — BTC/ETH/SOL only, the recent quote-feature forward window (§2 card).
+#   • EPISODES — ALL 12 assets, the full knife detector population scored by the
+#     frozen model (built by feature_lab/score_knife_episodes.py). Carries
+#     is_holdout so the browser can separate dev (in-sample, optimistic) from
+#     holdout (honest out-of-sample, break_time ≥ 2025-07-01).
+KNIFE_SCOUT_PARQUET = (
+    BASE_DIR / "feature_lab" / "reports"
+    / "knife_v2_scout_table_20260612_082412.parquet"
+)
+KNIFE_EPISODES_PARQUET = (
+    BASE_DIR / "feature_lab" / "reports"
+    / "knife_episodes_scored_allassets.parquet"
+)
+KNIFE_FROZEN_SCORE_CUT = 0.6289843838166522
+
 SHADOW_DB_STRATEGY_MAP = {
     "lr_btc_shadow.db": ("Liquidity Raid", "BTC"),
     "lr_eth_shadow.db": ("Liquidity Raid", "ETH"),
