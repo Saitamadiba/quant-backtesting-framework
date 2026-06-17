@@ -82,3 +82,10 @@ and sanitized before it lands in any repo.
    and are committed to NO repo, public or private. When unsure whether a value is
    sensitive, redact it — a sanitized placeholder in a private repo is always
    correct; a leaked token never is.
+
+**Proprietary backup repo.** The gitignored proprietary code (`HyroTrader/`, tests,
+`replay_*.py`, deploy scripts) is mirrored, secret-free and one-way, to a private repo
+at `~/Quant-Backtesting-private` via `./backup-to-private.sh` (the working tree stays
+the source of truth; `*.env`/`*.pkl`/`*.db`/data are excluded, config shape kept in
+redacted `*.env.example`). Real secrets go to a gpg-AES256 bundle via
+`./backup-secrets.sh` (your passphrase), never to git. Run both after settling changes.
