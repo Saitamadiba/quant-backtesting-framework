@@ -181,3 +181,6 @@ tests/
 Telegram_bots_API_tokens.txt
 # Editor lock files (LibreOffice/Office) that shadow open documents
 .~lock.*#
+
+# Local VPS data pulls (research artifacts, never commit)
+feature_lab_reports_vps_pull/
