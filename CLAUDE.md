@@ -89,3 +89,25 @@ at `~/Quant-Backtesting-private` via `./backup-to-private.sh` (the working tree 
 the source of truth; `*.env`/`*.pkl`/`*.db`/data are excluded, config shape kept in
 redacted `*.env.example`). Real secrets go to a gpg-AES256 bundle via
 `./backup-secrets.sh` (your passphrase), never to git. Run both after settling changes.
+
+## Security review of every change (ALWAYS ON in this directory)
+
+The crown jewels here are **money and the edge** — exchange API keys that move real
+funds, funded-challenge accounts, Telegram tokens, the VPS, and the proprietary
+strategy logic. A leak or a compromised host is real capital and irreplaceable IP, not
+a backtest miss. So security is not a one-off audit — it is a gate on every addition.
+
+**Every new bot, feature, or integration is reviewed under cyber-security scrutiny
+BEFORE it goes live — no exceptions.** Run the **`infra-security-audit`** skill's
+*intake review* on the addition and clear it (PASS / PASS-WITH-FIXES, never BLOCK on an
+unfixed CRITICAL) before deploying. The intake checks, at minimum: any new secret loads
+from a gitignored env-file only (never a repo, public or private); new exchange access
+is order-only / withdrawal-disabled / IP-allowlisted / key-isolated with the funded
+interlock OFF by default; no new world-reachable port or network egress; external input
+is sender-allowlisted and never `eval`/`shell`'d; the addition fails CLOSED (halts, not
+trades) on missing/corrupt config; its `deploy_*.sh` carries the diff-guard + sudo-gate;
+and it logs no secrets. Use the same skill's *full audit* mode for periodic stack-wide
+reviews and after any incident.
+
+This rule composes with the three above — it does not replace the sanitize-before-commit
+or diff-first-deploy rules, it sits on top of them as the security lens.

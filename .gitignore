@@ -16,6 +16,10 @@ iquant_telegram.json
 # systemd EnvironmentFile drop-ins holding tokens/allowlist — NEVER commit
 *.env
 iquant.env
+# local pre-deploy env/config backups (may hold REAL keys) — NEVER commit
+*.localbak
+*.localbak.*
+*.bak.20*
 
 # ── Proprietary Strategy Bots (live trading code) ────────────────────────────
 FVG_Strategy/
