@@ -19,6 +19,46 @@ Full house style, the "say it twice" rule, and a grounded metaphor vocabulary
 sizing / dress-rehearsal forward-shadow / harder-curve Bonferroni / confound-in-
 disguise): see the **`plain-english-metaphors`** skill.
 
+## Connecting to the VPS (ALWAYS ON in this directory)
+
+Routine, **read-only** interaction with the live VPS is normal and expected — you do not
+need to ask before running NON-SUDO commands over SSH: tail a log, grep a config, list
+listeners (`ss -tlnp`), check a service with `systemctl status` (status is non-sudo),
+pull a DB or file to `/tmp` to inspect/diff. Treat the VPS like a filing cabinet you may
+open and read freely; you just may not change the locks.
+
+**Connection details come from the gitignored env-file — NEVER hardcode them here.** This
+file lives in the PUBLIC repo, so host/IP/port live ONLY in `~/.config/quant/deploy.env`
+(mode 0600), and the authorized SSH key (`~/.ssh/id_ed25519`, the `trader` user) is picked
+up automatically — no `-i` needed. Reusable recipe:
+
+```bash
+set -a; . ~/.config/quant/deploy.env; set +a
+ssh -p "${VPS_PORT:-22}" -o ConnectTimeout=12 "${VPS_USER}@${VPS_HOST}" '<read-only command>'
+# pull a file to inspect/diff — into /tmp, NEVER into the repo working tree:
+scp -P "${VPS_PORT:-22}" "${VPS_USER}@${VPS_HOST}:<remote-path>" /tmp/
+```
+
+**Two identities on the VPS — keep them straight (2026-06-19 hardening).** The bots run
+as, and you connect/read as, the **`trader`** user (uid 1002), which is now **NON-sudo**
+— it was deliberately removed from the `sudo` group so a compromised bot cannot escalate
+to root. All sudo/root power lives with a SEPARATE human admin user, **`admin`** (uid
+1003, in the `sudo` group). So: `trader` = the bots + your read-only SSH; `admin` = the
+operator's privileged hand. Never expect `trader` to sudo — that is by design, not a
+bug to route around.
+
+**Sudo is the hard line — and it is the operator's (as `admin`), not yours.** You CANNOT
+run sudo on the VPS (the auto-mode classifier blocks it, by design; and your `trader`
+login has no sudo rights anyway) and must never try to work around it. Any root action —
+`systemctl restart/stop/start`, package install, editing a root-owned file, truncating a
+root log — is mine to run **as the `admin` user**. For those, print the EXACT command(s)
+for me to paste **in an `admin` session** on the VPS, then wait and verify after I confirm
+they ran; never assume a restart happened. Reading is the open door (as `trader`);
+changing the machine is the door you knock on and hand me — `admin` — the key for.
+
+This composes with the deploy rules below: reads are free, but before you EDIT or DEPLOY
+any VPS file, the diff-first rule still applies — pull and diff the live copy first.
+
 ## Deploying to the live VPS (ALWAYS ON in this directory)
 
 **Multiple instances of you run in parallel, and several may be deploying bot
@@ -39,12 +79,13 @@ Before editing or deploying ANY file that runs on the VPS:
    VPS copy that is newer or longer than local. If the guard trips, do NOT
    `--force` — investigate the divergence and merge it in first. `--force` is a
    deliberate, human-confirmed last resort, never a reflex.
-3. **You cannot run sudo on the VPS** (the auto-mode classifier blocks it, by
-   design). Every `deploy_*.sh` MUST: (a) do all uploads sudo-free; (b) gate any
+3. **You cannot run sudo on the VPS** (the auto-mode classifier blocks it, and your
+   `trader` login has no sudo rights — see the two-identity note above). Every
+   `deploy_*.sh` MUST: (a) do all uploads sudo-free **as `trader`**; (b) gate any
    sudo step (systemctl restart/install) behind an interactive `[y/N]` prompt; and
    (c) skip sudo entirely in a non-interactive shell, printing the command for the
-   operator instead. The restart is ALWAYS the operator's action — never assume it
-   ran; verify after they confirm.
+   operator to run **as `admin`** instead. The restart is ALWAYS the operator's
+   action (as `admin`) — never assume it ran; verify after they confirm.
 4. **After deploying, validate + record.** Confirm the new code/config actually
    landed (grep the VPS) and the services are healthy, then leave a memory note of
    what you deployed and when — so the next parallel session can see it and not
