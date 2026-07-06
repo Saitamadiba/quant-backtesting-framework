@@ -72,6 +72,28 @@ VPS_SHADOW_DB_FILES = {
     #    + a few column renames so the existing KPI/RR/regime machinery
     #    applies unchanged.
     "manual_trades.db":        f"{VPS_REMOTE_BASE}/HyroTrader/manual_trades.db",
+    # ── Shadow-fleet gap closure (2026-07-06) — every shadow/paper vehicle
+    #    running on the VPS with a per-row trade book now syncs here too.
+    #    Schema bridges live in data/shadow_normalisers.SHADOW_DB_SPECS.
+    #    (Knife arms + knife counterfactual shadows stay on page 28.)
+    # Paper-EXECUTION books (fee-modeled forward tests):
+    "depth_paper_book.db":     f"{VPS_REMOTE_BASE}/HyroTrader/depth_paper_book.db",
+    "lrr_paper_book.db":       f"{VPS_REMOTE_BASE}/HyroTrader/lrr_paper_book.db",
+    "ofcs_paper_book.db":      f"{VPS_REMOTE_BASE}/ofcs_shadow/ofcs_paper_book.db",
+    "depth_policy_book.db":    f"{VPS_REMOTE_BASE}/HyroTrader/depth_policy_book.db",
+    # Signal shadows (record-only detectors, structurally no orders):
+    "momentum_4h_sol_shadow.db": f"{VPS_REMOTE_BASE}/HyroTrader/momentum_4h_sol_shadow.db",
+    "momentum_4h_xrp_shadow.db": f"{VPS_REMOTE_BASE}/HyroTrader/momentum_4h_xrp_shadow.db",
+    "momentum_4h_ltc_shadow.db": f"{VPS_REMOTE_BASE}/HyroTrader/momentum_4h_ltc_shadow.db",
+    "ifvg_sweep_shadow.db":      f"{VPS_REMOTE_BASE}/HyroTrader/ifvg_sweep_shadow.db",
+    "ifvg_nq_signal_shadow.db":  f"{VPS_REMOTE_BASE}/HyroTrader/ifvg_nq_signal_shadow.db",
+    "asia_basket_shadow.db":     f"{VPS_REMOTE_BASE}/HyroTrader/asia_basket_shadow.db",
+    "mm_btc_partial_shadow.db":  f"{VPS_REMOTE_BASE}/Momentum_Mastery/BTC/btc_momentum_mastery_v2_shadow.db",
+    # Options paper + funded-context sims:
+    "bullput_btc_shadow.db":     f"{VPS_REMOTE_BASE}/HyroTrader/bullput_btc_shadow.db",
+    "bullput_eth_shadow.db":     f"{VPS_REMOTE_BASE}/HyroTrader/bullput_eth_shadow.db",
+    "fvg_btc_funded_shadow.db":  f"{VPS_REMOTE_BASE}/HyroTrader/fvg_btc_funded_shadow.db",
+    "fvg_nq_funded_shadow.db":   f"{VPS_REMOTE_BASE}/HyroTrader/fvg_nq_funded_shadow.db",
 }
 
 # ── Knife bot DBs (forward-shadow detector + funded maker/taker arms) ─────────
@@ -131,6 +153,27 @@ SHADOW_DB_STRATEGY_MAP = {
     # Manual trades — single multi-asset DB; per-row strategy_tag (set by
     # the sync script's auto-tagger) becomes the bot label downstream.
     "manual_trades.db":        ("Manual", "MULTI"),
+    # ── Shadow-fleet gap closure (2026-07-06). MULTI = asset in the row.
+    # Paper-execution books (fee-modeled: r_multiple = r_net of a 0.10R toll):
+    "depth_paper_book.db":     ("Depth Paper", "MULTI"),
+    "lrr_paper_book.db":       ("LRR Paper", "MULTI"),
+    "ofcs_paper_book.db":      ("OFCS Paper", "MULTI"),
+    # "Depth Exit Policy" (not "Depth Policy") so its bot abbreviation is
+    # DEP — "Depth Paper" already owns DP and the labels would collide.
+    "depth_policy_book.db":    ("Depth Exit Policy", "MULTI"),
+    # Signal shadows:
+    "momentum_4h_sol_shadow.db": ("Momentum 4H", "SOL"),
+    "momentum_4h_xrp_shadow.db": ("Momentum 4H", "XRP"),
+    "momentum_4h_ltc_shadow.db": ("Momentum 4H", "LTC"),
+    "ifvg_sweep_shadow.db":      ("iFVG Shadow", "MULTI"),
+    "ifvg_nq_signal_shadow.db":  ("iFVG Shadow", "MULTI"),
+    "asia_basket_shadow.db":     ("Asia Basket", "BASKET"),
+    "mm_btc_partial_shadow.db":  ("MM Partial-Exit", "BTC"),
+    # Options paper + funded-context sims:
+    "bullput_btc_shadow.db":     ("Bull-Put Paper", "BTC"),
+    "bullput_eth_shadow.db":     ("Bull-Put Paper", "ETH"),
+    "fvg_btc_funded_shadow.db":  ("FVG Funded Shadow", "BTC"),
+    "fvg_nq_funded_shadow.db":   ("FVG Funded Shadow", "NQ"),
 }
 
 # ── Remote ML Training DB Mapping ────────────────────────────────────────────

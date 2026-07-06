@@ -22,6 +22,15 @@ Gates currently shadowed:
 * ``REGIME_BLOCK_<regime>`` — strategy disabled in regime (e.g. NQ ranging).
 * ``COUNTER_TREND_LONG_IN_TRENDING_DOWN`` / ``..._SHORT_IN_TRENDING_UP``.
 * ``SUPPRESSION_SHORT`` — SHORT in gamma SUPPRESSION.
+
+Shadow-fleet gap closure (2026-07-06): the page now also carries every OTHER
+shadow/paper vehicle running on the VPS that keeps a per-row trade book —
+the depth/LRR/OFCS paper-execution books, the depth exit-policy counterfactual
+book, the Momentum-4H / iFVG / Asia-basket / MM-partial-exit signal shadows,
+the bull-put options paper books and the FVG funded-context sims.  Schema
+bridges live in ``data/shadow_normalisers.SHADOW_DB_SPECS``; the "Shadow
+fleet registry" section documents each vehicle's parameters and the logic
+behind them.  Knife arms + knife counterfactual shadows stay on page 28.
 """
 
 from __future__ import annotations
@@ -43,8 +52,10 @@ from config import (
     DUCKDB_PATH,
 )
 from data.vps_sync import sync_single_file
-from data.shadow_normalisers import normalise_lrr as _normalise_lrr  # noqa: F401
-from data.shadow_normalisers import normalise_manual as _normalise_manual  # noqa: F401
+from data.shadow_normalisers import (
+    table_for as _table_for,
+    normaliser_for as _normaliser_for,
+)
 
 
 st.set_page_config(page_title="Shadow Trades", page_icon="🌑", layout="wide")
@@ -56,6 +67,272 @@ st.markdown(
     "that put the gate there.  When a row's `total R` disagrees with the cited "
     "WFO finding for more than a couple of weeks, the gate is the suspect."
 )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Shadow fleet registry — every shadow/paper vehicle running on the VPS,
+#  its parameters, and the logic behind them (gap closure 2026-07-06).
+#  Vehicles with a per-row trade book also appear in the tabs/KPIs below;
+#  "registry-only" entries (episode counterfactuals, recorders, monitors)
+#  are documented here and live on their own pages/CLIs.
+# ══════════════════════════════════════════════════════════════════════════════
+st.subheader("🛰️ Shadow fleet registry — what runs, with what dials, and why")
+st.caption(
+    "One entry per shadow/paper vehicle on the VPS.  Each pairs the exact "
+    "parameters with the reasoning that put them there — the number first, "
+    "the picture as a chaser.  Vehicles marked **[tab]** feed the trade "
+    "tables below; **[page 28]** = knife family, documented on the Knife "
+    "Bots page; **[registry-only]** = no per-trade book to tabulate here."
+)
+
+_FLEET = {
+    "Paper-execution books (fee-modeled forward tests)": [
+        ("Depth Paper Bot — `depth_paper_book.db` [tab]",
+         "**Runs:** trader cron :06/:21/:36/:51 (`depth_paper_bot.py`). "
+         "**Params:** fee haircut **0.10R** round-trip (`r_net = r_gross − 0.10`); "
+         "risk **0.5%** of a **$10k** paper equity per trade; per-key open cap "
+         "**999** (deliberately uncapped); allow-list **MM×12 / LR×11 (ex-LTC) / "
+         "LRR×9 (ex-DOT/ADA/XRP) = 32 keys**; watermark start **2026-07-02** "
+         "(no backfill — forward evidence only); source feed stale > **6h** → "
+         "fail-closed (halts, doesn't trade).\n\n"
+         "**Why:** the un-gated depth-cohort detectors print ~+0.24R on "
+         "idealized fills — this book replays the same signals minus a "
+         "realistic fee toll, forward-only.  It's the dress rehearsal before "
+         "any funded routing: idealized-minus-fee is a *proof step*, not "
+         "validated alpha, so nothing graduates until the fee-net edge holds "
+         "at n≥200 over 2–4 weeks.  The cap is off because we're measuring "
+         "the edge, not managing drawdown."),
+        ("LRR Paper Bot — `lrr_paper_book.db` [tab]",
+         "**Runs:** trader cron :04/:19/:34/:49 (`lrr_paper_bot.py`). "
+         "**Params:** assets **BTC/ETH/SOL** only; **REQUIRE_ML=1** — consumes "
+         "only `ml_pass=1` signals from `lrr_shadow_trades.db` (read-only "
+         "feed); fee **0.10R**; risk **0.5% / $10k**; caps **3 open total, 1 "
+         "per asset**; watermark **signal id 217** (no backfill); source "
+         "stale > 3h → fail-closed.\n\n"
+         "**Why:** the 2026-07-01 replay showed the LRR ML gate roughly "
+         "doubles mean R (+0.087 → +0.209) and is the difference between "
+         "fee-dead and fee-survivable — but the bootstrap CI still straddles "
+         "zero and 3 of 10 symbols invert.  So the gate earns a paper book, "
+         "not a live switch: let the forward tape vote before believing the "
+         "backtest.  BTC/ETH/SOL because those are where the gate was robust; "
+         "the caps mimic how a funded arm would actually run."),
+        ("OFCS Paper Bot — `ofcs_paper_book.db` [tab]",
+         "**Runs:** `ofcs_shadow` timer/cron (`ofcs_shadow/paper_bot.py`). "
+         "**Params:** order-flow-conditioned sizing — per-signal risk "
+         "(`ofcs_risk_pct`) scaled by **absorption tier × cross-count × ML-p** "
+         "multipliers, booked side-by-side with a **flat-risk control** "
+         "(`flat_risk_pct`) on the same trades; exits TP/SL/TIME.\n\n"
+         "**Why:** tests sizing-as-a-dimmer — same trades, different dose — "
+         "against the null that a light switch (flat size) is all you need.  "
+         "The 2026-07-02 fleet review scored the overlay **Δ−0.041R vs flat "
+         "on every arm** → NOT promoted; the book keeps accruing as the "
+         "kill-confirmation.  Keeping a refuted idea's meter running is "
+         "cheap insurance against re-litigating it from memory."),
+        ("Depth Demo Executors (maker → taker) — `depth_{maker,taker}_book.db` [registry-only]",
+         "**Runs:** trader cron :11/:26/:41/:56 (`depth_maker_bot.py` under "
+         "`depth_taker.env` — TAKER mode, fresh book 2026-07-06); the MAKER "
+         "arm is **RETIRED** (cron commented 2026-07-06), its book kept as "
+         "the adverse-selection record.  **Params (taker redesign):** "
+         "fixed-**$10k** book sizing via a composite guard (**$50/trade**, "
+         "was $812 off the $161k demo equity); **LRR dropped** from the "
+         "allow-list; demo orders on ByBit, not paper walks (table=orders, "
+         "so no tab here — it's an executor, like the knife arms on p28).\n\n"
+         "**Why:** the 2026-07-05 maker-vs-taker review found the maker arm "
+         "was adverse selection in action — the limit orders that DIDN'T "
+         "fill were the +1.46R winners, the fills averaged −0.17R.  A resting "
+         "limit order is a free option you hand the market: it gets exercised "
+         "against you exactly when you're wrong.  The taker redesign pays "
+         "the crossing fee to keep the whole signal population."),
+        ("Depth Policy Shadow — `depth_policy_book.db` [tab]",
+         "**Runs:** trader cron :12/:27/:42/:57 (`depth_policy_shadow.py`). "
+         "**Params:** hard stop **−0.40R**; trail arms at **+1.50R**, distance "
+         "**0.30R**; TP **+2.00R**; **no re-entry**; fee **0.10R**; families "
+         "**MM + LR only** (LRR excluded — the WFO said the policy *hurts* "
+         "it); pre-registration freeze **2026-07-04 13:00Z**; 24h walk cap "
+         "per trade.  Scores each booked paper trade counterfactually: "
+         "`native_net` vs `policy_net`.\n\n"
+         "**Why:** the exit-policy WFO cleared 3/3 time windows and 12/12 "
+         "assets at fee-adjusted **Δ+0.35/+0.34R**, cutting −0.9R tails "
+         "16→0.  Tighter-stop-plus-wider-TP is the grid's verdict (winners "
+         "run 8–9R median MFE; the old symmetric exits sold them early).  "
+         "But a WFO win is theory — this book is the practice leg, frozen "
+         "before it started so the forward window can't be cherry-picked.  "
+         "The paper bot itself stays untouched: policy is scored *beside* "
+         "the book, never inside it."),
+    ],
+    "Signal shadows (record-only detectors — structurally cannot order)": [
+        ("Momentum 4H — SOL & LTC shadows — `momentum_4h_{sol,ltc}_shadow.db` [tab]",
+         "**Runs:** systemd `momentum-4h-sol-shadow` / `-ltc-shadow`. "
+         "**Params:** EMA **50/200** trend bias, **ADX(14) ≥ 20**, 20-bar "
+         "volume average, breakout entry, SL **1.5×ATR**, TP **5.0×ATR** "
+         "(Phase 6.5 + WFO re-validation moved TP from 3.0); public "
+         "kline-fetch only — the modules do not import an order client "
+         "(AST-tested).\n\n"
+         "**Why:** both cleared plain significance but not the family-wise "
+         "Bonferroni bar (p̄=0.9985 across 33 cells): SOL is the strongest "
+         "unproven cell (net **+0.744R, MC P=0.964, n=12**), LTC sits at "
+         "**P=0.979, n=30**.  A ~4-fires/year detector simply hasn't had "
+         "enough at-bats, so we let the season play out — record-only until "
+         "n grows and MC P clears the harder curve.  Promotion is an edit "
+         "to the registry file, never to the shadow."),
+        ("Momentum XRP 1H-cascade shadow — `momentum_4h_xrp_shadow.db` [tab]",
+         "**Runs:** systemd `momentum-4h-xrp-shadow`. **Params:** detects on "
+         "**1H** bars, shadows a signal only when its direction agrees with "
+         "the **4H EMA50/200 trend bias** (the validated bias-gated cascade); "
+         "same SL 1.5×ATR / TP 5.0×ATR geometry; read-only klines.\n\n"
+         "**Why:** the strongest non-4H candidate — **+0.345R net, MC "
+         "P=0.998, 11/16 windows positive, n=92** — missing the 0.9985 "
+         "Bonferroni bar *by a hair*.  It fires ~3× as often as the 4H "
+         "cells, so the shadow reaches a verdict-quality sample fastest.  "
+         "Uncertified until the larger-n MC clears the bar."),
+        ("iFVG Sweep Shadow (NQ signal_gap) — `ifvg_sweep_shadow.db` [tab]",
+         "**Runs:** systemd `ifvg-sweep-shadow` (`ifvg_sweep_shadow.py`), plus "
+         "the earlier NQ writer's `ifvg_nq_signal_shadow.db`. **Params:** "
+         "**NQ only**, `signal_gap` mode — the FVG **inversion itself is the "
+         "trigger** (MSS + sweep prerequisite gates dropped), stop anchored "
+         "to the gap, **0.5-ATR** minimum strength filter; cells **1h/4h/6h** "
+         "with hold caps 672/168/168 bars; yfinance NQ=F, no order client.\n\n"
+         "**Why:** the full 13-asset × 7-timeframe × 4-mode WFO+MC study "
+         "found the iFVG edge is NQ-shaped: crypto never clears Bonferroni "
+         "at any timeframe, while NQ signal_gap is robust across 1h–1d "
+         "(**MC P=1.0000, WR 66–68%**, peaking ~4–6h).  The shadow forward- "
+         "tests exactly the surviving cells and nothing else — promotion is "
+         "decided by the scorecard script, never inside the bot."),
+        ("iFVG Construction-A (BTC/ETH) — `ifvg_shadow/state.jsonl` [registry-only]",
+         "**Runs:** trader cron 00:30 (`python3 -m ifvg_shadow.run`). "
+         "**Params:** 15m BTC + ETH; fade a tap INTO an unfilled FVG zone; "
+         "only entries whose bar is in the **vol_expansion** regime; "
+         "TP/SL/**24h timeout**; R recorded net of cost; state is one "
+         "JSONL, not a SQLite book (hence no tab).\n\n"
+         "**Why:** the regime study's one surviving crypto variant, worth "
+         "a cheap daily logger vs its **+0.057R** backtest expectation — "
+         "a pilot light, not a burner: if the forward scorecard can't beat "
+         "a number that small, the variant dies quietly."),
+        ("Asia-Basket Shadow — `asia_basket_shadow.db` [tab]",
+         "**Runs:** systemd `asia-basket-shadow` (`asia_basket_shadow.py`, "
+         "poll 15 min). **Params:** **1.0% total basket risk per Asia "
+         "night** → night return = 1% × mean(per-leg R); legs read "
+         "READ-ONLY from the 7 LR paper bots' shadow DBs; **BTC 5-night "
+         "trailing-bleed regime gate** (basket stands down when BTC's "
+         "trailing Asia performance ≤ 0); DST-safe night keys; no order "
+         "surface (AST-tested).\n\n"
+         "**Why:** the pivot from risking the eval account — same bounded- "
+         "basket math as the demo executor, run as an observer at funded-"
+         "$10k scale.  One row = one night, because the 1% cap makes the "
+         "night, not the leg, the unit of risk.  It accumulates the "
+         "n≥100-nights evidence the WFO discipline demands before any real "
+         "execution."),
+        ("MM BTC Partial-Exit Shadow — `btc_momentum_mastery_v2_shadow.db` [tab]",
+         "**Runs:** systemd `mm-btc-shadow` (full MM v2 bot in shadow). "
+         "**Params:** identical to live MM BTC except **PARTIAL_EXIT_ENABLED="
+         "True**: exit **half at 50% of the TP distance**, move SL to "
+         "break-even on the runner.\n\n"
+         "**Why:** the partial-exit replay says taking half early cuts tail "
+         "losses at modest mean-R cost — but replays assume fills.  Running "
+         "the whole bot twice (live config vs partial config) on the same "
+         "tape is the cleanest A/B: same signals, same data, one dial "
+         "changed.  Flip the live `PARTIAL_EXIT_ENABLED` only if the shadow "
+         "book wins on the forward tape."),
+    ],
+    "Options paper + funded-context sims": [
+        ("Bull-Put Spread Paper (BTC & ETH) — `bullput_{btc,eth}_shadow.db` [tab]",
+         "**Runs:** systemd `bullput-btc-paper` / `bullput-eth-paper` "
+         "(`bull_put_spread_bybit.py`, PAPER mode — no ByBit options "
+         "account).  **Params:** **14-DTE** spreads; short strike at "
+         "**1.0σ** below spot, wing at **2.0σ**; profit-take at **50% of "
+         "credit**; max loss **2%** per spread; R defined as "
+         "`realized_pnl / max_loss`.\n\n"
+         "**Why:** the Vol-Edge income leg — selling the put wing when VRP "
+         "is rich is collecting rent on insurance others overpay for, with "
+         "the wing capping the flood risk.  Paper because there's no "
+         "options account wired yet; the book builds the DVOL/VRP-"
+         "conditioned evidence before any capital sees an options venue."),
+        ("FVG Funded-Context Sims (BTC & NQ) — `fvg_{btc,nq}_funded_shadow.db` [tab]",
+         "**Runs:** sidecar sims fed by the FVG bots' signals. **Params:** "
+         "replays each FVG trade under the **funded-challenge risk state "
+         "machine** — halt states, `is_qualifying`, consecutive-loss "
+         "counter, daily-PnL limits, cycle-day — with commission booked "
+         "separately; R = `realized_pnl / risk_amount`.\n\n"
+         "**Why:** a strategy that's +EV standalone can still fail a "
+         "challenge whose drawdown rules cut it off mid-recovery.  This is "
+         "the dress rehearsal with the examiner's stopwatch running: it "
+         "measures FVG *under the rules*, not in the void, before an FVG "
+         "arm is ever pointed at a funded account."),
+    ],
+    "Knife family — see page 28 🔪 (documented here for completeness)": [
+        ("Knife arms + counterfactual shadows [page 28]",
+         "**Live arms:** forward-shadow detector (`knife_detector_shadow`), "
+         "MAKER challenge / $100k / maker2 arms + TAKER L2-absorption arm.  "
+         "**Counterfactual shadows (cron, episode-level):** "
+         "`knife_mae_shadow` (**−0.5R MAE stop**; promotion trigger n≥100, "
+         "Δ≥+0.10R, tail-cut ≥70% — a survival tool, meanR-neutral under "
+         "realistic slip), `knife_winstate_shadow` (**first-120s Tier-A "
+         "shape**, 2-state hold-vs-cut manage loop, freeze 06-30), "
+         "`knife_touches_shadow` (**tch24 over-tested-wall gate** — the "
+         "10+-touches cohort is negative inside +EV books, 23/23 symbols), "
+         "`knife_widestop_shadow`, `knife_oi_skip_shadow` (OI gate skip "
+         "ledger), `knife_continuation_shadow`, `knife_ofcs_shadow`, "
+         "`knife_crossvenue_shadow` (Binance-led / lockstep / ahead break "
+         "tags), `knife_trail_lock_tracker` (0.9R trail pilot), "
+         "`knife_vol_floor_shadow` + `knife_floor_forward` (weekly vol-floor "
+         "scoreboards).\n\n"
+         "**Why:** the knife entry is structurally −EV on the firehose "
+         "(−0.43R ride), so every one of these is an *exit/armor* "
+         "experiment, not an alpha hunt — each isolates ONE lever (MAE "
+         "stop, trail, touches gate, OI skip…) and scores it against the "
+         "same episodes.  They are armor being fitted to a fighter who "
+         "keeps losing on points — documented and compared on the Knife "
+         "Bots page, kept out of these tabs so the per-gate LR/MM view "
+         "stays clean."),
+    ],
+    "Recorders & monitors (no hypothetical trades — data collection)": [
+        ("Depth-Touches Recorder — `depth_touches.db` [registry-only]",
+         "**Runs:** trader cron 03:20Z (`depth_touches_recorder.py`, "
+         "record-only sidecar — the paper bot is untouched). **Params:** "
+         "computes `lvl_touches` per booked paper trade via the canonical "
+         "helper; scores **skip-if-touches≥10** on FEE-MODELED `r_net`; "
+         "families **MM + LR** (LRR research-null 0.495); freeze "
+         "**2026-07-05**; promotion bar: pooled n≥**300**, skipped n≥**20**, "
+         "kept meanR ≥ **+0.05** AND skipped ≤ **−0.05**, same-sign per "
+         "family.\n\n"
+         "**Why:** the fresh-extreme touches gate is the strongest effect "
+         "in the whole program — a level hit 10+ times is a sea-wall the "
+         "tide has already breached; fading it stops working.  This is "
+         "rung 1 of the two-surface ladder: record on the paper surface "
+         "first, gate only after both surfaces agree."),
+        ("Market-data recorders [registry-only]",
+         "`depth-logger` (Bybit L2 + tape, no creds), `oi_1m_recorder` "
+         "(1-min open interest), `binance_alt_recorder` (cross-venue "
+         "bookTicker), `liq_binance_recorder` (forceOrder liquidations), "
+         "`skew_logger` / Deribit vol collector (DVOL + 25Δ skew), spot "
+         "tape logger.  **Why:** every refuted pre-fill hypothesis taught "
+         "us the ceiling is data, not modeling — these keep the raw feeds "
+         "flowing so future pre-registered probes replay history instead "
+         "of waiting for it.  Cameras on the intersection, not traffic "
+         "cops."),
+        ("Monitors [registry-only]",
+         "`ct_short_shadow_monitor` (daily 06:30 — watches the LR counter-"
+         "trend SHORT carve-out cohort), `lr_funnel_heartbeat` (daily 00:20 "
+         "— did every LR stage fire yesterday?), `knife_recap` daily/weekly "
+         "Telegram recaps, `displacement-btc` Phase-2 shadow + "
+         "`displacement-bybit` $100k-demo executor (Displacement momentum "
+         "family, own DBs).  **Why:** read-only tripwires — they change "
+         "nothing, they just make silence loud."),
+    ],
+}
+
+with st.expander("📇 Open the fleet registry (every vehicle, params + why)",
+                 expanded=False):
+    _n_vehicles = sum(len(v) for v in _FLEET.values())
+    st.caption(f"{_n_vehicles} entries across {len(_FLEET)} groups. "
+               "Last reconciled against the live VPS crontab + systemd "
+               "unit list: **2026-07-06**.")
+    for _group, _entries in _FLEET.items():
+        st.markdown(f"#### {_group}")
+        for _title, _body in _entries:
+            with st.container(border=True):
+                st.markdown(f"**{_title}**")
+                st.markdown(_body)
 
 
 # ── Sync controls (sidebar) ──────────────────────────────────────────────────
@@ -87,15 +364,13 @@ def _load_one(local_name: str) -> pd.DataFrame:
         return pd.DataFrame()
     try:
         with sqlite3.connect(p) as conn:
-            # Per-file branch: different DBs use different table names.
-            if local_name == "lrr_shadow_trades.db":
-                df = pd.read_sql_query("SELECT * FROM lrr_signals", conn)
-                df = _normalise_lrr(df)
-            elif local_name == "manual_trades.db":
-                df = pd.read_sql_query("SELECT * FROM manual_trades", conn)
-                df = _normalise_manual(df)
-            else:
-                df = pd.read_sql_query("SELECT * FROM shadow_trades", conn)
+            # Table + schema bridge resolved per-file via the dispatch map
+            # in data/shadow_normalisers.SHADOW_DB_SPECS.
+            df = pd.read_sql_query(f"SELECT * FROM {_table_for(local_name)}",
+                                   conn)
+            _norm = _normaliser_for(local_name)
+            if _norm is not None:
+                df = _norm(df)
     except Exception as e:
         st.warning(f"Could not read {local_name}: {e}")
         return pd.DataFrame()
@@ -104,7 +379,14 @@ def _load_one(local_name: str) -> pd.DataFrame:
     strat, sym = SHADOW_DB_STRATEGY_MAP.get(local_name, ("?", "?"))
     df["strategy"] = strat
     _abbr = "".join(w[0] for w in strat.split()) if strat != "?" else "?"
-    if sym == "MULTI" and "asset" in df.columns:
+    if sym == "MULTI" and "family" in df.columns and "asset" in df.columns:
+        # Multi-asset book that ALSO tags which detector family produced
+        # each row (depth paper/policy books: MM/LR/LRR) — fold the family
+        # into the bot label so "DP MM BTC" and "DP LR BTC" stay separate.
+        df["symbol"] = df["asset"].astype(str)
+        df["bot"] = df.apply(
+            lambda r: f"{_abbr} {r['family']} {r['asset']}", axis=1)
+    elif sym == "MULTI" and "asset" in df.columns:
         # Multi-asset DB: per-row symbol. For ``manual_trades`` the bot
         # label also reflects the strategy_tag the sync auto-tagger chose
         # (e.g. "M FVG BTC", "M LR BTC", "M ad-hoc BTC") so the bot filter
@@ -323,9 +605,7 @@ with st.expander("🔍 Data quality — per-source row counts + column populatio
         if _p.exists():
             try:
                 with sqlite3.connect(_p) as _c:
-                    _tbl = ("lrr_signals" if _name == "lrr_shadow_trades.db"
-                            else "manual_trades" if _name == "manual_trades.db"
-                            else "shadow_trades")
+                    _tbl = _table_for(_name)
                     _n = _c.execute(f"SELECT COUNT(*) FROM {_tbl}").fetchone()[0]
                     _row["rows"] = _n
                     _info = {r[1] for r in
@@ -736,6 +1016,53 @@ _STRATEGY_COLS = {
         "symbol", "strategy_tag",
         "entry_price", "exit_price", "btc_regime",
     ],
+    # ── Shadow-fleet gap closure (2026-07-06) ────────────────────────────────
+    "Depth Paper": _COMMON_HEAD + [
+        "family", "r_gross", "r_net", "pnl_usd", "risk_usd",
+        "equity_before",
+    ] + _COMMON_TAIL,
+    "LRR Paper": _COMMON_HEAD + [
+        "ml_p", "r_gross", "r_net", "pnl_usd", "risk_usd",
+        "equity_before",
+    ] + _COMMON_TAIL,
+    "OFCS Paper": _COMMON_HEAD + [
+        "regime_gate", "absorption_tier", "cell", "conditioning",
+        "ml_p", "cross_count", "ofcs_risk_pct", "flat_risk_pct",
+        "gate_authorised",
+    ] + _COMMON_TAIL,
+    "Depth Exit Policy": _COMMON_HEAD + [
+        "family", "policy_exit", "policy_r", "policy_net",
+        "native_reason", "native_r", "native_net", "policy_taker",
+        "entry_price", "stop_loss", "take_profit", "btc_regime",
+    ],
+    "Momentum 4H": _COMMON_HEAD + [
+        "sl_dist", "tp_atr",
+    ] + _COMMON_TAIL,
+    "iFVG Shadow": _COMMON_HEAD + [
+        "symbol", "timeframe", "mode", "rr_target", "sl_anchor",
+        "session_gate", "et_hour",
+    ] + _COMMON_TAIL,
+    "Asia Basket": [
+        "bot", "opened_at_utc", "exit_reason", "r_multiple",
+        "n_legs", "n_assets", "closed_legs", "night_ret_pct",
+        "worst_leg_r", "regime_on", "btc_trailing_pct", "btc_regime",
+    ],
+    "MM Partial-Exit": _COMMON_HEAD + [
+        "partial_tp", "partial_exit_done", "killzone", "sweep_type",
+        "rr_ratio", "confidence", "regime_gate", "realized_pnl",
+    ] + _COMMON_TAIL,
+    "Bull-Put Paper": [
+        "bot", "opened_at_utc", "exit_reason", "r_multiple",
+        "realized_pnl", "short_strike", "wing_strike", "credit",
+        "max_loss", "spot_entry", "n_units", "dvol", "vrp",
+        "live_gate_passed", "btc_regime",
+    ],
+    "FVG Funded Shadow": _COMMON_HEAD + [
+        "realized_pnl", "risk_amount", "halt_state", "is_qualifying",
+        "cycle_day", "consec_losses_after", "daily_pnl_after",
+        "entry_price", "stop_loss", "take_profit", "exit_price",
+        "btc_regime",
+    ],
 }
 
 # Display friendly hyphens for NaN / None in dataframe cells.
@@ -757,7 +1084,10 @@ _strategies_present = (view_df["strategy"].dropna().unique().tolist()
                        if "strategy" in view_df.columns else [])
 _tab_labels = [s for s in
                ("Liquidity Raid", "LR Paper", "Momentum Mastery",
-                "LRR Shadow", "Manual")
+                "LRR Shadow", "Manual",
+                "Depth Paper", "LRR Paper", "OFCS Paper", "Depth Exit Policy",
+                "Momentum 4H", "iFVG Shadow", "Asia Basket",
+                "MM Partial-Exit", "Bull-Put Paper", "FVG Funded Shadow")
                if s in _strategies_present]
 
 
@@ -906,6 +1236,49 @@ def _render_strategy_table(strat: str, sub: pd.DataFrame) -> None:
             "(written by `the internal strategy core`) and "
             "show NaN by design."
         )
+    elif strat in ("Depth Paper", "LRR Paper"):
+        st.caption(
+            "`r_multiple` = **r_net** (gross R minus the 0.10R round-trip "
+            "fee haircut) — the promotion decision runs on the net number. "
+            "`family` = which detector family produced the signal "
+            "(MM/LR/LRR). See the fleet registry above for parameters."
+        )
+    elif strat == "Depth Exit Policy":
+        st.caption(
+            "Counterfactual book: every row is a paper trade re-scored "
+            "under the candidate exit policy (hard −0.40R / trail@1.5R "
+            "d0.3 / TP 2.0R). `r_multiple` = **policy_net**; compare to "
+            "`native_net` on the same row. `exit_reason` maps HARD→SL, "
+            "TRAIL→TIME_EXIT — the native `policy_exit` column keeps the "
+            "honest split."
+        )
+    elif strat == "Asia Basket":
+        st.caption(
+            "One row = one Asia **night** of the bounded basket, not one "
+            "trade. `r_multiple` = the night's mean per-leg R; "
+            "`night_ret_pct` = 1% cap × that mean. Nights close by the "
+            "clock, so resolved nights read TIME_EXIT by construction."
+        )
+    elif strat == "Bull-Put Paper":
+        st.caption(
+            "Options credit spreads: `r_multiple` = realized_pnl / "
+            "max_loss (risking 1 unit = the spread's max loss). "
+            "TP = the 50%-of-credit profit-take; SL = short strike touched."
+        )
+    elif strat == "FVG Funded Shadow":
+        st.caption(
+            "Funded-context sim: FVG trades replayed under the challenge "
+            "risk state machine (halt states, daily-PnL, consec-loss "
+            "counter). `r_multiple` = realized_pnl / risk_amount, net of "
+            "commission."
+        )
+    elif strat == "MM Partial-Exit":
+        st.caption(
+            "Full MM v2 bot in shadow with PARTIAL_EXIT on (half off at "
+            "50% of TP distance, SL→BE). `r_multiple` is reconstructed as "
+            "realized_pnl / (|entry−stop| × size) — the blended-trade R, "
+            "since partial exits split the position."
+        )
 
 
 if _tab_labels:
@@ -922,6 +1295,15 @@ st.caption(
     "Sources: `Liquidity_Raid/<sym>_V2/<sym>_shadow_trades.db` (LR/LR Paper) — "
     "`Momentum_Mastery/<sym>/<sym>_shadow_trades.db` (MM) — "
     "`HyroTrader/lrr_shadow_trades.db` (LRR) — "
-    "`HyroTrader/manual_trades.db` (Manual). "
-    "All synced into `dashboard/databases/` on **⟳ Sync** above."
+    "`HyroTrader/manual_trades.db` (Manual) — "
+    "`HyroTrader/depth_paper_book.db` + `lrr_paper_book.db` + "
+    "`depth_policy_book.db` (paper-execution books) — "
+    "`ofcs_shadow/ofcs_paper_book.db` (OFCS) — "
+    "`HyroTrader/momentum_4h_*_shadow.db`, `ifvg_*_shadow.db`, "
+    "`asia_basket_shadow.db`, `bullput_*_shadow.db`, "
+    "`fvg_*_funded_shadow.db` — "
+    "`Momentum_Mastery/BTC/btc_momentum_mastery_v2_shadow.db` "
+    "(MM partial-exit). "
+    "All synced into `dashboard/databases/` on **⟳ Sync** above. "
+    "Knife DBs live on page 28."
 )
