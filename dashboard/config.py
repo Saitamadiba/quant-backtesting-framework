@@ -65,6 +65,10 @@ VPS_SHADOW_DB_FILES = {
     #    schema (table=lrr_signals, asset column per-row); the page's
     #    _load_one detects the filename and applies the schema-bridge.
     "lrr_shadow_trades.db":    f"{VPS_REMOTE_BASE}/HyroTrader/lrr_shadow_trades.db",
+    # ── MM 15m forward-shadow (2026-07-15) — Tier-3 record-only arm from
+    #    MM_15M_SHADOW_SPEC.md. Deploy is gated on build-gate B1; until the
+    #    bot ships, the remote file is absent and sync/load fail soft.
+    "mm_15m_shadow.db":        f"{VPS_REMOTE_BASE}/HyroTrader/mm_15m_shadow.db",
     # ── Manual trades synced from ByBit funded sub-account (2026-06-04) —
     #    every trade NOT placed by a bot, auto-tagged with the nearest
     #    strategy signal (FVG/LR/MM ±30min) and labelled "Manual <TAG> SYM"
