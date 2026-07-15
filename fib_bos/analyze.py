@@ -43,6 +43,8 @@ def add_maker_mixed(t: pd.DataFrame) -> pd.DataFrame:
 
 
 def cat_block(t: pd.DataFrame, col: str, label: str) -> list[str]:
+    t = t.copy()
+    t[col] = t[col].astype(str)  # nullable object cols crash groupby(dropna=False)
     lines = [f"### {label} — split by {col}", "",
              "| value | n | WR | grossR | netR |", "|---|---|---|---|---|"]
     for val, g in sorted(t.groupby(col, dropna=False),
