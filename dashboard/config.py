@@ -69,6 +69,9 @@ VPS_SHADOW_DB_FILES = {
     #    MM_15M_SHADOW_SPEC.md. Deploy is gated on build-gate B1; until the
     #    bot ships, the remote file is absent and sync/load fail soft.
     "mm_15m_shadow.db":        f"{VPS_REMOTE_BASE}/HyroTrader/mm_15m_shadow.db",
+    # ── MM 5m maker-scalper forward-shadow (2026-07-15) — touch-gated limit
+    #    fills, Tier-3 record-only (MM_5M_SHADOW_SPEC.md).
+    "mm_5m_shadow.db":         f"{VPS_REMOTE_BASE}/HyroTrader/mm_5m_shadow.db",
     # ── Manual trades synced from ByBit funded sub-account (2026-06-04) —
     #    every trade NOT placed by a bot, auto-tagged with the nearest
     #    strategy signal (FVG/LR/MM ±30min) and labelled "Manual <TAG> SYM"

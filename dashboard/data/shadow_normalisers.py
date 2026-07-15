@@ -399,6 +399,37 @@ def normalise_mm15m(df: pd.DataFrame) -> pd.DataFrame:
     return _open_where_null(df)
 
 
+def normalise_mm5m(df: pd.DataFrame) -> pd.DataFrame:
+    """``HyroTrader/mm_5m_shadow.py`` (table=signals) — the MM 5m
+    maker-scalper forward-shadow (MM_5M_SHADOW_SPEC.md, Tier-3 record-only,
+    touch-gated limit fills).
+
+    Same shape as the 15m arm plus the limit state machine: CANCELLED rows
+    (TTL expired, never filled) are NOT trades — dropped here so KPIs read
+    fills only; PENDING/FILLED rows count as OPEN. ``limit_price`` is the
+    entry; ``r_net`` (asym maker/taker) is the headline R.
+    """
+    df = df.copy()
+    if "status" in df.columns:
+        df = df[df["status"] != "CANCELLED"].copy()
+    df = _alias(df, "confirm_bar_utc", "opened_at_utc")
+    if "exit_utc" in df.columns:
+        if "closed_at_utc" in df.columns:
+            df["closed_at_utc"] = df["exit_utc"].where(
+                df["exit_utc"].notna(), df["closed_at_utc"])
+        else:
+            df["closed_at_utc"] = df["exit_utc"]
+    df = _canon_direction(df)
+    df = _alias(df, "limit_price", "entry_price")
+    df = _alias(df, "tp1", "take_profit")
+    df = _alias(df, "r_net", "r_multiple")
+    if "outcome" in df.columns and "exit_reason" not in df.columns:
+        df["exit_reason"] = df["outcome"].map(
+            {"loss": "SL", "breakeven": "SL", "win_tp1": "TP",
+             "win_tp2": "TP", "timeout": "TIME_EXIT"})
+    return _open_where_null(df)
+
+
 # ── Loader dispatch table ─────────────────────────────────────────────────────
 # filename → (table, normaliser|None). Files absent here read the canonical
 # shared/shadow_tracker.py shape: table=shadow_trades, no bridge needed.
@@ -421,6 +452,7 @@ SHADOW_DB_SPECS: dict[str, tuple[str, object]] = {
     "fvg_btc_funded_shadow.db":  ("trades",            normalise_fvg_funded),
     "fvg_nq_funded_shadow.db":   ("trades",            normalise_fvg_funded),
     "mm_15m_shadow.db":          ("signals",           normalise_mm15m),
+    "mm_5m_shadow.db":           ("signals",           normalise_mm5m),
 }
 
 
