@@ -71,7 +71,15 @@ def htf_bias_frame(symbol: str, cfg: StructConfig) -> pd.DataFrame:
     Also emits the last same-direction break time and the HH/HL vs LH/LL
     sequence label of the most recent confirmed swings.
     """
-    df = load_bars(symbol, cfg.htf_tf)
+    if cfg.htf_tf == "1d":
+        # no local daily table — resample 4h bars to UTC calendar days
+        raw = load_bars(symbol, "4h").set_index("timestamp")
+        df = (raw.resample("1D")
+              .agg(open=("open", "first"), high=("high", "max"),
+                   low=("low", "min"), close=("close", "last"))
+              .dropna().reset_index())
+    else:
+        df = load_bars(symbol, cfg.htf_tf)
     h, l, c = df["high"].to_numpy(), df["low"].to_numpy(), df["close"].to_numpy()
     sh_lvl, sh_idx, sl_lvl, sl_idx = pivot_asof(h, l, cfg.htf_swing_n)
 
@@ -111,7 +119,7 @@ def htf_bias_frame(symbol: str, cfg: StructConfig) -> pd.DataFrame:
         bias[j] = cur_bias
         last_break[j] = cur_break
 
-    tfm = {"1h": 60, "4h": 240}[cfg.htf_tf]
+    tfm = {"1h": 60, "4h": 240, "1d": 1440}[cfg.htf_tf]
     close_time = df["timestamp"] + pd.Timedelta(minutes=tfm)
     ct_ns = close_time.astype("int64").to_numpy()
     break_ns = np.full(n, np.nan)
@@ -133,7 +141,7 @@ def run_symbol(symbol: str, cfg: StructConfig | None = None) -> pd.DataFrame:
     df = load_bars(symbol, cfg.exec_tf)
     if df.empty:
         return pd.DataFrame()
-    tf_min = {"5m": 5, "15m": 15}[cfg.exec_tf]
+    tf_min = {"5m": 5, "15m": 15, "1h": 60, "4h": 240}[cfg.exec_tf]
 
     htf = htf_bias_frame(symbol, cfg)
     close_time = df["timestamp"] + pd.Timedelta(minutes=tf_min)
