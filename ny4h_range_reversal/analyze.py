@@ -107,13 +107,15 @@ def regime_block(t: pd.DataFrame, col: str, title: str) -> list[str]:
     return lines
 
 
-def feature_scan(t: pd.DataFrame, target: str = "gross_r") -> pd.DataFrame:
+def feature_scan(t: pd.DataFrame, target: str = "gross_r",
+                 features: list[str] | None = None) -> pd.DataFrame:
     """Quintile scan of every numeric feature vs the target R column."""
+    features = features if features is not None else NUMERIC_FEATURES
     half = pd.to_datetime(t["entry_time"]).quantile(0.5)
     is_h1 = pd.to_datetime(t["entry_time"]) <= half
     win = (t["gross_r"] > 0).astype(int)
     rows = []
-    for f in NUMERIC_FEATURES:
+    for f in features:
         if f not in t.columns:
             continue
         x = t[f]
