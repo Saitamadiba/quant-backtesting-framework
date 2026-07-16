@@ -50,6 +50,15 @@ IDLE, AWAIT = 0, 1
 def run_symbol(symbol: str, cfg: FibConfig | None = None) -> pd.DataFrame:
     cfg = cfg or FibConfig(costs=TransactionCosts.for_asset(symbol))
     df = load_bars(symbol, cfg.exec_tf)
+    return run_frames(df, symbol, cfg)
+
+
+def run_frames(df: pd.DataFrame, symbol: str,
+               cfg: FibConfig | None = None) -> pd.DataFrame:
+    """Pure state machine over an OHLCV frame (timestamp/open/high/low/close/
+    volume/atr_14/ema_200). Split out of run_symbol so the VPS shadow bot's
+    vendored copy can be parity-tested against this exact function."""
+    cfg = cfg or FibConfig(costs=TransactionCosts.for_asset(symbol))
     if df.empty:
         return pd.DataFrame()
     tf_min = {"5m": 5, "15m": 15, "1h": 60}[cfg.exec_tf]

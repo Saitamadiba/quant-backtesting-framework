@@ -40,6 +40,7 @@ shared/
 shadow_book/
 fvg_shadow/
 ifvg_shadow/
+fib618_shadow/
 lr_shadow/
 mm_shadow/
 lr_regime_gate/
