@@ -33,7 +33,7 @@ RX=(--exclude='*.env' --exclude='telegram.json' --exclude='*.pkl' --exclude='*.j
 cd "$SRC"
 rsync -a --delete "${RX[@]}" HyroTrader Displacement \
       Liquidity_Raid Momentum_Mastery SBS FVG_Strategy shared \
-      Vol_Edge Momentum_4H_Trend ofcs_shadow ifvg_shadow fib618_shadow "$PRIV/"
+      Vol_Edge Momentum_4H_Trend ofcs_shadow ifvg_shadow fib618_shadow smc_demo "$PRIV/"
 # full feature_lab (188 research scripts + tests + md); RX excludes the heavy
 # reports/ parquets/dbs/logs so only the code + notes are mirrored. tests/ holds the
 # top-level proprietary bot tests (knife_*, etc.) — mirrored too per CLAUDE.md.
