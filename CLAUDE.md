@@ -131,6 +131,21 @@ the source of truth; `*.env`/`*.pkl`/`*.db`/data are excluded, config shape kept
 redacted `*.env.example`). Real secrets go to a gpg-AES256 bundle via
 `./backup-secrets.sh` (your passphrase), never to git. Run both after settling changes.
 
+## Never wipe live data (ALWAYS ON in this directory)
+
+**Never delete, truncate, drop, or overwrite-with-empty a database or live data file
+unless the user EXPLICITLY asks for that exact action.** The `*.db`/`*.duckdb` files hold
+irreplaceable state and history — shadow books (`knife_shadow.db` episodes), funded trades,
+feature stores, the tick re-resolution. None of it lives in any repo (DBs are gitignored), so
+a wipe is permanent loss, not a recoverable commit. Concretely, never — as a side effect of any
+task — run `> file.db`, `rm *.db*`, `DROP TABLE`, `TRUNCATE`, a `DELETE` without a `WHERE`, or
+`open(path, "w")` over a populated data file. If a rebuild genuinely seems needed: STOP, back the
+file up first (`cp x.db x.db.bak.$(date -u +%Y%m%dT%H%M%SZ)`), confirm with the user, and prefer
+a guarded regenerate that **fails CLOSED** — refuses to overwrite good data with empty/decimated
+output (reference: the `reresolve_lock.py` row-count guard). On the shared VPS, another session's
+data is not yours to reset. Cautionary tale (2026-06-20): `knife_shadow.db` (671 episodes) was
+truncated to 0 bytes as a side effect and had to be rebuilt — the loss is what this rule prevents.
+
 ## Security review of every change (ALWAYS ON in this directory)
 
 The crown jewels here are **money and the edge** — exchange API keys that move real
@@ -152,3 +167,78 @@ reviews and after any incident.
 
 This rule composes with the three above — it does not replace the sanitize-before-commit
 or diff-first-deploy rules, it sits on top of them as the security lens.
+
+## HyroTrader risk standard on every bot (ALWAYS ON in this directory)
+
+**One risk ruleset, applied at the tier where it belongs — for every bot we deploy.**
+The full policy is `HYROTRADER_RISK_STANDARD.md`; the short version, non-negotiable:
+
+- **Tier 1 — anything that places ByBit orders** (`place_order`/`bybit_open`, funded OR
+  demo) MUST drive the canonical `HyroTrader/risk_guard.py :: HyroTraderRiskGuard` — not a
+  bespoke sizing class. "Drive" means actually CALL it: `enforce()` every cycle (it
+  flattens + halts on a daily-DD / max-loss / consec-loss breach), size via
+  `size_for_trade`, gate via `allow_new_trade_risk`, and feed closes to
+  `record_trade_outcome`. **Instantiating the guard but never calling `enforce()` is NOT
+  compliant** — that is sizing with no circuit breaker (the exact gap that fails a seat).
+  Native SL on every order; notional ≤2×; aggregate ≤4%; 1% sizing / 2% ceiling; interlock
+  OFF by default; isolated order-only IP-allowlisted key; fail CLOSED.
+  **Halt ≠ dark:** a halted bot MUST keep accruing data — it still reacts to entry signals
+  but takes them in SHADOW (no order) via the shared `HyroTrader/halt_shadow.py` (`record()`
+  in place of the order; the `--resolve` cron books R-multiples off public OHLC). Shadow
+  outcomes are NEVER fed to `record_trade_outcome`. A bot paired with an always-on shadow
+  detector (knife + `knife_detector_shadow`) satisfies this via that detector.
+- **Tier 2 — paper / virtual-book bots** apply the SAME rules on a virtual challenge book
+  (1% sizing, native SL+RR, notional cap, DD/consec halts on virtual equity) so the paper
+  P&L answers "would this pass a $100k challenge." Keep the raw R recorded too; a
+  deliberately-permissive raw-edge test may disable the halts only behind an explicit,
+  status-visible env flag.
+- **Tier 3 — shadow / record-only detectors stay DIMENSIONLESS by design.** They record
+  R-multiples with a defined SL+RR; do NOT bolt dollar-sizing or DD-halts onto them — it
+  corrupts the sizing-agnostic edge measurement. The only requirement is that every
+  recorded signal has a defined native SL + RR. A funded-viability *replay* overlay is
+  optional and must never alter the raw R.
+
+This is checked at `infra-security-audit` intake for every new bot, and composes with the
+diff-first-deploy + sanitize + security rules above.
+
+## Reuse the knife-program research in every new backtest (ALWAYS ON in this directory)
+
+The knife program (2026-06 → 07) left behind two assets that every NEW strategy backtest
+MUST use: a library of **closed questions** (so we never re-run a refuted design blind)
+and a live **instrument panel** of continuously-recorded metrics (so new studies start
+from real recorded features, not ad-hoc reinvention).
+
+**1. Check the closures FIRST.** Before scaffolding any backtest, read `MEMORY.md` for
+the relevant refutation memories. Standing results that pre-answer whole design spaces:
+fade/reversal at visible levels is CLOSED at every scale and design (knife, LRR, NY4H,
+structure scalper, PD-level, fib BOS); break-continuation (joiner) is closed BOTH
+directions; inverting a net-negative book is toll-dead (anti-knife: the ~2.9bps
+first-passage asymmetry < one spread crossing); confirmation-then-enter costs ~0.22–0.25R
+paired vs a resting limit; the regime5 quiet→vol_expansion ordering is universal across
+families. A new backtest that touches one of these spaces must state up front which
+closure it is challenging and what NEW mechanism justifies re-opening it.
+
+**2. Run new candidates through the recorded instrument panel, not fresh ad-hoc metrics.**
+The stack continuously records, per signal/episode: tick microstructure k-window features
+(`knife_shadow.db episodes.features_json`: into/opp volume+rate, imbalance, trade sizes,
+large_share, pen_depth_atr, pen_speed, stall_secs, retrace_frac, absorb_ratio), plus
+regime5, mtf_score, daily_bias, h4_structure, er20, funding_z, atr_pct, hour_et/dow,
+lvl_touches_24h, dvol, vpin; cross-venue dislocation tags (`crossvenue_shadow.db`); the
+anti-knife mirror (`antiknife_shadow.db`); markout at fill (`markout_monitor`); and the
+raw tick/depth stores mapped in `VPS_DATA_BACKTEST_MAP.md`. A new strategy's evaluation
+battery reuses this panel by default: winner-vs-loser AUC scan across the recorded
+features, regime5 split, gross-vs-toll decomposition, and markout of its fills.
+
+**3. Apply the methodological standards the program hardened.** Non-negotiable in any
+backtest report: (a) label every feature PRE-fill vs POST-fill — the k120 features, the
+frozen `score`, and `favored` are POST-fill [fill, fill+120s] and must never be presented
+as entry gates; (b) decompose gross vs fee/slip toll before any verdict — an entry must
+earn GROSS above the toll (~0.15–0.35R at our tiers) or execution can't save it; (c) any
+multi-cell scan carries a family-wise bar (permutation max-|t| or Bonferroni) and any
+survivor needs a half-split stability check; (d) audit intrabar fills at levels derived
+from running extremes for same-bar look-ahead, and never sort outcome deciles by
+(value, outcome) tuples; (e) pre-register the expectation + kill/keep bar BEFORE running
+a forward shadow, and read clustered books with an effective-n haircut (simultaneous
+same-direction episodes are one bet wearing several name tags); (f) bracket asymmetry on
+a driftless path (first-passage) is NOT alpha — check whether "edge" survives at the
+mirrored bracket before believing it.
