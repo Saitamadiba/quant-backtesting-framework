@@ -36,6 +36,8 @@ class SMCConfig:
     fvg_window: int = 12         # LTF bars after CHOCH
     fill_window: int = 24        # LTF bars for the CE limit
     rr: float = 4.0
+    ce_frac: float = 0.5         # entry depth in the LTF FVG (0.5 = CE midpoint)
+    min_leg_retrace: float = 0.0  # fib filter: skip fills shallower than this
     min_risk_atr: float = 0.10   # skip degenerate stops (< 0.1 x LTF ATR)
     session_gap_exit: bool = False  # flatten before session gaps (NQ)
     max_hold_bars: int = 576
@@ -336,6 +338,9 @@ def run_symbol(symbol: str, cfg: SMCConfig | None = None) -> pd.DataFrame:
                     a = atr[j]
                     leg = (ep["leg_hi"] - ep["epi_ext"]) * side
                     retr = ((ep["leg_hi"] - fill) * side / leg) if leg > 0 else np.nan
+                    if cfg.min_leg_retrace > 0 and \
+                            not (np.isfinite(retr) and retr >= cfg.min_leg_retrace):
+                        continue  # fib filter (strategy param, causal at fill)
                     if ((l[j] if side == 1 else h[j]) - stop) * side <= 0:
                         res = {"r_plain": -1.0, "reason_plain": "stop_samebar",
                                "bars_plain": 0, "r_be": -1.0,
