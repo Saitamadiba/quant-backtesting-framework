@@ -36,6 +36,8 @@ class SMCConfig:
     fvg_window: int = 12         # LTF bars after CHOCH
     fill_window: int = 24        # LTF bars for the CE limit
     rr: float = 4.0
+    stop_mode: str = "candle"    # "candle" (v1) | "atr" (fixed k x ATR at FVG bar)
+    stop_atr_mult: float = 1.0
     ce_frac: float = 0.5         # entry depth in the LTF FVG (0.5 = CE midpoint)
     min_leg_retrace: float = 0.0  # fib filter: skip fills shallower than this
     min_risk_atr: float = 0.10   # skip degenerate stops (< 0.1 x LTF ATR)
@@ -287,16 +289,21 @@ def run_symbol(symbol: str, cfg: SMCConfig | None = None) -> pd.DataFrame:
                         continue  # setup dead — zone consumed
                     # fresh LTF FVG completing at bar j in trade direction
                     if side == 1 and l[j] > h[j - 2]:
-                        ce = (l[j] + h[j - 2]) / 2
+                        ce = l[j] - cfg.ce_frac * (l[j] - h[j - 2])
                         stop = l[j - 1]
                         far = h[j - 2]
                     elif side == -1 and h[j] < l[j - 2]:
-                        ce = (h[j] + l[j - 2]) / 2
+                        ce = h[j] + cfg.ce_frac * (l[j - 2] - h[j])
                         stop = h[j - 1]
                         far = l[j - 2]
                     else:
                         keep.append(ep)
                         continue
+                    if cfg.stop_mode == "atr":
+                        if not (np.isfinite(atr[j]) and atr[j] > 0):
+                            keep.append(ep)
+                            continue
+                        stop = ce - side * cfg.stop_atr_mult * atr[j]
                     if (ce - stop) * side <= 0:
                         keep.append(ep)
                         continue
