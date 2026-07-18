@@ -59,6 +59,7 @@ maker_backtest/
 ofi_study/
 feature_lab/
 books_indicator_battery/
+liquidity_surf/
 tick_data/
 tick_features/
 tick_ingest/
