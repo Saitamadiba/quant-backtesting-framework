@@ -58,6 +58,7 @@ promoted_configs/
 maker_backtest/
 ofi_study/
 feature_lab/
+books_indicator_battery/
 tick_data/
 tick_features/
 tick_ingest/
