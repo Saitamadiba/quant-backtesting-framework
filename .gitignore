@@ -61,6 +61,7 @@ feature_lab/
 books_indicator_battery/
 liquidity_surf/
 desk_demo/
+retest_demo/
 tick_data/
 tick_features/
 tick_ingest/
