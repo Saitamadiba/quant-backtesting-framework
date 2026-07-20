@@ -119,6 +119,7 @@ vps_deployment/
 deploy_to_vps.sh
 upload_to_vps.sh
 vps_bot_update_*.tar.gz
+session_pnl_snapshot.sh
 
 # ── Pine Scripts (TradingView strategy code) ────────────────────────────────
 dashboard/pine/

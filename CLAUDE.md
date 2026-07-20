@@ -19,6 +19,58 @@ Full house style, the "say it twice" rule, and a grounded metaphor vocabulary
 sizing / dress-rehearsal forward-shadow / harder-curve Bonferroni / confound-in-
 disguise): see the **`plain-english-metaphors`** skill.
 
+## Session-start fleet recap (ALWAYS ON in this directory)
+
+**Open every new session with a two-part recap before anything else** — a cockpit
+pre-flight: read the instrument panel and the last mechanic's note before you touch
+the controls. A `SessionStart` hook (in `.claude/settings.local.json`) runs
+`session_pnl_snapshot.sh --hook`, which does two things at once: it shows the live,
+read-only PnL scoreboard to the user as a `systemMessage` the moment the session opens
+(banner `=== FLEET SESSION RECAP — live PnL ===`, a **lifetime** column plus a rolling
+**7-day** column), and it injects the same panel into your context as
+`additionalContext`. So the user sees the numbers immediately; you add the research
+half. Lead your first reply with both:
+
+1. **What research just landed, and what it did to the bots.** Summarize the ~5–8
+   most-recent `MEMORY.md` entries (already in context) in the house style — the exact
+   result *and* a plain-English picture — and state each one's **impact**: which bot it
+   deployed / killed / re-tuned / left record-only. (E.g. the 2026-07-20 knife
+   taker-orphan booking fix: the closed-PnL matcher priced fills at the *intended* level
+   not the *actual* one, so any taker entry that slipped >1% into the raid never booked
+   and the risk guard was blind to the loss — 28.7% of taker fills orphaned vs 3.7% for
+   maker; the picture is a till that only rings up the sales it expected. Fixed +
+   deployed; 5 knife arms pending an operator restart.)
+
+2. **Live fleet PnL, by tier**, straight from the injected snapshot:
+   - **Tier 1 — Bybit live / funded / demo-order:** realized **$ PnL + R** — real orders
+     on funded/demo seats (knife arms, LR/MM/OFCS funded, options, and the desk / retest
+     / smc demo executors). This is the money line.
+   - **Tier 2 — paper / virtual-book:** net **R** on a virtual $100k — "would this pass a
+     challenge." Dollars here are simulated and uncapped, so read them as R, not a bank
+     balance.
+   - **Tier 3 — shadow / record-only:** dimensionless **cumulative R** by design (no
+     sizing) — edge-measuring instruments, not P&L.
+
+**Read the numbers honestly.** R is net of the fee/slip toll unless the label says gross
+(e.g. `sweep-engine(gross)`). A deep-negative shadow (knife ≈ −1660R, antiknife ≈ −1290R)
+is a *confirmed-dead detector still faithfully recording*, not a bug to chase — that is
+the closure library doing its job, the black box on a plane that already landed. Keep the
+recap **quick**: a compact digest, never a wall. If the session opens with a specific
+narrow task, compress to a one-liner ("fleet nominal; knife arms still bleeding by
+design; desk/retest the only green demo seats") and get to the task.
+
+**Mechanism (for maintenance).** The scoreboard is `session_pnl_snapshot.sh` (repo root,
+gitignored → private-routed like the deploy scripts): read-only `sqlite3 -readonly` over a
+single SSH round-trip, connection from `~/.config/quant/deploy.env`, **fails CLOSED** to a
+one-line notice if the VPS is unreachable — it never writes, restarts, or blocks a session.
+Run it bare (`bash session_pnl_snapshot.sh`) for plain text by hand; the hook uses
+`--hook`, which wraps the same panel as SessionStart JSON (`systemMessage` +
+`additionalContext`). To add/rename a bot, edit the `ROWS` table in the script (one
+`kind|path|table|R-expr|$-expr|filter|7d-timestamp-col|label` line per bot; `kind` A = has
+R, B = dollars only). If the recap banner is absent (VPS down, or the hook not yet
+reloaded — a brand-new session registers it; open `/hooks` once or restart if not), run the
+script by hand or say PnL is unavailable this session.
+
 ## Connecting to the VPS (ALWAYS ON in this directory)
 
 Routine, **read-only** interaction with the live VPS is normal and expected — you do not
