@@ -43,6 +43,7 @@ ifvg_shadow/
 fib618_shadow/
 sweep_engine/
 smc_demo/
+lrr_short_demo/
 lr_shadow/
 mm_shadow/
 lr_regime_gate/
