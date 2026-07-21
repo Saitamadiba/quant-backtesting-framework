@@ -37,9 +37,9 @@ rsync -a --delete "${RX[@]}" HyroTrader Displacement \
 # full feature_lab (188 research scripts + tests + md); RX excludes the heavy
 # reports/ parquets/dbs/logs so only the code + notes are mirrored. tests/ holds the
 # top-level proprietary bot tests (knife_*, etc.) — mirrored too per CLAUDE.md.
-rsync -a --delete "${RX[@]}" feature_lab books_indicator_battery liquidity_surf desk_demo retest_demo tests "$PRIV/"
+rsync -a --delete "${RX[@]}" feature_lab books_indicator_battery liquidity_surf desk_demo retest_demo lrr_short_demo tests "$PRIV/"
 # root-level proprietary scripts (no subdir deletion semantics needed)
-cp -p replay_*.py deploy_*.sh backup-to-private.sh backup-secrets.sh "$PRIV/" 2>/dev/null || true
+cp -p replay_*.py deploy_*.sh session_pnl_snapshot.sh backup-to-private.sh backup-secrets.sh "$PRIV/" 2>/dev/null || true
 
 # SAFETY: never let a real secret env-file into the backup
 if git -C "$PRIV" status --porcelain | grep -qE '\.env$'; then
