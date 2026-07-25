@@ -8,7 +8,16 @@
 # added with --cron). Diff-guard: refuses to overwrite a VPS copy that is newer
 # or longer than local (another session's work) — reconcile first, never --force
 # as a reflex.
+#
+# Usage: ./deploy_desk_demo.sh [--dry] [--cron]
+#   --dry   run the diff-guard and STOP before uploading anything.
+#           (2026-07-25: this flag was silently ignored, so `--dry` deployed for
+#           real. On a shared VPS that is exactly the footgun the guard exists to
+#           prevent, so it is now honoured.)
 set -euo pipefail
+
+DRY=0
+for a in "$@"; do case "$a" in --dry) DRY=1;; esac; done
 
 ENVF="${HOME}/.config/quant/deploy.env"
 [ -r "$ENVF" ] || { echo "FATAL: missing $ENVF"; exit 1; }
@@ -40,6 +49,8 @@ for f in desk_demo/engine.py desk_demo/bot.py; do
     ssh_ "cp '$RDIR/$f' '$RDIR/$f.bak.$(date -u +%Y%m%dT%H%M%SZ)'"
   fi
 done
+
+[ "$DRY" = 1 ] && { echo "--dry: diff-guard passed, stopping before upload."; exit 0; }
 
 echo "== upload (sudo-free, as trader) =="
 ssh_ "mkdir -p '$RDIR/desk_demo' '$RDIR/tests' '$RDIR/logs'"
