@@ -42,6 +42,7 @@ fvg_shadow/
 ifvg_shadow/
 fib618_shadow/
 ofcs_shadow/
+ofcs_demo/
 sweep_engine/
 smc_demo/
 smc12h4h_demo/
@@ -136,8 +137,10 @@ dashboard/pine/
 
 # ── Strategy Documents (reveal strategy logic) ──────────────────────────────
 # Pre-registrations state a cell's measured edge, thresholds and kill bars —
-# the edge itself in writing. Private repo only.
+# the edge itself in writing. Runbooks name live units, paths, sub-accounts and
+# egress topology. Both are private-repo only (backup-to-private.sh mirrors them).
 *_PREREG.md
+*_RUNBOOK.md
 STRATEGY_SUMMARY.md
 BOT_MODIFICATIONS_LOG.md
 STANDALONE_SCRIPTS_SUMMARY.md
