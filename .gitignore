@@ -41,9 +41,12 @@ shadow_book/
 fvg_shadow/
 ifvg_shadow/
 fib618_shadow/
+ofcs_shadow/
 sweep_engine/
 smc_demo/
+smc12h4h_demo/
 lrr_short_demo/
+lr_wide_demo/
 lr_shadow/
 mm_shadow/
 lr_regime_gate/
@@ -56,6 +59,7 @@ flow_aux_data/
 _vps_patches/
 
 # ── Proprietary research / configs / tick data / output ──────────────────────
+research_output/
 promoted_configs/
 maker_backtest/
 ofi_study/
@@ -117,8 +121,13 @@ SBS/data/
 # ── VPS Deployment ──────────────────────────────────────────────────────────
 vps_deployment/
 *.tar.gz
+# Every deploy script names live paths, units, sub-accounts and bot internals.
+# They are mirrored to the PRIVATE repo by backup-to-private.sh; the two named
+# below predate the glob and are kept for clarity.
+deploy_*.sh
 deploy_to_vps.sh
 upload_to_vps.sh
+.*_deploy_baseline.md5
 vps_bot_update_*.tar.gz
 session_pnl_snapshot.sh
 
@@ -126,6 +135,9 @@ session_pnl_snapshot.sh
 dashboard/pine/
 
 # ── Strategy Documents (reveal strategy logic) ──────────────────────────────
+# Pre-registrations state a cell's measured edge, thresholds and kill bars —
+# the edge itself in writing. Private repo only.
+*_PREREG.md
 STRATEGY_SUMMARY.md
 BOT_MODIFICATIONS_LOG.md
 STANDALONE_SCRIPTS_SUMMARY.md

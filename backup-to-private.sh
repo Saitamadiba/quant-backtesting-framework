@@ -31,15 +31,26 @@ RX=(--exclude='*.env' --exclude='telegram.json' --exclude='*.pkl' --exclude='*.j
     --exclude='*.tar.gz' --exclude='*.tgz')
 
 cd "$SRC"
+# 2026-07-27: Liquidity_Raid_Reversal ADDED. It was untracked in the public repo
+# AND absent from this mirror, so the LRR/LR/MM detector core (core/session_sweep.py,
+# core/detector.py — the signal logic depth_logger.py and the LRR scanner both import)
+# existed ONLY in the local working tree with no backup anywhere.
 rsync -a --delete "${RX[@]}" HyroTrader Displacement \
-      Liquidity_Raid Momentum_Mastery SBS FVG_Strategy shared \
-      Vol_Edge Momentum_4H_Trend ofcs_shadow ifvg_shadow fib618_shadow smc_demo sweep_engine "$PRIV/"
+      Liquidity_Raid Liquidity_Raid_Reversal Momentum_Mastery SBS FVG_Strategy shared \
+      Vol_Edge Momentum_4H_Trend ofcs_shadow ifvg_shadow fib618_shadow smc_demo smc12h4h_demo sweep_engine "$PRIV/"
 # full feature_lab (188 research scripts + tests + md); RX excludes the heavy
 # reports/ parquets/dbs/logs so only the code + notes are mirrored. tests/ holds the
 # top-level proprietary bot tests (knife_*, etc.) — mirrored too per CLAUDE.md.
-rsync -a --delete "${RX[@]}" feature_lab books_indicator_battery liquidity_surf desk_demo retest_demo lrr_short_demo tests "$PRIV/"
+rsync -a --delete "${RX[@]}" feature_lab books_indicator_battery liquidity_surf desk_demo retest_demo lrr_short_demo lr_wide_demo tests "$PRIV/"
+# 2026-08-05: research_output/ ADDED — replay CSVs + the scripts that produced
+# them (e.g. the OFCS skipped-trade tick reconstruction). Gitignored in public,
+# and until now mirrored nowhere, so a study lived only in the working tree.
+[ -d research_output ] && rsync -a --delete "${RX[@]}" research_output "$PRIV/"
 # root-level proprietary scripts (no subdir deletion semantics needed)
 cp -p replay_*.py deploy_*.sh session_pnl_snapshot.sh backup-to-private.sh backup-secrets.sh "$PRIV/" 2>/dev/null || true
+# standing research docs: preregistrations, runbooks, specs, standards (secret-free
+# bar documents — 2026-07-28: PATTERN_GATE_PREREG etc. were previously mirrored NOWHERE)
+cp -p *_PREREG.md *_RUNBOOK.md *_SPEC.md *_STANDARD.md *_MAP.md *_PLAN.md *_DESIGN.md *_STATUS.md *_RISK.md "$PRIV/" 2>/dev/null || true
 
 # SAFETY: never let a real secret env-file into the backup
 if git -C "$PRIV" status --porcelain | grep -qE '\.env$'; then
