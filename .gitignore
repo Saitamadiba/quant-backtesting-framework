@@ -141,6 +141,11 @@ dashboard/pine/
 # egress topology. Both are private-repo only (backup-to-private.sh mirrors them).
 *_PREREG.md
 *_RUNBOOK.md
+# Live-risk standards name funded units, state-file paths and operator commands.
+# 2026-08-06: OFCS_FUNDED_LIVE_RISK.md was untracked but NOT ignored — one
+# `git add -A` from the PUBLIC repo, with the VPS host/port in four code blocks.
+# Untracked is not ignored; the pattern has to exist before the mistake does.
+*_LIVE_RISK.md
 STRATEGY_SUMMARY.md
 BOT_MODIFICATIONS_LOG.md
 STANDALONE_SCRIPTS_SUMMARY.md
