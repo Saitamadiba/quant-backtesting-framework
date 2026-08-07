@@ -41,7 +41,7 @@ rsync -a --delete "${RX[@]}" HyroTrader Displacement \
 # full feature_lab (188 research scripts + tests + md); RX excludes the heavy
 # reports/ parquets/dbs/logs so only the code + notes are mirrored. tests/ holds the
 # top-level proprietary bot tests (knife_*, etc.) — mirrored too per CLAUDE.md.
-rsync -a --delete "${RX[@]}" feature_lab books_indicator_battery liquidity_surf desk_demo retest_demo lrr_short_demo lr_wide_demo london_raid_demo tests "$PRIV/"
+rsync -a --delete "${RX[@]}" feature_lab books_indicator_battery liquidity_surf desk_demo retest_demo lrr_short_demo lr_wide_demo london_raid_demo london_raid_taker_demo tests "$PRIV/"
 # 2026-08-05: research_output/ ADDED — replay CSVs + the scripts that produced
 # them (e.g. the OFCS skipped-trade tick reconstruction). Gitignored in public,
 # and until now mirrored nowhere, so a study lived only in the working tree.
