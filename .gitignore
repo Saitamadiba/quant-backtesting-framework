@@ -47,6 +47,7 @@ sweep_engine/
 smc_demo/
 smc12h4h_demo/
 lrr_short_demo/
+london_raid_demo/
 lr_wide_demo/
 lr_shadow/
 mm_shadow/
@@ -217,3 +218,78 @@ Telegram_bots_API_tokens.txt
 
 # Local VPS data pulls (research artifacts, never commit)
 feature_lab_reports_vps_pull/
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 2026-08-07 — the "untracked ≠ ignored" sweep (108 files)
+# ══════════════════════════════════════════════════════════════════════════════
+# All of the below was untracked AND unignored: one `git add -A` from the PUBLIC
+# repo. Scanned first — none carried a key, token, chat-id or the VPS host — so
+# this is an IP-exposure fix, not a secret leak. It is proprietary strategy
+# logic, live-infra topology and research output. backup-to-private.sh mirrors
+# it to the private repo. Same lesson as OFCS_FUNDED_LIVE_RISK.md above: the
+# pattern has to exist before the mistake does.
+
+# ── Strategy packages (whole trees) ─────────────────────────────────────────
+Liquidity_Raid_Reversal/
+Momentum_4H_Trend/
+knife_prefill_indicator_scan/
+# ad-hoc research bench; nothing here is a reviewed public artifact
+scratchpad/
+
+# ── VPS infra: units, healthchecks, logrotate, tick maintenance ─────────────
+# These name hosts, systemd units and on-disk paths.
+vps_infra/
+/logrotate_trading_bots.conf
+/vps_tick_repack.py
+/vps_prune_ticks.sh
+
+# ── Operator / audit / migration shell tooling ──────────────────────────────
+/review_*.sh
+/audit_*.sh
+/phase2_*.sh
+/prep_*.sh
+/archive_*.sh
+/move_*.sh
+/backfill_*.sh
+/replay_*.sh
+# maps where every secret lives, even though it holds none itself
+/backup-secrets.sh
+
+# ── Research runners + replays (the edge, in code) ──────────────────────────
+/k1_*.py
+/k1b_*.py
+/k2_*.py
+/analyze_*.py
+/*_refit.py
+/eth_lr_*.py
+/lr_asia_*.py
+/regime_gate.py
+
+# ── Research OUTPUT (the edge, in numbers) ──────────────────────────────────
+/filter_replay_*.csv
+/filter_replay_*.md
+/reports_*.jsonl
+
+# ── Strategy / infra documents ──────────────────────────────────────────────
+# Specs, plans, data maps and risk standards state thresholds, live unit names
+# and egress topology — the same class as *_PREREG.md / *_RUNBOOK.md above.
+*_SPEC.md
+*_PLAN.md
+*_MAP.md
+*_STATUS.md
+*_STANDARD.md
+*_DESIGN.md
+DEPLOY_*.md
+
+# ── Edge-bearing files inside packages that are OTHERWISE PUBLIC ────────────
+# ⚠️ Deliberately narrow, file-by-file: smc_mtf/, fairvalue_gate/ and
+# strategy_adapters/ each already have TRACKED public siblings, so a directory
+# rule here would only pretend to close a door that is already open. Ignoring
+# these keeps NEW edge out; it does not retract what is already committed.
+# See the 2026-08-07 note in MEMORY.md — untracking the 24 published siblings
+# is a separate, deliberate decision.
+smc_mtf/tf_ladder_sweep.py
+fairvalue_gate/livebooks.py
+backtrader_framework/optimization/strategy_adapters/ifvg_sweep_adapter.py
+backtrader_framework/optimization/strategy_adapters/lr_level_sweep_adapter.py
+backtrader_framework/optimization/strategy_adapters/rsi_bb_supertrend_adapter.py

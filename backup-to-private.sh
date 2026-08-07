@@ -41,16 +41,38 @@ rsync -a --delete "${RX[@]}" HyroTrader Displacement \
 # full feature_lab (188 research scripts + tests + md); RX excludes the heavy
 # reports/ parquets/dbs/logs so only the code + notes are mirrored. tests/ holds the
 # top-level proprietary bot tests (knife_*, etc.) — mirrored too per CLAUDE.md.
-rsync -a --delete "${RX[@]}" feature_lab books_indicator_battery liquidity_surf desk_demo retest_demo lrr_short_demo lr_wide_demo tests "$PRIV/"
+rsync -a --delete "${RX[@]}" feature_lab books_indicator_battery liquidity_surf desk_demo retest_demo lrr_short_demo lr_wide_demo london_raid_demo tests "$PRIV/"
 # 2026-08-05: research_output/ ADDED — replay CSVs + the scripts that produced
 # them (e.g. the OFCS skipped-trade tick reconstruction). Gitignored in public,
 # and until now mirrored nowhere, so a study lived only in the working tree.
 [ -d research_output ] && rsync -a --delete "${RX[@]}" research_output "$PRIV/"
+# 2026-08-07: the "untracked != ignored" sweep. These 108 files were untracked in
+# the public repo AND absent from this mirror, so gitignoring them (the right fix
+# for the leak) would have left them backed up NOWHERE — the same hole the 07-27
+# Liquidity_Raid_Reversal note describes. Routing to private only counts if the
+# private copy actually exists.
+for d in knife_prefill_indicator_scan vps_infra scratchpad; do
+  [ -d "$d" ] && rsync -a --delete "${RX[@]}" "$d" "$PRIV/"
+done
 # root-level proprietary scripts (no subdir deletion semantics needed)
-cp -p replay_*.py deploy_*.sh session_pnl_snapshot.sh backup-to-private.sh backup-secrets.sh "$PRIV/" 2>/dev/null || true
+cp -p replay_*.py replay_*.sh deploy_*.sh session_pnl_snapshot.sh backup-to-private.sh backup-secrets.sh "$PRIV/" 2>/dev/null || true
+# operator / audit / migration shell tooling + VPS maintenance
+cp -p review_*.sh audit_*.sh phase2_*.sh prep_*.sh archive_*.sh move_*.sh backfill_*.sh \
+      vps_prune_ticks.sh vps_tick_repack.py logrotate_trading_bots.conf "$PRIV/" 2>/dev/null || true
+# research runners, replays and their OUTPUT (the edge, in code and in numbers)
+cp -p k1_*.py k1b_*.py k2_*.py analyze_*.py *_refit.py eth_lr_*.py lr_asia_*.py regime_gate.py \
+      filter_replay_*.csv filter_replay_*.md reports_*.jsonl "$PRIV/" 2>/dev/null || true
 # standing research docs: preregistrations, runbooks, specs, standards (secret-free
 # bar documents — 2026-07-28: PATTERN_GATE_PREREG etc. were previously mirrored NOWHERE)
-cp -p *_PREREG.md *_RUNBOOK.md *_SPEC.md *_STANDARD.md *_MAP.md *_PLAN.md *_DESIGN.md *_STATUS.md *_RISK.md "$PRIV/" 2>/dev/null || true
+cp -p *_PREREG.md *_RUNBOOK.md *_SPEC.md *_STANDARD.md *_MAP.md *_PLAN.md *_DESIGN.md *_STATUS.md *_RISK.md \
+      DEPLOY_*.md "$PRIV/" 2>/dev/null || true
+# Edge-bearing files inside packages that are OTHERWISE PUBLIC. -R keeps the path;
+# NO --delete, so the private copy never prunes a sibling it does not mirror.
+rsync -aR "${RX[@]}" smc_mtf/tf_ladder_sweep.py fairvalue_gate/livebooks.py \
+      backtrader_framework/optimization/strategy_adapters/ifvg_sweep_adapter.py \
+      backtrader_framework/optimization/strategy_adapters/lr_level_sweep_adapter.py \
+      backtrader_framework/optimization/strategy_adapters/rsi_bb_supertrend_adapter.py \
+      "$PRIV/" 2>/dev/null || true
 
 # SAFETY: never let a real secret env-file into the backup
 if git -C "$PRIV" status --porcelain | grep -qE '\.env$'; then
