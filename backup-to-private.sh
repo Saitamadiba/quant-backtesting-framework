@@ -50,6 +50,7 @@ rsync -a --delete "${RX[@]}" feature_lab books_indicator_battery liquidity_surf 
 # in the SAME change that added it here, per the 08-07 "routing to private only
 # counts if the private copy exists" rule.
 [ -d funding_carry ] && rsync -a --delete "${RX[@]}" funding_carry "$PRIV/"
+[ -d overnight_drift ] && rsync -a --delete "${RX[@]}" overnight_drift "$PRIV/"
 # 2026-08-07: the "untracked != ignored" sweep. These 108 files were untracked in
 # the public repo AND absent from this mirror, so gitignoring them (the right fix
 # for the leak) would have left them backed up NOWHERE — the same hole the 07-27
