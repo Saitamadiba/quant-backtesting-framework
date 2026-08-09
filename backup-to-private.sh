@@ -46,6 +46,10 @@ rsync -a --delete "${RX[@]}" feature_lab books_indicator_battery liquidity_surf 
 # them (e.g. the OFCS skipped-trade tick reconstruction). Gitignored in public,
 # and until now mirrored nowhere, so a study lived only in the working tree.
 [ -d research_output ] && rsync -a --delete "${RX[@]}" research_output "$PRIV/"
+# 2026-08-09: funding_carry/ — the perp funding-carry study. Gitignored in public
+# in the SAME change that added it here, per the 08-07 "routing to private only
+# counts if the private copy exists" rule.
+[ -d funding_carry ] && rsync -a --delete "${RX[@]}" funding_carry "$PRIV/"
 # 2026-08-07: the "untracked != ignored" sweep. These 108 files were untracked in
 # the public repo AND absent from this mirror, so gitignoring them (the right fix
 # for the leak) would have left them backed up NOWHERE — the same hole the 07-27
