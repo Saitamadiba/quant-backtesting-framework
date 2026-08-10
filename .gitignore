@@ -68,6 +68,8 @@ research_output/
 funding_carry/
 # 2026-08-09: overnight-drift study — same reasoning as funding_carry above.
 overnight_drift/
+# 2026-08-10: Wyckoff volume-event study — same reasoning.
+wyckoff_volume/
 promoted_configs/
 maker_backtest/
 ofi_study/
