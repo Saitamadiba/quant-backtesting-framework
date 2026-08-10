@@ -52,6 +52,7 @@ rsync -a --delete "${RX[@]}" feature_lab books_indicator_battery liquidity_surf 
 [ -d funding_carry ] && rsync -a --delete "${RX[@]}" funding_carry "$PRIV/"
 [ -d overnight_drift ] && rsync -a --delete "${RX[@]}" overnight_drift "$PRIV/"
 [ -d wyckoff_volume ] && rsync -a --delete "${RX[@]}" wyckoff_volume "$PRIV/"
+[ -d momentum_rotation ] && rsync -a --delete "${RX[@]}" momentum_rotation "$PRIV/"
 # 2026-08-07: the "untracked != ignored" sweep. These 108 files were untracked in
 # the public repo AND absent from this mirror, so gitignoring them (the right fix
 # for the leak) would have left them backed up NOWHERE — the same hole the 07-27

@@ -70,6 +70,8 @@ funding_carry/
 overnight_drift/
 # 2026-08-10: Wyckoff volume-event study — same reasoning.
 wyckoff_volume/
+# 2026-08-10: A2 momentum-rotation study — same reasoning.
+momentum_rotation/
 promoted_configs/
 maker_backtest/
 ofi_study/
