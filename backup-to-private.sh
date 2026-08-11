@@ -37,7 +37,7 @@ cd "$SRC"
 # existed ONLY in the local working tree with no backup anywhere.
 rsync -a --delete "${RX[@]}" HyroTrader Displacement \
       Liquidity_Raid Liquidity_Raid_Reversal Momentum_Mastery SBS FVG_Strategy shared \
-      Vol_Edge Momentum_4H_Trend ofcs_shadow ofcs_demo ifvg_shadow fib618_shadow smc_demo smc12h4h_demo sweep_engine "$PRIV/"
+      Vol_Edge Momentum_4H_Trend ofcs_shadow ofcs_demo ifvg_shadow fib618_shadow fomc_shadow smc_demo smc12h4h_demo funding_carry_demo sweep_engine "$PRIV/"
 # full feature_lab (188 research scripts + tests + md); RX excludes the heavy
 # reports/ parquets/dbs/logs so only the code + notes are mirrored. tests/ holds the
 # top-level proprietary bot tests (knife_*, etc.) — mirrored too per CLAUDE.md.

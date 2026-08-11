@@ -41,11 +41,13 @@ shadow_book/
 fvg_shadow/
 ifvg_shadow/
 fib618_shadow/
+fomc_shadow/
 ofcs_shadow/
 ofcs_demo/
 sweep_engine/
 smc_demo/
 smc12h4h_demo/
+funding_carry_demo/
 lrr_short_demo/
 london_raid_demo/
 london_raid_taker_demo/
