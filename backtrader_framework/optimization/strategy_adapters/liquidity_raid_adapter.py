@@ -515,8 +515,17 @@ class LiquidityRaidAdapter(StrategyAdapter):
             bar_date = et_dates_scan[rel_i]
 
             # ── Update session levels (single session) ────────────
-            # Asia: use yesterday's session if before noon ET, else today's
-            asia_date = bar_date - timedelta(days=1) if h_et < 12 else bar_date
+            # Asia: ALWAYS the previous ET date's session. Today's Asia
+            # session (19:00-23:59 ET tonight) has not happened yet at any
+            # killzone hour, and the lookup table holds FINAL session
+            # extremes — the pre-2026-08-17 rule ("today's session from
+            # noon on") handed every 12:00-15:59 ET bar tonight's levels,
+            # so an intrabar "sweep" of tonight's low certified that price
+            # rises into the evening: 74.8% of a deep-sweep WFO book rode
+            # that oracle at +1.42R while the causal cohort sat at the
+            # driftless null. Live parity: the bot's state machine at those
+            # hours holds yesterday's completed session, exactly this rule.
+            asia_date = bar_date - timedelta(days=1)
             if asia_date != last_asia_date:
                 sess = asia_sess.get(asia_date)
                 if sess is not None:

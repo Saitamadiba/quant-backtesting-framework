@@ -398,12 +398,24 @@ class IndicatorEngine:
             return np.zeros(n, dtype=np.float32), np.zeros(n, dtype=np.float32)
 
         # Build per-bar arrays of last 3 swing high/low values via ffill.
-        # At each swing point, record its value; then forward-fill.
-        def _last_k_ffill(indices, values, n_bars, k=3):
-            """For each bar, produce the last k values via forward-fill."""
+        # A swing found by a 7-bar CENTERED window at bar i is only CONFIRMED
+        # once bars i+1..i+3 exist, so it must become visible at i+3, not i.
+        # Stamping at i (the pre-2026-08-17 behavior) leaked up to 3 future
+        # bars into StructureBias — maximally at sweep/raid bars, where "the
+        # next 3 bars made no lower low" is the very reversal a level
+        # strategy is trying to predict.
+        def _last_k_ffill(indices, values, n_bars, k=3, confirm_lag=3):
+            """For each bar, produce the last k CONFIRMED values via ffill.
+
+            A swing whose confirmation bar lies beyond the data is NOT
+            stamped at all — capping it to the last bar would leak an
+            unconfirmed swing at the live edge.
+            """
             arrays = [np.full(n_bars, np.nan) for _ in range(k)]
             for j in range(k, len(indices)):
-                idx = indices[j]
+                idx = indices[j] + confirm_lag
+                if idx >= n_bars:
+                    continue
                 for offset in range(k):
                     arrays[offset][idx] = values[j - (k - 1 - offset)]
             # Forward-fill each array

@@ -218,7 +218,11 @@ def attach_dvol(df_15m: pd.DataFrame, symbol: str,
              .astype("datetime64[s]").astype("int64").to_numpy())
     dv_s = (dv["date"].dt.tz_convert("UTC").dt.tz_localize(None)
             .astype("datetime64[s]").astype("int64").to_numpy())
-    idx = np.searchsorted(dv_s, bar_s, side="right") - 1
+    # DVOL rows are daily values stamped at 00:00 of their OWN day; joining
+    # "row date <= bar time" hands an intraday bar that day's end-of-day
+    # value. Lag the join one day so a bar only sees completed days
+    # (2026-08-17 look-ahead fix).
+    idx = np.searchsorted(dv_s, bar_s - 86400, side="right") - 1
     out["DVOL"] = np.where(idx >= 0,
                            dv["dvol"].to_numpy()[np.clip(idx, 0, None)],
                            np.nan)
@@ -314,12 +318,17 @@ def tag_signals(signals: Iterable[Any], df: pd.DataFrame, symbol: str,
                      in (1, "LONG", "BUY") else "SHORT")
         bar_date = ets.normalize()
         try:
-            r0 = daily_mtf.loc[daily_mtf.index <= bar_date].iloc[-1]
+            # STRICT '<': the daily row labeled `bar_date` holds that day's
+            # FINAL close — reading it intraday is look-ahead (2026-08-17 fix).
+            r0 = daily_mtf.loc[daily_mtf.index < bar_date].iloc[-1]
             d_bias, d_strength = r0["bias"], float(r0["strength"])
         except (IndexError, KeyError):
             d_bias, d_strength = "NEUTRAL", 0.0
         try:
-            r1 = h4_struct.loc[h4_struct.index <= ets].iloc[-1]
+            # A 4h bin labeled T covers [T, T+4h); only bins with
+            # T <= ets - 4h are CLOSED at ets (2026-08-17 look-ahead fix).
+            r1 = h4_struct.loc[
+                h4_struct.index <= ets - pd.Timedelta(hours=4)].iloc[-1]
             h4_v, h4_s = str(r1["h4_structure"]), float(r1["h4_strength"])
         except (IndexError, KeyError):
             h4_v, h4_s = "MIXED", 0.0
@@ -490,12 +499,16 @@ class FaithfulLiquidityRaidAdapter:
             # MTF score filter.
             bar_date = ets.normalize()
             try:
-                r0 = daily_mtf.loc[daily_mtf.index <= bar_date].iloc[-1]
+                # STRICT '<': today's daily row holds today's FINAL close —
+                # reading it intraday is look-ahead (2026-08-17 fix).
+                r0 = daily_mtf.loc[daily_mtf.index < bar_date].iloc[-1]
                 d_bias, d_strength = r0["bias"], float(r0["strength"])
             except (IndexError, KeyError):
                 d_bias, d_strength = "NEUTRAL", 0.0
             try:
-                r1 = h4_struct.loc[h4_struct.index <= ets].iloc[-1]
+                # Only 4h bins CLOSED at ets (label T covers [T, T+4h)).
+                r1 = h4_struct.loc[
+                    h4_struct.index <= ets - pd.Timedelta(hours=4)].iloc[-1]
                 h4_v, h4_s = str(r1["h4_structure"]), float(r1["h4_strength"])
             except (IndexError, KeyError):
                 h4_v, h4_s = "MIXED", 0.0
