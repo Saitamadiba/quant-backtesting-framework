@@ -281,6 +281,23 @@ class TradeSimulator:
         trail_atr_mult = meta.get('trail_atr_mult_long' if is_long else 'trail_atr_mult_short', 0)
         trail_step_atr = meta.get('trail_step_atr_long' if is_long else 'trail_step_atr_short', 0)
 
+        # MIN_TRAIL_LOCK_R floor and TRAIL_HEADROOM_FRAC cap. These were added to
+        # _simulate_v2_kernel and wired up in wfo_engine.TradeSimulator, but NOT
+        # here — this class is a separate, parallel TradeSimulator (see the
+        # two-pipelines note below), so the positional call below was two
+        # arguments short and simulate_v2() raised TypeError on EVERY call.
+        # 0.0 disables both, which is the framework default and reproduces the
+        # behaviour this method had before the parameters existed.
+        # Both key spellings are accepted: this class reads unprefixed metadata
+        # keys for its other v2 params, while the engine injects `v2_`-prefixed
+        # ones.
+        min_trail_lock_r = float(
+            meta.get('v2_min_trail_lock_r', meta.get('min_trail_lock_r', 0.0))
+        )
+        trail_headroom_frac = float(
+            meta.get('v2_trail_headroom_frac', meta.get('trail_headroom_frac', 0.0))
+        )
+
         # ── Numba fast path ─────────────────────────────────
         if HAS_NUMBA:
             has_atrs = atrs is not None
@@ -293,6 +310,7 @@ class TradeSimulator:
                 int(buffer_bars), float(buffer_mult), float(be_trigger_r),
                 float(be_buffer_pct), int(time_exit_bars),
                 float(trail_atr_mult), float(trail_step_atr),
+                min_trail_lock_r, trail_headroom_frac,
                 highs, lows, closes, atrs_arr, has_atrs, n,
             )
             outcome_code, exit_px, bars_held, mfe, mae, raw_r, total_cost, final_sl = result

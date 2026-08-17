@@ -164,6 +164,9 @@ class TestSimulateV2:
             buffer_bars=3, buffer_mult=1.5,
             be_trigger_r=1.0, be_buffer_pct=0.001,
             time_exit_bars=100, trail_atr_mult=2.0, trail_step_atr=0.5,
+            # 0.0 disables both -> the framework default and the behaviour
+            # these assertions were written against.
+            min_trail_lock_r=0.0, trail_headroom_frac=0.0,
             highs=highs, lows=lows, closes=closes, atrs=atrs,
             has_atrs=True, n=len(highs),
         )
@@ -198,6 +201,7 @@ class TestSimulateV2:
             buffer_bars=0, buffer_mult=1.0,
             be_trigger_r=100.0, be_buffer_pct=0.0,
             time_exit_bars=5, trail_atr_mult=0.0, trail_step_atr=0.0,
+            min_trail_lock_r=0.0, trail_headroom_frac=0.0,
             highs=highs, lows=lows, closes=closes, atrs=atrs,
             has_atrs=True, n=len(highs),
         )
@@ -407,3 +411,93 @@ class TestNumbaAvailability:
     def test_outcome_strings_complete(self):
         for code in range(8):
             assert code in OUTCOME_STRINGS
+
+
+# ═════════════════════════════════════════════════════════════
+#  V2 simulator — PUBLIC API
+#
+#  The tests above call _simulate_v2_kernel directly. Nothing exercised
+#  TradeSimulator.simulate_v2(), which is how a two-argument-short positional
+#  call to that kernel sat in simulator.py raising TypeError on every
+#  invocation while the kernel's own tests looked like the only problem.
+#  A kernel test cannot catch a broken caller.
+# ═════════════════════════════════════════════════════════════
+
+class TestSimulateV2PublicAPI:
+    @staticmethod
+    def _frame_and_signal(**meta):
+        import pandas as pd
+        from backtrader_framework.optimization.simulator import TransactionCosts
+
+        highs, lows, closes, atrs = _make_price_data(300, seed=7)
+        df = pd.DataFrame(
+            {"High": highs, "Low": lows, "Close": closes, "ATR": atrs},
+            index=pd.date_range("2024-01-01", periods=len(highs), freq="15min",
+                                tz="UTC"),
+        )
+        signal = {
+            "idx": 10,
+            "time": df.index[10],
+            "direction": "LONG",
+            "entry_price": float(closes[10]),
+            "stop_loss": float(closes[10]) * 0.99,
+            "take_profit_1": float(closes[10]) * 1.02,
+            "risk": float(closes[10]) * 0.01,
+            "confidence": 0.6,
+            "bias": "WITH",
+            "metadata": dict(meta),
+        }
+        return df, signal, TransactionCosts(spread_pct=0.0005,
+                                           commission_pct=0.001,
+                                           slippage_pct=0.0003)
+
+    def test_simulate_v2_runs_without_raising(self):
+        """The regression guard: this method used to raise TypeError always."""
+        from backtrader_framework.optimization.simulator import TradeSimulator
+
+        df, signal, costs = self._frame_and_signal()
+        result = TradeSimulator.simulate_v2(signal, df, costs, max_bars=100)
+        assert result is not None
+        assert result.outcome in OUTCOME_STRINGS.values()
+        assert np.isfinite(result.r_multiple)
+        assert np.isfinite(result.r_multiple_after_costs)
+        assert result.r_multiple_after_costs <= result.r_multiple
+
+    @pytest.mark.parametrize("lock_key,head_key", [
+        ("v2_min_trail_lock_r", "v2_trail_headroom_frac"),   # engine-injected
+        ("min_trail_lock_r", "trail_headroom_frac"),         # unprefixed
+    ])
+    def test_both_metadata_key_spellings_are_accepted(self, lock_key, head_key):
+        """The engine injects v2_-prefixed keys; this class uses unprefixed ones
+        for its other v2 params. Both must reach the kernel."""
+        from backtrader_framework.optimization.simulator import TradeSimulator
+
+        df, signal, costs = self._frame_and_signal(
+            **{lock_key: 0.3, head_key: 0.5,
+               "trail_atr_mult_long": 2.0, "trail_step_atr_long": 0.5}
+        )
+        result = TradeSimulator.simulate_v2(signal, df, costs, max_bars=200)
+        assert result is not None
+        assert result.outcome in OUTCOME_STRINGS.values()
+
+    def test_trail_lock_floor_never_worsens_a_trailed_exit(self):
+        """MIN_TRAIL_LOCK_R is a floor under the trailing stop, so enabling it
+        must not produce a worse exit than leaving it off."""
+        from backtrader_framework.optimization.simulator import TradeSimulator
+
+        common = {"trail_atr_mult_long": 1.5, "trail_step_atr_long": 0.25}
+        df, sig_off, costs = self._frame_and_signal(**common)
+        _, sig_on, _ = self._frame_and_signal(min_trail_lock_r=0.5, **common)
+
+        off = TradeSimulator.simulate_v2(sig_off, df, costs, max_bars=250)
+        on = TradeSimulator.simulate_v2(sig_on, df, costs, max_bars=250)
+        assert off is not None and on is not None
+        if off.outcome == "win_trail" and on.outcome == "win_trail":
+            assert on.r_multiple >= off.r_multiple - 1e-9
+
+    def test_zero_risk_signal_is_rejected(self):
+        from backtrader_framework.optimization.simulator import TradeSimulator
+
+        df, signal, costs = self._frame_and_signal()
+        signal["risk"] = 0.0
+        assert TradeSimulator.simulate_v2(signal, df, costs) is None

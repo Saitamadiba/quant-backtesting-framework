@@ -75,13 +75,23 @@ def deflated_sharpe_ratio(
 
     # Deflated Sharpe = PSR tested against the deflated benchmark E[max SR].
     test_stat = (observed_sr - e_max_sr) / sr_std
-    p_value = 1.0 - stats.norm.cdf(test_stat)
+
+    # Use the survival function, NOT 1 - cdf. For test_stat above ~8.2 the cdf
+    # rounds to exactly 1.0 in float64, so `1 - cdf` collapses to 0.0 through
+    # catastrophic cancellation (at test_stat=17.7 it returns 0.0 where the true
+    # value is 2.1e-70). sf() is evaluated in the tail directly and stays exact.
+    p_value = float(stats.norm.sf(test_stat))
 
     return {
         'deflated_sr': round(test_stat, 4),
         'expected_max_sr': round(e_max_sr, 4),
-        'p_value': round(p_value, 4),
-        'is_significant': p_value < 0.05,
+        # NOT rounded. round(p, 4) flattened every p-value below 5e-5 to exactly
+        # 0.0, which destroyed all ordering information in the tail — two results
+        # 30 orders of magnitude apart both reported 0.0, and comparisons between
+        # them silently evaluated False while `is_significant` still read True.
+        # Callers wanting a display value should format at the point of display.
+        'p_value': p_value,
+        'is_significant': bool(p_value < 0.05),
         'sr_std': round(sr_std, 4),
     }
 
@@ -226,7 +236,9 @@ def minimum_backtest_length(
     This prevents drawing conclusions from backtests that are too short.
 
     Args:
-        observed_sr: Annualized Sharpe ratio
+        observed_sr: Sharpe ratio **at the same frequency as the returns being
+            counted** — the same convention `deflated_sharpe_ratio` uses. For an
+            annualized SR with daily returns, pass ``sr_annual / sqrt(252)``.
         num_trials: Number of strategies/parameter sets tested
         confidence: Confidence level (default 0.95)
         skewness: Return distribution skewness
@@ -240,18 +252,29 @@ def minimum_backtest_length(
 
     z_score = stats.norm.ppf(confidence)
 
-    # Expected max SR from multiple testing
+    # Expected maximum of `num_trials` standard normals, in STANDARD-NORMAL
+    # UNITS. It only becomes an SR once multiplied by sr_std — the same scaling
+    # bug that was fixed in deflated_sharpe_ratio above and left unfixed here.
+    # Comparing this directly against a Sharpe made `sr_diff` negative for every
+    # realistic input, so the function returned the 99999 "need infinite data"
+    # sentinel unconditionally: SR=1.0 gave 99999 at 5, 100 and 1000 trials.
     log_n = np.log(num_trials)
-    e_max_sr = np.sqrt(2 * log_n) - (np.log(np.pi) + np.log(log_n)) / (2 * np.sqrt(2 * log_n))
+    expected_max_z = (np.sqrt(2 * log_n)
+                      - (np.log(np.pi) + np.log(log_n)) / (2 * np.sqrt(2 * log_n)))
 
-    # Solve for n: (SR - E[max(SR)]) / sqrt(Var(SR)) >= z
-    # Where Var(SR) ≈ (1 + 0.5*SR^2 + ...) / (n-1)
     excess_kurt = kurtosis - 3.0
-    numerator_factor = 1.0 + 0.5 * observed_sr**2 - skewness * observed_sr + excess_kurt / 4.0 * observed_sr**2
+    sr_var_factor = (1.0 + 0.5 * observed_sr**2 - skewness * observed_sr +
+                     excess_kurt / 4.0 * observed_sr**2)
 
-    sr_diff = observed_sr - e_max_sr
-    if sr_diff <= 0:
-        return 99999  # SR doesn't exceed expected max; need infinite data
-
-    min_n = int(np.ceil(z_score**2 * numerator_factor / sr_diff**2)) + 1
+    # Because E[max SR] itself scales with sr_std, the requirement
+    #     (SR - sr_std * E_z) / sr_std >= z
+    # is linear in 1/sr_std and solves in closed form:
+    #     SR / sr_std >= z + E_z
+    #     sqrt(V / (n - 1)) <= SR / (z + E_z)
+    #     n >= 1 + V * (z + E_z)^2 / SR^2
+    # There is no "infinite data" branch: any positive SR becomes significant
+    # given enough observations, and more trials raise the bar monotonically via
+    # E_z, which is what the multiple-testing correction is supposed to express.
+    denom = observed_sr ** 2
+    min_n = int(np.ceil(1.0 + sr_var_factor * (z_score + expected_max_z) ** 2 / denom))
     return max(min_n, 30)  # minimum 30 observations
