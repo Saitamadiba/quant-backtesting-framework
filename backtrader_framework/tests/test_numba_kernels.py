@@ -590,3 +590,106 @@ class TestKernelWiring:
         }
         with pytest.raises(RuntimeError, match="Refusing to fall back"):
             sim.TradeSimulator.simulate_v2(signal, df, sim.TransactionCosts())
+
+
+class TestTpTargetKnob:
+    """simulate_v2's raced target is now explicit rather than hardcoded.
+
+    The two TradeSimulator classes disagreed on whether the trailing stop races
+    TP1 or TP2, which was most of why they returned different results for the
+    same signal. Making it an argument turns that accident into a measurable
+    choice.
+    """
+
+    @staticmethod
+    def _case(tp1_mult, tp2_mult):
+        import pandas as pd
+        from backtrader_framework.optimization.simulator import TransactionCosts
+        highs, lows, closes, atrs = _make_price_data(400, seed=21)
+        df = pd.DataFrame(
+            {"High": highs, "Low": lows, "Close": closes, "ATR": atrs},
+            index=pd.date_range("2024-01-01", periods=len(highs), freq="15min",
+                                tz="UTC"),
+        )
+        px = float(closes[10])
+        sig = {
+            "idx": 10, "time": df.index[10], "direction": "LONG",
+            "entry_price": px, "stop_loss": px * 0.99,
+            "take_profit_1": px * tp1_mult, "take_profit_2": px * tp2_mult,
+            "risk": px * 0.01, "metadata": {},
+        }
+        return sig, df, TransactionCosts(spread_pct=0.0005, commission_pct=0.001,
+                                        slippage_pct=0.0003)
+
+    def test_default_is_tp1(self):
+        from backtrader_framework.optimization.simulator import TradeSimulator
+        sig, df, costs = self._case(1.01, 1.05)
+        default = TradeSimulator.simulate_v2(sig, df, costs, 300)
+        explicit = TradeSimulator.simulate_v2(sig, df, costs, 300, tp_target="tp1")
+        assert default.outcome == explicit.outcome
+        assert default.r_multiple == pytest.approx(explicit.r_multiple)
+
+    def test_target_choice_changes_the_raced_level(self):
+        """A near TP1 with an unreachable TP2 must produce different exits.
+
+        Deterministic bars, with breakeven and trailing neutralised. This has to
+        be constructed: on ordinary paths the trail exits first and the target
+        never binds at all (measured: ~84% of trades are unaffected by the
+        choice), so a random fixture tests nothing.
+        """
+        import pandas as pd
+        from backtrader_framework.optimization.simulator import (
+            TradeSimulator, TransactionCosts)
+
+        #        entry  drift   TP1 hit   back to stop
+        highs = [100.0, 100.5, 101.5,    101.0]
+        lows  = [100.0, 100.0, 100.5,     98.5]
+        df = pd.DataFrame(
+            {"High": highs, "Low": lows,
+             "Close": [100.0, 100.4, 101.2, 98.8], "ATR": [1.0] * 4},
+            index=pd.date_range("2024-01-01", periods=4, freq="15min", tz="UTC"),
+        )
+        sig = {
+            "idx": 0, "time": df.index[0], "direction": "LONG",
+            "entry_price": 100.0, "stop_loss": 99.0,
+            "take_profit_1": 101.0,      # reached on bar 2
+            "take_profit_2": 108.0,      # never reached
+            "risk": 1.0,
+            "metadata": {"breakeven_trigger_r": 999.0, "trail_atr_mult_long": 0.0,
+                         "initial_buffer_bars": 0, "time_exit_bars": 0},
+        }
+        costs = TransactionCosts(spread_pct=0.0, commission_pct=0.0, slippage_pct=0.0)
+
+        a = TradeSimulator.simulate_v2(dict(sig), df, costs, 10, tp_target="tp1")
+        b = TradeSimulator.simulate_v2(dict(sig), df, costs, 10, tp_target="tp2")
+        assert a.outcome != b.outcome, (a.outcome, b.outcome)
+        assert a.r_multiple > b.r_multiple          # TP1 banked; TP2 arm gave it back
+        assert a.r_multiple > 0 > b.r_multiple
+
+    def test_reported_levels_are_the_signals_own_not_the_raced_one(self):
+        """TradeResult must carry the signal's TP1/TP2, not the selected target.
+
+        Both fields used to be collapsed onto the raced level, which erased the
+        signal's actual geometry from the result.
+        """
+        from backtrader_framework.optimization.simulator import TradeSimulator
+        sig, df, costs = self._case(1.01, 1.08)
+        for target in ("tp1", "tp2"):
+            r = TradeSimulator.simulate_v2(sig, df, costs, 300, tp_target=target)
+            assert r.take_profit_1 == pytest.approx(sig["take_profit_1"])
+            assert r.take_profit_2 == pytest.approx(sig["take_profit_2"])
+
+    def test_missing_tp2_falls_back_to_tp1(self):
+        from backtrader_framework.optimization.simulator import TradeSimulator
+        sig, df, costs = self._case(1.02, 1.02)
+        del sig["take_profit_2"]
+        a = TradeSimulator.simulate_v2(sig, df, costs, 300, tp_target="tp2")
+        b = TradeSimulator.simulate_v2(sig, df, costs, 300, tp_target="tp1")
+        assert a.r_multiple == pytest.approx(b.r_multiple)
+
+    @pytest.mark.parametrize("bad", ["TP1", "tp3", "", None, 1])
+    def test_invalid_target_fails_closed(self, bad):
+        from backtrader_framework.optimization.simulator import TradeSimulator
+        sig, df, costs = self._case(1.01, 1.05)
+        with pytest.raises(ValueError, match="tp_target"):
+            TradeSimulator.simulate_v2(sig, df, costs, 300, tp_target=bad)

@@ -243,6 +243,7 @@ class TradeSimulator:
         is_oos: bool = True, regime: str = 'unknown',
         _highs: np.ndarray = None, _lows: np.ndarray = None,
         _closes: np.ndarray = None, _atrs: np.ndarray = None,
+        tp_target: str = 'tp1',
     ) -> Optional[TradeResult]:
         """V2 simulator replicating the live bot's execution logic.
 
@@ -253,12 +254,27 @@ class TradeSimulator:
         - Time-based exit (close if not in profit after N bars)
 
         All new parameters are read from signal['metadata'].
+
+        tp_target : which level the kernel races the trailing stop against.
+            ``'tp1'`` (default, this class's historical behaviour) or ``'tp2'``
+            (what wfo_engine.TradeSimulator uses, on the reasoning that the live
+            bot's trail-vs-target race runs against the FINAL target).
+
+            This was previously hardcoded differently in the two TradeSimulator
+            classes, which is most of why they returned different results for the
+            same signal. Making it an explicit argument turns an accidental
+            divergence into a measurable choice; it does not decide which is
+            right. Default preserves this class's behaviour exactly.
         """
+        if tp_target not in ('tp1', 'tp2'):
+            raise ValueError(f"tp_target must be 'tp1' or 'tp2', got {tp_target!r}")
         idx = signal['idx']
         direction = signal['direction']
         entry_price = signal['entry_price']
         stop_loss = signal['stop_loss']
-        tp = signal['take_profit_1']
+        tp1 = signal['take_profit_1']
+        tp2 = signal.get('take_profit_2') or tp1
+        tp = tp1 if tp_target == 'tp1' else tp2
         risk = signal['risk']
 
         n = len(df)
@@ -348,8 +364,11 @@ class TradeSimulator:
             entry_price=entry_price,
             exit_price=exit_px,
             stop_loss=final_sl,
-            take_profit_1=tp,
-            take_profit_2=tp,
+            # Report the signal's own levels, not the one handed to the kernel —
+            # `tp` is the raced target selected by tp_target, and collapsing both
+            # fields onto it loses the signal's actual TP1/TP2 geometry.
+            take_profit_1=tp1,
+            take_profit_2=tp2,
             outcome=OUTCOME_STRINGS[int(outcome_code)],
             r_multiple=raw_r,
             r_multiple_after_costs=raw_r - total_cost,
