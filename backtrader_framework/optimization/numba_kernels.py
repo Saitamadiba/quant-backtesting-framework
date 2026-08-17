@@ -388,9 +388,19 @@ def _simulate_v2_kernel(
 
                         # MIN_TRAIL_LOCK_R cost-coverage floor (post-mortem
                         # trade #115).  Trail SL ≥ entry + min_lock × risk.
+                        #
+                        # Gated on the excursion HAVING REACHED the lock level.
+                        # Applied unconditionally it placed the stop above where
+                        # price had been — an exit at a level the market never
+                        # traded. Measured on 709 MM 15m signals with lock=1.0R
+                        # against a 0.5R breakeven trigger: 32.2% of trades booked
+                        # exactly +1.0R while their MFE was below 1.0R, worth
+                        # +0.3095R of a +0.3471R mean, and it cleared a
+                        # family-wise permutation bar at p=0.0002 (t +12.47).
+                        # A lock can only claim an excursion that happened.
                         if min_trail_lock_r > 0.0:
                             min_lock_sl = effective_entry + min_trail_lock_r * risk
-                            if min_lock_sl > trail_level:
+                            if high_water >= min_lock_sl and min_lock_sl > trail_level:
                                 trail_level = min_lock_sl
 
                         if trail_level > stop_loss:
@@ -414,10 +424,11 @@ def _simulate_v2_kernel(
                                 if capped_level < trail_level:
                                     trail_level = capped_level
 
-                        # MIN_TRAIL_LOCK_R floor (short).
+                        # MIN_TRAIL_LOCK_R floor (short). Mirror of the long-side
+                        # gate above: only lock a level the excursion reached.
                         if min_trail_lock_r > 0.0:
                             min_lock_sl = effective_entry - min_trail_lock_r * risk
-                            if min_lock_sl < trail_level:
+                            if low_water <= min_lock_sl and min_lock_sl < trail_level:
                                 trail_level = min_lock_sl
 
                         if trail_level < stop_loss:

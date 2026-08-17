@@ -55,6 +55,28 @@ def signed_permutation_maxt(
     correlation that makes the family-wise correction meaningful; cells of
     differing length are flipped independently.
 
+    LIMITATION — this null assumes observations are EXCHANGEABLE. It sign-flips
+    per observation and scores cells with an unclustered t, so where outcomes are
+    clustered (same-day bursts, overlapping positions) the bar it produces is too
+    PERMISSIVE. Measured on a real 14-arm trail-configuration scan: one arm scored
+    an unclustered t of +3.16 and p_FWER 0.0042 here, but its day-clustered t was
+    only +2.27 and a day-BLOCK permutation (flip the sign of a whole day at a
+    time, preserving within-day dependence) put it at p_FWER 0.083 — from
+    "clears" to "does not clear".
+
+    So: use this for genuinely independent observations. When outcomes are
+    clustered, build the null by permuting at the CLUSTER level and score each
+    cell with :func:`~.clustering.clustered_tstat`. Pattern:
+
+    >>> udays = pd.unique(days)
+    >>> for _ in range(n_perm):                     # doctest: +SKIP
+    ...     flip = np.ones(len(days))
+    ...     for d in udays:
+    ...         if rng.random() < 0.5:
+    ...             flip[days == d] = -1.0
+    ...     null_max.append(max(clustered_tstat(c * flip, days)["t_clustered"]
+    ...                         for c in cells))
+
     Parameters
     ----------
     cells : one array of per-observation values (e.g. R-multiples) per grid cell.

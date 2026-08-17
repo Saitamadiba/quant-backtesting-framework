@@ -693,3 +693,95 @@ class TestTpTargetKnob:
         sig, df, costs = self._case(1.01, 1.05)
         with pytest.raises(ValueError, match="tp_target"):
             TradeSimulator.simulate_v2(sig, df, costs, 300, tp_target=bad)
+
+
+class TestNoUnreachableFills:
+    """A trade can never book more R than its maximum favourable excursion.
+
+    Booking beyond MFE means exiting at a price the market never traded. The
+    MIN_TRAIL_LOCK_R floor used to violate this: applied unconditionally, it
+    placed the stop at entry + lock*risk even when price had not reached that
+    level. With lock=1.0R against a 0.5R breakeven trigger, 32.2% of 709 real
+    MM 15m trades booked exactly +1.0R on an MFE below 1.0R — and the resulting
+    "+0.28R edge" cleared a 13-arm family-wise permutation bar at p=0.0002.
+    """
+
+    @staticmethod
+    def _grid():
+        import pandas as pd
+        from backtrader_framework.optimization.simulator import TransactionCosts
+        highs, lows, closes, atrs = _make_price_data(600, seed=77)
+        df = pd.DataFrame(
+            {"High": highs, "Low": lows, "Close": closes, "ATR": atrs},
+            index=pd.date_range("2024-01-01", periods=len(highs), freq="15min",
+                                tz="UTC"),
+        )
+        return df, TransactionCosts(spread_pct=0.0005, commission_pct=0.001,
+                                   slippage_pct=0.0003)
+
+    @pytest.mark.parametrize("lock", [0.0, 0.5, 1.0, 2.0, 5.0])
+    @pytest.mark.parametrize("direction", ["LONG", "SHORT"])
+    def test_r_never_exceeds_mfe(self, lock, direction):
+        from backtrader_framework.optimization.simulator import TradeSimulator
+
+        df, costs = self._grid()
+        long = direction == "LONG"
+        violations = []
+        for idx in range(20, 400, 7):
+            px = float(df["Close"].iloc[idx])
+            sig = {
+                "idx": idx, "time": df.index[idx], "direction": direction,
+                "entry_price": px,
+                "stop_loss": px * (0.99 if long else 1.01),
+                "take_profit_1": px * (1.03 if long else 0.97),
+                "take_profit_2": px * (1.06 if long else 0.94),
+                "risk": px * 0.01,
+                "metadata": {
+                    "breakeven_trigger_r": 0.5, "breakeven_buffer_pct": 0.001,
+                    "initial_buffer_bars": 0, "time_exit_bars": 0,
+                    "trail_atr_mult_long": 2.5, "trail_atr_mult_short": 3.0,
+                    "trail_step_atr_long": 0.5, "trail_step_atr_short": 0.75,
+                    "min_trail_lock_r": lock,
+                },
+            }
+            tr = TradeSimulator.simulate_v2(sig, df, costs, 400)
+            if tr is None:
+                continue
+            if tr.r_multiple > tr.mfe + 1e-9:
+                violations.append(
+                    f"idx={idx} r={tr.r_multiple:.4f} > mfe={tr.mfe:.4f} "
+                    f"({tr.outcome})")
+        assert not violations, (
+            f"unreachable fills at lock={lock} {direction}:\n  "
+            + "\n  ".join(violations[:6])
+        )
+
+    def test_lock_above_the_achieved_excursion_is_not_applied(self):
+        """Deterministic: price reaches +0.6R, lock asks for +2R -> must not book it."""
+        import pandas as pd
+        from backtrader_framework.optimization.simulator import (
+            TradeSimulator, TransactionCosts)
+
+        #      entry   +0.6R peak   back through the original stop
+        highs = [100.0, 100.6, 100.4, 100.2]
+        lows = [100.0, 100.0, 99.5, 98.5]
+        df = pd.DataFrame(
+            {"High": highs, "Low": lows, "Close": [100.0, 100.5, 99.8, 98.7],
+             "ATR": [0.2] * 4},
+            index=pd.date_range("2024-01-01", periods=4, freq="15min", tz="UTC"),
+        )
+        sig = {
+            "idx": 0, "time": df.index[0], "direction": "LONG",
+            "entry_price": 100.0, "stop_loss": 99.0,
+            "take_profit_1": 105.0, "take_profit_2": 110.0, "risk": 1.0,
+            "metadata": {"breakeven_trigger_r": 0.5, "breakeven_buffer_pct": 0.0,
+                         "initial_buffer_bars": 0, "time_exit_bars": 0,
+                         "trail_atr_mult_long": 0.0, "trail_step_atr_long": 0.0,
+                         "min_trail_lock_r": 2.0},
+        }
+        costs = TransactionCosts(spread_pct=0.0, commission_pct=0.0, slippage_pct=0.0)
+        tr = TradeSimulator.simulate_v2(sig, df, costs, 10)
+        assert tr is not None
+        assert tr.mfe < 1.0, f"fixture drifted: mfe={tr.mfe}"
+        assert tr.r_multiple <= tr.mfe + 1e-9, (
+            f"booked r={tr.r_multiple} on mfe={tr.mfe} — unreachable")
