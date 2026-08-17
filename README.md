@@ -12,6 +12,13 @@ verdict trustworthy.
 > guide to **47 documented research traps**, drawn from roughly sixty
 > investigations, the large majority of which refuted their own hypothesis. It is
 > the most honest summary of how this framework is actually used.
+>
+> **Then run it:** `python docs/examples/validation_demo.py` puts three synthetic
+> candidates through the real battery in
+> [`backtrader_framework/validation/`](backtrader_framework/validation/) — one
+> with no edge, one that is **profitable but still not an edge**, and one with a
+> genuine conditional effect. The harness kills the first two and passes the
+> third. No private data, fully reproducible, 30 tests.
 
 ---
 
@@ -51,10 +58,16 @@ several name tags.
 
 **Direct controls, not just p-value corrections.** The habit that killed the most
 candidates: build the cheapest control that takes the same shape of risk at the
-same times *without* the signal. Random-bar brackets, highest-volatility
-substitutes, placebo event grids, mirrored brackets, drawdown-matched
-counterfactuals. Details and case studies in the
-[method guide](docs/RESEARCH_METHOD.md#2-controls-the-cheapest-thing-that-mimics-the-trade-without-the-signal).
+same times *without* the signal. Implemented in
+[`validation/controls.py`](backtrader_framework/validation/controls.py) —
+random-bar brackets, mirrored brackets (first-passage geometry), drawdown-matched
+counterfactuals, and placebo event schedules.
+
+The demo makes the point concretely: a book on a drifting path shows positive
+gross, covers its costs, reaches a clustered t above 3, and holds in both halves
+— and is still not an edge, because random entries on the same path earn the
+same. Four gates pass it; only the random-bar control catches it. Case studies in
+the [method guide](docs/RESEARCH_METHOD.md#2-controls-the-cheapest-thing-that-mimics-the-trade-without-the-signal).
 
 **Cost decomposition before any verdict.** Gross-versus-toll is separated on
 every candidate. An entry must earn gross above the execution toll or better
@@ -100,16 +113,32 @@ the bots run as and the administrative account.
 ## Repository layout
 
 ```
-backtrader_framework/     # engine, WFO, optimization, statistics, data layer
-  optimization/           # PBO, CPCV, permutation bars, Monte Carlo, SHAP,
+backtrader_framework/
+  validation/             # the harness: direct controls, cost decomposition,
+                          # clustered inference, multiplicity  (strategy-free)
+  optimization/           # WFO engine, PBO, CPCV, Monte Carlo, SHAP,
                           # regime models, portfolio optimizer, Numba kernels
-  optimization/
     strategy_adapters/    # live-faithful adapters (interfaces public,
                           # signal logic private)
+  data/                   # DuckDB/SQLite layer, indicators
+  tests/
 dashboard/                # Streamlit analytics, trade monitoring, reporting
 quant_skills/             # reusable research utilities
 docs/RESEARCH_METHOD.md   # the 47-trap method guide
+docs/examples/            # runnable validation demo
 <strategy>/               # per-strategy interface + config scaffolding
+```
+
+The validation package depends on nothing but NumPy and pandas and knows nothing
+about any strategy, so it can be pointed at any bracketed system:
+
+```python
+from backtrader_framework.validation import (
+    random_bar_control, excess_over_control,   # does it beat a random entry?
+    decompose_gross_net, fee_in_r_wall,        # is there gross above the toll?
+    clustered_tstat, effective_sample_size,    # how much of n is real?
+    signed_permutation_maxt,                   # family-wise bar for a grid scan
+)
 ```
 
 The **[WFO Strategy Validation Report](WFO_Strategy_Validation_Report.ipynb)** is

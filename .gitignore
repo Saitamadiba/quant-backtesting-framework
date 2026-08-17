@@ -221,6 +221,14 @@ wfo_signal_scorer.py
 # Tests for proprietary modules (shared/, Liquidity_Raid/, etc.) — live
 # in the private repo alongside the modules they cover
 tests/
+# ...but backtrader_framework/tests/ covers the PUBLIC framework and belongs in
+# the public repo. The bare `tests/` above also swallowed these, so the six
+# existing framework tests had to be force-added and every NEW one was silently
+# skipped by `git add` — a new public test would look committed and simply not
+# be there. Un-ignore that one directory so the failure mode cannot recur;
+# proprietary tests elsewhere stay ignored by the rule above.
+!backtrader_framework/tests/
+!backtrader_framework/tests/**
 
 # Telegram bot API tokens — secrets, MUST never be committed. A leaked bot
 # token lets anyone hijack the bot (send as it / redirect signals).
