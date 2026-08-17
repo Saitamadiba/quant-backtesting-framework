@@ -501,3 +501,92 @@ class TestSimulateV2PublicAPI:
         df, signal, costs = self._frame_and_signal()
         signal["risk"] = 0.0
         assert TradeSimulator.simulate_v2(signal, df, costs) is None
+
+
+# ═════════════════════════════════════════════════════════════
+#  Arity guard — catches kernel-signature drift in ANY environment
+#
+#  The original defect: _simulate_v2_kernel gained two parameters and
+#  simulator.py's call site was not updated. It went unnoticed because that
+#  branch was gated on `if HAS_NUMBA:` and numba is not installed everywhere,
+#  so the broken call was simply never executed on those machines. A test that
+#  merely *runs* simulate_v2 therefore proves nothing about the kernel call.
+#  These assert the wiring statically instead.
+# ═════════════════════════════════════════════════════════════
+
+class TestKernelWiring:
+    @staticmethod
+    def _kernel_params(fn):
+        import inspect
+        return list(inspect.signature(getattr(fn, "py_func", fn)).parameters)
+
+    def test_every_kernel_call_site_passes_the_full_arity(self):
+        """Count the arguments each call site passes and compare to the kernel."""
+        import ast
+        import inspect
+        from pathlib import Path
+        from backtrader_framework.optimization import numba_kernels as nk
+
+        arity = {
+            "_simulate_v1_kernel": len(self._kernel_params(nk._simulate_v1_kernel)),
+            "_simulate_v2_kernel": len(self._kernel_params(nk._simulate_v2_kernel)),
+        }
+        # the kernels are also imported under aliases
+        aliases = {"_SIM_V2_KERNEL": "_simulate_v2_kernel"}
+
+        root = Path(inspect.getfile(nk)).parent
+        problems = []
+        for path in sorted(root.glob("*.py")) + sorted(root.glob("strategy_adapters/*.py")):
+            if path.name == "numba_kernels.py":
+                continue
+            tree = ast.parse(path.read_text())
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                fname = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+                canonical = aliases.get(fname, fname)
+                if canonical not in arity:
+                    continue
+                if any(isinstance(a, ast.Starred) for a in node.args):
+                    continue                      # *args forwarding: can't count
+                n = len(node.args) + len(node.keywords)
+                if n != arity[canonical]:
+                    problems.append(
+                        f"{path.name}:{node.lineno} calls {fname} with {n} args, "
+                        f"kernel takes {arity[canonical]}"
+                    )
+        assert not problems, "kernel call-site arity drift:\n  " + "\n  ".join(problems)
+
+    def test_simulate_v2_has_no_second_implementation(self):
+        """simulator.simulate_v2 must have exactly one numeric path.
+
+        It previously carried a 168-line pure-Python V2 fallback that ignored
+        min_trail_lock_r and trail_headroom_frac entirely, so results depended on
+        whether numba happened to be installed.
+        """
+        import inspect
+        from backtrader_framework.optimization.simulator import TradeSimulator
+
+        src = inspect.getsource(TradeSimulator.simulate_v2)
+        assert "Pure-Python fallback" not in src
+        assert src.count("_simulate_v2_kernel(") == 1
+
+    def test_missing_kernel_fails_closed(self, monkeypatch):
+        """No silent fallback: if the kernel is absent, raise."""
+        import pandas as pd
+        from backtrader_framework.optimization import simulator as sim
+
+        monkeypatch.setattr(sim, "_simulate_v2_kernel", None)
+        highs, lows, closes, atrs = _make_price_data(120, seed=3)
+        df = pd.DataFrame(
+            {"High": highs, "Low": lows, "Close": closes, "ATR": atrs},
+            index=pd.date_range("2024-01-01", periods=len(highs), freq="15min", tz="UTC"),
+        )
+        signal = {
+            "idx": 5, "time": df.index[5], "direction": "LONG",
+            "entry_price": float(closes[5]), "stop_loss": float(closes[5]) * 0.99,
+            "take_profit_1": float(closes[5]) * 1.02, "risk": float(closes[5]) * 0.01,
+            "metadata": {},
+        }
+        with pytest.raises(RuntimeError, match="Refusing to fall back"):
+            sim.TradeSimulator.simulate_v2(signal, df, sim.TransactionCosts())

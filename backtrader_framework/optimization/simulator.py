@@ -25,9 +25,11 @@ try:
         HAS_NUMBA,
         OUTCOME_STRINGS,
     )
-except ImportError:
+except ImportError:          # numba_kernels itself unavailable
     HAS_NUMBA = False
     OUTCOME_STRINGS = {}
+    _simulate_v1_kernel = None
+    _simulate_v2_kernel = None
 
 logger = logging.getLogger(__name__)
 
@@ -299,204 +301,56 @@ class TradeSimulator:
         )
 
         # ── Numba fast path ─────────────────────────────────
-        if HAS_NUMBA:
-            has_atrs = atrs is not None
-            atrs_arr = atrs if has_atrs else _EMPTY_F64
-
-            result = _simulate_v2_kernel(
-                idx, is_long, entry_price, stop_loss, tp, risk,
-                costs.spread_pct, costs.commission_pct, costs.slippage_pct,
-                max_bars,
-                int(buffer_bars), float(buffer_mult), float(be_trigger_r),
-                float(be_buffer_pct), int(time_exit_bars),
-                float(trail_atr_mult), float(trail_step_atr),
-                min_trail_lock_r, trail_headroom_frac,
-                highs, lows, closes, atrs_arr, has_atrs, n,
+        # ── Single numeric core: _simulate_v2_kernel ────────
+        # This was gated on `if HAS_NUMBA:` with a 168-line pure-Python V2
+        # fallback below it. The kernel is a plain Python function when numba is
+        # absent (numba_kernels applies a no-op decorator), so the gate never
+        # chose between "fast" and "slow" — it chose between two DIFFERENT
+        # implementations, and they disagreed. Measured over 300 random signals,
+        # this class and wfo_engine.TradeSimulator returned identical results for
+        # only 135/300 (77/300 under engine-injected metadata), with r_multiple
+        # differing by more than 10x on individual trades. Whether numba happened
+        # to be installed silently changed research numbers.
+        #
+        # The kernel is canonical ("matches the live LR position_manager.py logic
+        # exactly"), so it is now the only path, and a missing kernel FAILS
+        # CLOSED instead of quietly computing something else. The parameter
+        # semantics of THIS class are unchanged — same metadata keys, same
+        # defaults, same TP1 target — so its configuration surface is untouched.
+        if _simulate_v2_kernel is None:
+            raise RuntimeError(
+                "simulate_v2 needs numba_kernels._simulate_v2_kernel, which "
+                "failed to import. Refusing to fall back to a divergent "
+                "implementation - fix the import instead."
             )
-            outcome_code, exit_px, bars_held, mfe, mae, raw_r, total_cost, final_sl = result
+        has_atrs = atrs is not None
+        atrs_arr = atrs if has_atrs else _EMPTY_F64
 
-            if exit_px < 0.0:
-                return None
+        result = _simulate_v2_kernel(
+            idx, is_long, entry_price, stop_loss, tp, risk,
+            costs.spread_pct, costs.commission_pct, costs.slippage_pct,
+            max_bars,
+            int(buffer_bars), float(buffer_mult), float(be_trigger_r),
+            float(be_buffer_pct), int(time_exit_bars),
+            float(trail_atr_mult), float(trail_step_atr),
+            min_trail_lock_r, trail_headroom_frac,
+            highs, lows, closes, atrs_arr, has_atrs, n,
+        )
+        outcome_code, exit_px, bars_held, mfe, mae, raw_r, total_cost, final_sl = result
 
-            return TradeResult(
-                entry_time=signal['time'],
-                exit_time=df.index[min(idx + bars_held, n - 1)],
-                direction=direction,
-                entry_price=entry_price,
-                exit_price=exit_px,
-                stop_loss=final_sl,
-                take_profit_1=tp,
-                take_profit_2=tp,
-                outcome=OUTCOME_STRINGS[int(outcome_code)],
-                r_multiple=raw_r,
-                r_multiple_after_costs=raw_r - total_cost,
-                bars_held=bars_held,
-                confidence=signal.get('confidence', 0.5),
-                bias=signal.get('bias', 'COUNTER'),
-                mfe=mfe,
-                mae=mae,
-                window_id=window_id,
-                is_oos=is_oos,
-                regime=regime,
-                cost_deducted=total_cost,
-            )
-
-        # ── Pure-Python fallback ────────────────────────────
-        entry_cost = entry_price * (costs.spread_pct + costs.slippage_pct)
-        effective_entry = entry_price + entry_cost if is_long else entry_price - entry_cost
-
-        sl_distance = abs(effective_entry - stop_loss)
-
-        outcome = 'timeout'
-        exit_price = None
-        bars_held = 0
-        mfe = 0.0
-        mae = 0.0
-        be_triggered = False
-        trailing_active = False
-        high_water = effective_entry if is_long else 0.0
-        low_water = effective_entry if not is_long else float('inf')
-        last_trail_price = effective_entry
-
-        end_bar = min(idx + max_bars, n)
-        for i in range(idx + 1, end_bar):
-            h = highs[i]
-            lo = lows[i]
-            cl = closes[i]
-            bars_held += 1
-
-            atr_i = atrs[i] if atrs is not None and i < len(atrs) else 0
-
-            if is_long:
-                favorable = (h - effective_entry) / risk
-                adverse = (effective_entry - lo) / risk
-            else:
-                favorable = (effective_entry - lo) / risk
-                adverse = (h - effective_entry) / risk
-            if favorable > mfe:
-                mfe = favorable
-            if adverse > mae:
-                mae = adverse
-
-            in_buffer = bars_held <= buffer_bars and buffer_bars > 0
-            if in_buffer:
-                virtual_sl_dist = sl_distance * buffer_mult
-                if is_long:
-                    virtual_sl = effective_entry - virtual_sl_dist
-                    if lo <= virtual_sl:
-                        outcome = 'loss'
-                        exit_price = virtual_sl
-                        break
-                else:
-                    virtual_sl = effective_entry + virtual_sl_dist
-                    if h >= virtual_sl:
-                        outcome = 'loss'
-                        exit_price = virtual_sl
-                        break
-            else:
-                if not be_triggered:
-                    if is_long:
-                        current_r = (h - effective_entry) / risk
-                    else:
-                        current_r = (effective_entry - lo) / risk
-                    if current_r >= be_trigger_r:
-                        be_triggered = True
-                        trailing_active = True
-                        if is_long:
-                            be_level = effective_entry + effective_entry * be_buffer_pct
-                            if be_level > stop_loss:
-                                stop_loss = be_level
-                        else:
-                            be_level = effective_entry - effective_entry * be_buffer_pct
-                            if be_level < stop_loss:
-                                stop_loss = be_level
-
-                if trailing_active and trail_atr_mult > 0 and atr_i > 0:
-                    if is_long:
-                        if h > high_water:
-                            high_water = h
-                        step_ok = (trail_step_atr <= 0 or
-                                   high_water - last_trail_price >= trail_step_atr * atr_i)
-                        if step_ok:
-                            trail_level = high_water - trail_atr_mult * atr_i
-                            if trail_level > stop_loss:
-                                stop_loss = trail_level
-                                last_trail_price = high_water
-                    else:
-                        if lo < low_water:
-                            low_water = lo
-                        step_ok = (trail_step_atr <= 0 or
-                                   last_trail_price - low_water >= trail_step_atr * atr_i)
-                        if step_ok:
-                            trail_level = low_water + trail_atr_mult * atr_i
-                            if trail_level < stop_loss:
-                                stop_loss = trail_level
-                                last_trail_price = low_water
-
-                if is_long:
-                    if lo <= stop_loss:
-                        if be_triggered:
-                            raw_exit_r = (stop_loss - effective_entry) / risk
-                            outcome = 'win_trail' if raw_exit_r > 0.05 else 'breakeven'
-                        else:
-                            outcome = 'loss'
-                        exit_price = stop_loss
-                        break
-                else:
-                    if h >= stop_loss:
-                        if be_triggered:
-                            raw_exit_r = (effective_entry - stop_loss) / risk
-                            outcome = 'win_trail' if raw_exit_r > 0.05 else 'breakeven'
-                        else:
-                            outcome = 'loss'
-                        exit_price = stop_loss
-                        break
-
-                if is_long and h >= tp:
-                    outcome = 'win_tp'
-                    exit_price = tp
-                    break
-                elif not is_long and lo <= tp:
-                    outcome = 'win_tp'
-                    exit_price = tp
-                    break
-
-            if time_exit_bars > 0 and bars_held >= time_exit_bars:
-                if is_long:
-                    in_profit = cl > effective_entry
-                else:
-                    in_profit = cl < effective_entry
-                if not in_profit:
-                    outcome = 'time_exit'
-                    exit_price = cl
-                    break
-
-        if outcome == 'timeout':
-            last_idx = min(idx + max_bars - 1, n - 1)
-            exit_price = closes[last_idx]
-
-        if exit_price is None:
+        if exit_px < 0.0:
             return None
-
-        if is_long:
-            raw_r = (exit_price - effective_entry) / risk
-        else:
-            raw_r = (effective_entry - exit_price) / risk
-
-        entry_comm = entry_price * costs.commission_pct
-        exit_cost = exit_price * (costs.spread_pct + costs.commission_pct + costs.slippage_pct)
-        total_cost = (entry_comm + exit_cost) / risk if risk > 0 else 0
 
         return TradeResult(
             entry_time=signal['time'],
             exit_time=df.index[min(idx + bars_held, n - 1)],
             direction=direction,
             entry_price=entry_price,
-            exit_price=exit_price,
-            stop_loss=stop_loss,
+            exit_price=exit_px,
+            stop_loss=final_sl,
             take_profit_1=tp,
             take_profit_2=tp,
-            outcome=outcome,
+            outcome=OUTCOME_STRINGS[int(outcome_code)],
             r_multiple=raw_r,
             r_multiple_after_costs=raw_r - total_cost,
             bars_held=bars_held,
