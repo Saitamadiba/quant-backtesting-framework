@@ -38,7 +38,67 @@ import pandas as pd
 from .base_adapter import StrategyAdapter, ParamSpec, Signal
 
 
+def _normalise_tf(timeframe: str) -> str:
+    """'15'/'15M'/'15min' -> '15m';  '60'/'1H'/'h1' -> '1h'.
+
+    Mirrors ``regime_gate._tf_key`` so the two per-timeframe calibration
+    tables are keyed alike (deliberately duplicated rather than imported:
+    this module is vendored to the VPS as ``mm15m_lib/mm_adapter.py``).
+    """
+    t = (timeframe or "").strip().lower().replace("min", "m")
+    return {"5": "5m", "15": "15m", "60": "1h", "60m": "1h",
+            "1hr": "1h", "h1": "1h"}.get(t, t)
+
+
 class MomentumMasteryAdapter(StrategyAdapter):
+
+    # ── min_trend_strength: per-TIMEFRAME calibration ──────────────────────
+    # trend_strength = |EMA50 - EMA200| / Close is an EMA spread, so it shrinks
+    # with the bar size while a fixed threshold does not. The original
+    # [0.0, 0.020] range was calibrated at 1h; applied unchanged at 15m/5m it
+    # admits ~0% of killzone bars and mutes the detector outright — both MM
+    # shadow arms booked ZERO signals for 31 days on this bug.
+    #
+    # Each row reproduces the quantile the 1h top occupies among killzone bars
+    # (pooled p73.1, BTC+ETH, 125d). Reading that quantile back at 1h returns
+    # 0.0208 ~= the original 0.020, which is why the 1h row is UNCHANGED — the
+    # method recovers the known-good rung, which is what licenses trusting it
+    # at 15m/5m. Top-ratios 2.26 (1h->15m) and 1.64 (15m->5m) track
+    # sqrt(time-step) (2.00, 1.73) — the same ~2.2x-per-step scaling that
+    # regime_gate.py:75 already encodes in its (asset, timeframe) table.
+    # Full derivation + evidence: MM_TREND_STRENGTH_RESCALE_SPEC.md.
+    _TREND_STRENGTH_RANGE = {   # timeframe -> (max, step); floor is 0.0
+        "1h":  (0.020,  0.005),     # ANCHOR — unchanged, do not retune
+        "15m": (0.0092, 0.0023),
+        "5m":  (0.0056, 0.0014),
+    }
+
+    # Class-level default so an instance built WITHOUT __init__ (unpickling
+    # into a bare object, __new__, a subclass that skips super()) behaves
+    # exactly as it did before this change. Opting in is explicit; nothing
+    # silently changes calibration.
+    timeframe = "1h"
+
+    def __init__(self, timeframe: str = "1h"):
+        """``timeframe`` selects the min_trend_strength calibration ONLY.
+
+        Defaults to "1h" so every existing call site and every historical WFO
+        reproduces bit-for-bit; only the shadow-arm refit tools pass a TF.
+        This is construction-time configuration, not per-call state, so the
+        base class's stateless-between-generate_signals contract holds —
+        ``generate_signals`` never reads it.
+        """
+        tf = _normalise_tf(timeframe)
+        if tf not in self._TREND_STRENGTH_RANGE:
+            raise ValueError(
+                f"MomentumMasteryAdapter: no min_trend_strength calibration "
+                f"for timeframe {timeframe!r} "
+                f"(have: {sorted(self._TREND_STRENGTH_RANGE)}). Failing CLOSED "
+                f"— a silent fallback to the 1h range is exactly how the 15m "
+                f"and 5m shadow arms went dark for 31 days. Calibrate the "
+                f"timeframe first: MM_TREND_STRENGTH_RESCALE_SPEC.md §2."
+            )
+        self.timeframe = tf
 
     @property
     def name(self) -> str:
@@ -49,6 +109,9 @@ class MomentumMasteryAdapter(StrategyAdapter):
         return ["1h"]
 
     def get_param_space(self) -> List[ParamSpec]:
+        # Per-TF; see _TREND_STRENGTH_RANGE above. Default "1h" reproduces the
+        # historical row [0.0, 0.020] step 0.005 exactly.
+        ts_max, ts_step = self._TREND_STRENGTH_RANGE[self.timeframe]
         return [
             ParamSpec("session_lookback",    12,    6,     18,    6,    'int'),
             ParamSpec("sl_atr_buffer",       0.5,   0.3,   0.7,   0.2),
@@ -62,7 +125,7 @@ class MomentumMasteryAdapter(StrategyAdapter):
             # in technical_analysis.py:113 but doesn't use it as a hard gate.
             # 0.0 = disabled (default). Calibrated for studies that want to
             # require an actual trending regime for mean-reversion sweeps.
-            ParamSpec("min_trend_strength",  0.0,   0.0,   0.020, 0.005),
+            ParamSpec("min_trend_strength",  0.0,   0.0,   ts_max, ts_step),
         ]
 
     def generate_signals(
