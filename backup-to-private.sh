@@ -73,6 +73,12 @@ cp -p k1_*.py k1b_*.py k2_*.py analyze_*.py *_refit.py eth_lr_*.py lr_asia_*.py 
 # bar documents — 2026-07-28: PATTERN_GATE_PREREG etc. were previously mirrored NOWHERE)
 cp -p *_PREREG.md *_RUNBOOK.md *_SPEC.md *_STANDARD.md *_MAP.md *_PLAN.md *_DESIGN.md *_STATUS.md *_RISK.md \
       DEPLOY_*.md "$PRIV/" 2>/dev/null || true
+# 2026-08-17: root-level study runners ADDED — every run_*.py / replay_*.py
+# at the repo root is gitignored (public repo) and was in NO mirror manifest,
+# i.e. backed up NOWHERE (the same paired-miss the fomc intake caught).
+# NO --delete: a runner deleted locally stays recoverable in the mirror.
+rsync -a "${RX[@]}" $(ls run_*.py replay_*.py 2>/dev/null) "$PRIV/" 2>/dev/null || true
+
 # Edge-bearing files inside packages that are OTHERWISE PUBLIC. -R keeps the path;
 # NO --delete, so the private copy never prunes a sibling it does not mirror.
 rsync -aR "${RX[@]}" smc_mtf/tf_ladder_sweep.py fairvalue_gate/livebooks.py \
