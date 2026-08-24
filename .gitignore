@@ -65,6 +65,7 @@ _vps_patches/
 
 # ── Proprietary research / configs / tick data / output ──────────────────────
 research_output/
+adaptive_rr_study/
 # 2026-08-09: funding-carry study — SPEC/REPORT enumerate our closures + fee tiers.
 # NB: a trailing inline comment would become part of the PATTERN and match nothing.
 funding_carry/
