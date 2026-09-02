@@ -366,6 +366,7 @@ BOOKS: list[Book] = [
          open_ts="entry_ts", open_entry="COALESCE(effective_entry,entry)",
          open_sl="sl", open_tp="tp", open_qty="qty"),
     Book(key="analyst_drift", label="analyst-drift(alpaca)", tier=2,
+         seat="analyst_drift_paper", reconcilable=False,
          db="analyst_drift_paper/analyst_paper.db", table="events", ts="resolved_at",
          closed_filter="status='closed' AND pnl_usd IS NOT NULL", pnl="pnl_usd",
          symbol="symbol", entry="entry_fill", exit="exit_fill",
@@ -405,8 +406,11 @@ BOOKS: list[Book] = [
          db="sweep_engine/sweep_engine.db", table="events", ts="event_time",
          closed_filter="r_gross IS NOT NULL AND COALESCE(is_alias,0)=0 AND "
                        "COALESCE(feed,'binance_us')='bybit'",
-         r="r_gross", symbol="symbol", side="side", entry="entry",
-         note="GROSS R — the fee/slip toll is not deducted"),
+         r="r_gross", symbol="symbol",
+         # this book stores side as ±1; spell it out so the ledger reads like
+         # every other row (and so the column stays one type)
+         side="CASE WHEN side>0 THEN 'LONG' WHEN side<0 THEN 'SHORT' ELSE '' END",
+         entry="entry", note="GROSS R — the fee/slip toll is not deducted"),
     Book(key="fib618", label="fib618-shadow(taker)", tier=3, in_recap=True,
          db="fib618_shadow/fib618_shadow.db", table="trades", ts="exit_time",
          closed_filter="net_taker IS NOT NULL", r="net_taker", symbol="symbol",
@@ -500,19 +504,23 @@ def build_trades_sql(b: Book, days: int = 7, limit: int = 500) -> str:
     )
 
 
-def build_daily_sql(b: Book, days: int = 7) -> str:
-    """Per-day totals inside the window — aggregated ON the VPS.
+def build_bucket_sql(b: Book, days: int = 7) -> str:
+    """Per-HOUR totals inside the window — aggregated ON the VPS.
 
     The trade dump is capped per book so a chatty shadow recorder cannot flood
     the wire; charting off that cap would quietly under-count it. This query
-    counts every row and ships one line per day — the till roll, not the receipts.
+    counts every row and ships one line per hour — the till roll, not the
+    receipts. Hourly is the finest bucket the page offers; coarser ones (4h, day,
+    week) are rolled up from these locally, so changing the zoom costs no extra
+    round trip.
     """
     r, pnl = _expr(b.r), _expr(b.pnl)
+    bucket = f"strftime('%Y-%m-%dT%H:00', {b.ts})"
     return (
-        f"SELECT date({b.ts}) AS day, COUNT(*) AS n,"
+        f"SELECT {bucket} AS bucket, COUNT(*) AS n,"
         f" SUM({r}) AS sum_r, SUM({pnl}) AS sum_pnl"
         f" FROM {b.table} WHERE {b.closed_filter} AND {_within(b.ts, days)}"
-        f" GROUP BY date({b.ts}) ORDER BY day"
+        f" GROUP BY {bucket} ORDER BY bucket"
     )
 
 
@@ -552,8 +560,8 @@ def build_spec(days: int = 7, trade_limit: int = 500,
         plan.append({"id": f"{b.key}::agg", "db": b.db, "sql": build_agg_sql(b, days)})
         plan.append({"id": f"{b.key}::trades", "db": b.db,
                      "sql": build_trades_sql(b, days, trade_limit)})
-        plan.append({"id": f"{b.key}::daily", "db": b.db,
-                     "sql": build_daily_sql(b, days)})
+        plan.append({"id": f"{b.key}::buckets", "db": b.db,
+                     "sql": build_bucket_sql(b, days)})
         osql = build_open_sql(b, open_limit)
         if osql:
             plan.append({"id": f"{b.key}::open", "db": b.db, "sql": osql})

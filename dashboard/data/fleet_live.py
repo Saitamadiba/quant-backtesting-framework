@@ -34,6 +34,18 @@ _COLLECTOR = Path(__file__).resolve().parent / "fleet_collector_remote.py"
 ENV_GLOBS = ["*.env", "HyroTrader/*.env", "*/*.env", "HyroTrader/.env"]
 ENV_SKIP = ["*template*", "*.bak.*", "*.example", "*example*"]
 
+# The US-equities seat trades Alpaca, not ByBit. It is read with the SAME
+# credential file the analyst-drift bot loads (same path order), so the panel
+# shows that bot's own account and not some other paper login.
+ALPACA = {
+    "enabled": True,
+    "seat": "analyst_drift_paper",
+    "base": "https://paper-api.alpaca.markets",
+    "env_candidates": ["Momentum_Mastery/core/.env",
+                       "/home/trader/trading_bots/Momentum_Mastery/core/.env"],
+    "timeout": 20,
+}
+
 _REMOTE_PY = "./venv/bin/python3"
 
 
@@ -65,6 +77,7 @@ def fetch_raw(days: int = 7, with_balances: bool = True, trade_limit: int = 500,
         "plan": build_spec(days=days, trade_limit=trade_limit),
         "balances": {"enabled": bool(with_balances), "env_globs": ENV_GLOBS,
                      "skip": ENV_SKIP, "workers": 6},
+        "alpaca": ALPACA,
     }
     try:
         res = subprocess.run(_ssh_cmd(timeout), input=_payload(spec),
@@ -184,22 +197,28 @@ def trades_frame(raw: dict, days: int = 7) -> pd.DataFrame:
     df["ts"] = _to_dt(df["ts"])
     for c in ("entry", "exit_px", "r", "pnl"):
         df[c] = pd.to_numeric(df[c], errors="coerce")
+    # Books spell side and symbol differently (and one stored side as an int);
+    # a mixed-type column cannot cross Arrow into st.dataframe.
+    for c in ("symbol", "side"):
+        df[c] = df[c].astype("string")
     df.loc[~df["has_usd"].astype(bool), "pnl"] = pd.NA
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     df = df[df["ts"].notna() & (df["ts"] >= cutoff)]
     return df.sort_values("ts", ascending=False).reset_index(drop=True)
 
 
-def daily_frame(raw: dict) -> pd.DataFrame:
-    """One row per (book, UTC day): n, ΣR, Σ$ — counted on the VPS, uncapped.
+def buckets_frame(raw: dict) -> pd.DataFrame:
+    """One row per (book, UTC hour): n, ΣR, Σ$ — counted on the VPS, uncapped.
 
     The charts read this, never the capped trade dump, so a shadow book that
     closes 900 episodes a day is not silently rounded down to its newest 500.
+    Hourly is the finest grain; the page rolls it up to 4h / day / week without
+    another round trip.
     """
     res = raw.get("results", {})
     frames = []
     for b in BOOKS:
-        cols, rows, err = _rows(res, f"{b.key}::daily")
+        cols, rows, err = _rows(res, f"{b.key}::buckets")
         if err or not rows:
             continue
         df = pd.DataFrame(rows, columns=cols)
@@ -210,12 +229,39 @@ def daily_frame(raw: dict) -> pd.DataFrame:
             df["sum_r"] = pd.NA
         frames.append(df)
     if not frames:
-        return pd.DataFrame(columns=["day", "n", "sum_r", "sum_pnl", "bot", "tier"])
+        return pd.DataFrame(columns=["bucket", "n", "sum_r", "sum_pnl", "bot", "tier"])
     df = pd.concat(frames, ignore_index=True)
-    df["day"] = pd.to_datetime(df["day"], errors="coerce").dt.date
+    df["bucket"] = pd.to_datetime(df["bucket"], errors="coerce", utc=True)
     for c in ("n", "sum_r", "sum_pnl"):
         df[c] = pd.to_numeric(df[c], errors="coerce")
-    return df[df["day"].notna()].reset_index(drop=True)
+    return df[df["bucket"].notna()].reset_index(drop=True)
+
+
+# How the hourly rows are rolled up on the page (pandas offset aliases).
+GRANULARITY = {"Hour": "h", "4 hours": "4h", "Day": "D", "Week": "W"}
+
+
+def resample_buckets(buckets: pd.DataFrame, grain: str) -> pd.DataFrame:
+    """Roll the hourly rows up to the chosen grain, per (bot, tier).
+
+    Zooming the time axis is a local regroup, not a new query — the VPS already
+    sent the finest grain it will ever need to.
+    """
+    if buckets.empty:
+        out = buckets.copy()
+        out["t"] = pd.NaT
+        return out
+    freq = GRANULARITY.get(grain, "D")
+    df = buckets.copy()
+    if freq == "W":
+        # Monday-start weeks, computed on the tz-aware column directly — going
+        # via Period would silently drop the timezone.
+        df["t"] = (df["bucket"].dt.floor("D")
+                   - pd.to_timedelta(df["bucket"].dt.weekday, unit="D"))
+    else:
+        df["t"] = df["bucket"].dt.floor(freq)
+    return (df.groupby(["t", "bot", "tier"], as_index=False)
+              .agg(n=("n", "sum"), sum_r=("sum_r", "sum"), sum_pnl=("sum_pnl", "sum")))
 
 
 def open_frame(raw: dict) -> pd.DataFrame:
@@ -237,6 +283,8 @@ def open_frame(raw: dict) -> pd.DataFrame:
     df["since"] = _to_dt(df["since"])
     for c in ("entry", "sl", "tp", "qty", "risk_usd"):
         df[c] = pd.to_numeric(df[c], errors="coerce")
+    for c in ("symbol", "side", "state"):
+        df[c] = df[c].astype("string")
     now = datetime.now(timezone.utc)
     df["age_h"] = (now - df["since"]).dt.total_seconds() / 3600.0
     return df.sort_values("since", ascending=False, na_position="last").reset_index(drop=True)
@@ -249,6 +297,7 @@ def accounts_frame(raw: dict) -> pd.DataFrame:
     for a in bal.get("accounts", []):
         w = a.get("wallet", {}) or {}
         rows.append({
+            "venue": a.get("venue", "bybit"),
             "uid": a.get("uid", ""),
             "seats": ", ".join(a.get("seats", [])),
             "n_seats": len(a.get("seats", [])),
@@ -257,7 +306,9 @@ def accounts_frame(raw: dict) -> pd.DataFrame:
             "wallet_balance": _num(w.get("wallet_balance")),
             "available": _num(w.get("available")),
             "upnl": _num(w.get("upnl")),
+            "day_change": _num(w.get("day_change")),
             "positions": len(a.get("positions", [])),
+            "orders": len(a.get("orders", [])),
             "status": "ok" if a.get("ok") else (a.get("error") or "unreachable"),
         })
     return pd.DataFrame(rows)
@@ -271,6 +322,7 @@ def exchange_positions_frame(raw: dict) -> pd.DataFrame:
         label = ", ".join(a.get("seats", [])) or a.get("uid", "?")
         for p in a.get("positions", []):
             rows.append({
+                "venue": a.get("venue", "bybit"),
                 "account": label, "uid": a.get("uid", ""),
                 "symbol": p.get("symbol"), "side": p.get("side"),
                 "size": _num(p.get("size")), "avg_price": _num(p.get("avg_price")),
@@ -293,10 +345,12 @@ def exchange_orders_frame(raw: dict) -> pd.DataFrame:
         label = ", ".join(a.get("seats", [])) or a.get("uid", "?")
         for o in a.get("orders", []):
             created = o.get("created") or ""
-            ts = pd.NaT
-            if str(created).isdigit():
+            if str(created).isdigit():                 # ByBit: epoch milliseconds
                 ts = pd.to_datetime(int(created), unit="ms", utc=True)
+            else:                                      # Alpaca: an ISO timestamp
+                ts = pd.to_datetime(created, errors="coerce", utc=True)
             rows.append({
+                "venue": a.get("venue", "bybit"),
                 "account": label, "uid": a.get("uid", ""),
                 "symbol": o.get("symbol"), "side": o.get("side"),
                 "order_type": o.get("order_type"), "qty": _num(o.get("qty")),
@@ -310,6 +364,33 @@ def exchange_orders_frame(raw: dict) -> pd.DataFrame:
         df["age_h"] = (now - df["placed"]).dt.total_seconds() / 3600.0
         df = df.sort_values("placed", ascending=False, na_position="last")
     return df.reset_index(drop=True)
+
+
+def window_headline(scope: pd.DataFrame) -> dict:
+    """The headline numbers for a set of books, with the tiers kept apart.
+
+    Dollars are summed from **Tier 1 only**. Tier 2 is a virtual $100k book and
+    Tier 3 carries none, so folding either into a "realized $" figure would put
+    play money in the same column as the money line — the one mistake this page
+    exists to prevent. R is reported both ways: across the scope, and Tier 1
+    alone, because R on a shadow recorder buys nothing.
+    """
+    if scope.empty:
+        return {"n": 0, "pnl_t1": 0.0, "sum_r": 0.0, "sum_r_t1": 0.0,
+                "win_rate": float("nan"), "best": None, "worst": None}
+    t1 = scope[scope["tier"] == 1]
+    n = int(scope["n_7d"].sum())
+    wins = float((scope["win_rate_7d"].fillna(0) * scope["n_7d"]).sum())
+    ranked = scope[scope["sum_r_7d"].notna() & (scope["n_7d"] > 0)]
+    return {
+        "n": n,
+        "pnl_t1": float(t1["pnl_usd_7d"].fillna(0).sum()),
+        "sum_r": float(scope["sum_r_7d"].fillna(0).sum()),
+        "sum_r_t1": float(t1["sum_r_7d"].fillna(0).sum()),
+        "win_rate": (wins / n) if n else float("nan"),
+        "best": None if ranked.empty else ranked.loc[ranked["sum_r_7d"].idxmax()],
+        "worst": None if ranked.empty else ranked.loc[ranked["sum_r_7d"].idxmin()],
+    }
 
 
 def _base(sym) -> str:

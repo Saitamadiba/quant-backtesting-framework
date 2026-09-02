@@ -13,6 +13,8 @@ Two halves:
   2. `collect_balances()` — per-seat ByBit account state (equity / positions),
      read with each seat's own key through the existing validated `bybit_client`.
      GET endpoints only: wallet balance, positions, and the key's own identity.
+  3. `collect_alpaca()` — the same for the US-equities seat, read with the very
+     key the bot itself uses and refusing anything that is not a PAPER key.
 
 Secrets never leave the VPS: a seat is identified by its env-file path and the
 account UID the exchange reports; API keys are only ever hashed (8 hex chars) so
@@ -38,7 +40,7 @@ from concurrent.futures import ThreadPoolExecutor
 # Keep every library log line off stdout — stdout carries exactly one JSON line.
 logging.basicConfig(level=logging.CRITICAL, stream=sys.stderr)
 
-MAX_ROWS = 2000
+MAX_ROWS = 5000
 SQL_FORBIDDEN = (";", "--", "/*", "pragma ", "attach ")
 # Matched on word boundaries so an innocent column (`created_utc`, `updated_at`)
 # is not mistaken for a statement.
@@ -116,7 +118,8 @@ def run_queries(plan: list[dict]) -> dict:
             out[qid] = {"ok": False, "error": "; ".join(errs[:3])}
         else:
             out[qid] = {"ok": True, "cols": cols, "rows": rows[:MAX_ROWS],
-                        "files": found, "warn": "; ".join(errs[:3]) or None}
+                        "files": found, "truncated": len(rows) > MAX_ROWS,
+                        "warn": "; ".join(errs[:3]) or None}
     for con in cache.values():
         try:
             con.close()
@@ -342,6 +345,110 @@ def collect_balances(patterns: list[str], skip: list[str], workers: int = 6) -> 
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  3. The Alpaca equities seat (GET-only, PAPER only)
+# ══════════════════════════════════════════════════════════════════════════════
+def _alpaca_env(candidates: list) -> tuple:
+    """The very credentials the analyst-drift bot loads — same file, same order."""
+    for c in candidates:
+        if not c or not os.path.isfile(c):
+            continue
+        kv = {}
+        try:
+            with open(c, "r", errors="replace") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        k = k.strip()
+                        if k.startswith("export "):
+                            k = k[len("export "):].strip()
+                        if k in ("ALPACA_API_KEY", "ALPACA_SECRET_KEY"):
+                            kv[k] = v.strip().strip('"').strip("'")
+        except Exception:                               # noqa: BLE001
+            continue
+        if kv.get("ALPACA_API_KEY") and kv.get("ALPACA_SECRET_KEY"):
+            return kv["ALPACA_API_KEY"], kv["ALPACA_SECRET_KEY"], c
+    return "", "", ""
+
+
+def collect_alpaca(cfg: dict) -> dict:
+    """Equity, positions and resting orders for the US-equities paper seat.
+
+    Fails CLOSED on a non-paper key: the bot itself refuses anything without the
+    `PK` prefix, and a read-only panel is no reason to relax that — the one
+    account this may ever touch is the paper one.
+    """
+    import urllib.request
+
+    seat = cfg.get("seat", "analyst_drift_paper")
+    base = cfg.get("base", "https://paper-api.alpaca.markets")
+    key, sec, src = _alpaca_env(cfg.get("env_candidates", []))
+    out = {"venue": "alpaca-paper", "seats": [seat], "ok": False, "uid": "",
+           "bybit_env": "paper", "wallet": {}, "positions": [], "orders": []}
+    if not key:
+        out["error"] = "no Alpaca credentials found on the VPS"
+        return out
+    out["key_digest"] = hashlib.sha1(key.encode()).hexdigest()[:8]
+    if not key.startswith("PK"):
+        out["error"] = "refused: key is not a PAPER key (no PK prefix)"
+        return out
+
+    hdrs = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": sec}
+
+    def get(path):
+        req = urllib.request.Request(f"{base}/v2/{path}", headers=hdrs)
+        with urllib.request.urlopen(req, timeout=int(cfg.get("timeout", 20))) as fh:
+            return json.load(fh)
+
+    try:
+        a = get("account")
+    except Exception as e:                              # noqa: BLE001
+        out["error"] = f"{type(e).__name__}: {e}"
+        return out
+
+    acct_no = str(a.get("account_number") or "")
+    out["uid"] = ("…" + acct_no[-4:]) if acct_no else ""      # masked, never whole
+    eq, last_eq = _f(a.get("equity")), _f(a.get("last_equity"))
+    out["wallet"] = {
+        "equity": eq,
+        "wallet_balance": _f(a.get("cash")),
+        "available": _f(a.get("buying_power")),
+        "upnl": 0.0,                                   # filled from positions below
+        "day_change": (eq - last_eq) if last_eq else 0.0,
+        "status": a.get("status", ""),
+        "blocked": bool(a.get("trading_blocked")),
+    }
+    try:
+        poss = get("positions")
+    except Exception:                                   # noqa: BLE001
+        poss = []
+    out["positions"] = [
+        {"symbol": x.get("symbol"), "side": (x.get("side") or "").title(),
+         "size": _f(x.get("qty")), "avg_price": _f(x.get("avg_entry_price")),
+         "mark_price": _f(x.get("current_price")), "upnl": _f(x.get("unrealized_pl")),
+         "leverage": 1.0, "value": _f(x.get("market_value")), "sl": 0.0, "tp": 0.0,
+         "opened": ""}
+        for x in poss
+    ]
+    out["wallet"]["upnl"] = sum(p["upnl"] for p in out["positions"])
+    try:
+        orders = get("orders?status=open&limit=50")
+    except Exception:                                   # noqa: BLE001
+        orders = []
+    out["orders"] = [
+        {"symbol": x.get("symbol"), "side": (x.get("side") or "").title(),
+         "order_type": x.get("type"), "qty": _f(x.get("qty")),
+         "price": _f(x.get("limit_price")), "status": x.get("status"),
+         "sl": 0.0, "tp": 0.0, "reduce_only": False,
+         "created": x.get("submitted_at") or ""}
+        for x in orders
+    ]
+    out["ok"] = True
+    out["env_file"] = src
+    return out
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  entry point
 # ══════════════════════════════════════════════════════════════════════════════
 def main(spec: dict) -> None:
@@ -367,6 +474,21 @@ def main(spec: dict) -> None:
             out["balances"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
     else:
         out["balances"] = {"ok": True, "skipped": True, "accounts": [], "seats": []}
+
+    alp = spec.get("alpaca") or {}
+    if bal.get("enabled") and alp.get("enabled"):
+        try:
+            acct = collect_alpaca(alp)
+        except Exception as e:                          # noqa: BLE001
+            acct = {"venue": "alpaca-paper", "seats": [alp.get("seat", "alpaca")],
+                    "ok": False, "error": f"{type(e).__name__}: {e}",
+                    "wallet": {}, "positions": [], "orders": [], "uid": ""}
+        out["balances"].setdefault("accounts", []).append(acct)
+        out["balances"].setdefault("seats", []).append({
+            "seats": acct.get("seats", []), "key_digest": acct.get("key_digest", ""),
+            "bybit_env": "alpaca-paper", "uid": acct.get("uid", ""),
+            "ok": bool(acct.get("ok")), "error": acct.get("error", ""),
+        })
 
     sys.stdout = real_stdout
     print(json.dumps(out, default=str))

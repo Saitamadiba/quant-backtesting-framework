@@ -3,16 +3,17 @@
 One page that answers the three questions you actually ask at the desk:
 
   1. **What's in the accounts?** Equity, free margin and unrealised PnL for every
-     ByBit sub-account the fleet trades — plus which seats share one account and
-     which keys have stopped answering. (Two seats on one sub-account are two
-     nameplates on one mailbox: the labels differ, every letter lands in the same
-     slot.)
+     ByBit sub-account the fleet trades AND the Alpaca paper account behind the
+     US-equities analyst-drift seat — plus which seats share one account and which
+     keys have stopped answering. (Two seats on one sub-account are two nameplates
+     on one mailbox: the labels differ, every letter lands in the same slot.)
   2. **What's running right now?** Live exchange positions (the ground truth for
      money at risk) beside each bot's own book — filled legs and orders still
      working at the exchange but not yet filled.
-  3. **What did they do this week?** Realized PnL over a rolling window, per bot
-     and per day, in dollars for the seats that place orders and in R for the
-     paper and shadow books.
+  3. **What did they do this week?** Realized PnL over a rolling window, sliced as
+     finely as an hour or as coarsely as a week, scoped to whichever bots you want
+     to look at — in dollars for the seats that place orders and in R for the paper
+     and shadow books.
 
 Everything is read in ONE read-only SSH round trip (`data/fleet_live.py` pipes
 `data/fleet_collector_remote.py` to the VPS python). Every statement is a SELECT,
@@ -40,13 +41,16 @@ import pandas as pd
 import plotly.graph_objects as go
 
 from data.fleet_live import (
-    accounts_frame, books_frame, daily_frame, exchange_orders_frame,
-    exchange_positions_frame, fetch_raw, open_frame, reconcile, seat_status_frame,
-    trades_frame,
+    GRANULARITY, accounts_frame, books_frame, buckets_frame, exchange_orders_frame,
+    exchange_positions_frame, fetch_raw, open_frame, reconcile, resample_buckets,
+    seat_status_frame, trades_frame, window_headline,
 )
 from data.fleet_registry import TIER_NAMES
 
 TIER_COLOR = {1: "#2e7d32", 2: "#1565c0", 3: "#8d6e63"}
+# Categorical line colours for per-bot focus — distinguishable, not decorative.
+PALETTE = ["#1565c0", "#2e7d32", "#c62828", "#6a1b9a", "#ef6c00",
+           "#00838f", "#5d4037", "#ad1457", "#37474f", "#9e9d24"]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -92,7 +96,6 @@ if not raw.get("ok"):
 
 books = books_frame(raw)
 trades = trades_frame(raw, days=days)
-daily = daily_frame(raw)
 running = open_frame(raw)
 accounts = accounts_frame(raw)
 positions = exchange_positions_frame(raw)
@@ -116,8 +119,10 @@ if n_fail:
 # ══════════════════════════════════════════════════════════════════════════════
 st.header("1 · Balances")
 st.caption(
-    "One row per distinct exchange **account**, not per bot — several seats often "
-    "share one sub-account, and asking once per seat would double-count the money."
+    "One row per distinct **account**, not per bot — several seats often share one "
+    "sub-account, and asking once per seat would double-count the money. Two venues "
+    "sit here: the ByBit demo subs the crypto seats trade, and the Alpaca **paper** "
+    "account behind the US-equities analyst-drift seat, read with that bot's own key."
 )
 
 if not with_bal:
@@ -148,18 +153,29 @@ else:
         accounts.sort_values("equity", ascending=False),
         use_container_width=True, hide_index=True,
         column_config={
-            "uid": st.column_config.TextColumn("Account UID", width="small"),
+            "venue": st.column_config.TextColumn("Venue", width="small"),
+            "uid": st.column_config.TextColumn("Account", width="small"),
             "seats": st.column_config.TextColumn("Seats trading it", width="large"),
             "n_seats": st.column_config.NumberColumn("Seats", width="small"),
             "env": st.column_config.TextColumn("Env", width="small"),
             "equity": st.column_config.NumberColumn("Equity", format="$%.0f"),
-            "wallet_balance": st.column_config.NumberColumn("Wallet", format="$%.0f"),
+            "wallet_balance": st.column_config.NumberColumn("Cash", format="$%.0f"),
             "available": st.column_config.NumberColumn("Available", format="$%.0f"),
             "upnl": st.column_config.NumberColumn("uPnL", format="$%.2f"),
-            "positions": st.column_config.NumberColumn("Open pos", width="small"),
+            "day_change": st.column_config.NumberColumn("Day Δ", format="$%.2f"),
+            "positions": st.column_config.NumberColumn("Pos", width="small"),
+            "orders": st.column_config.NumberColumn("Orders", width="small"),
             "status": st.column_config.TextColumn("Status"),
         },
     )
+
+    venues = ok.groupby("venue", as_index=False).agg(
+        accounts=("uid", "size"), equity=("equity", "sum"), upnl=("upnl", "sum"))
+    st.caption(" · ".join(
+        f"**{r.venue}**: {r.accounts} account(s), ${r.equity:,.0f} equity, "
+        f"${r.upnl:,.2f} uPnL" for r in venues.itertuples()) +
+        "  \nThe venues are separate books in separate currencies of play money — "
+        "the total above adds them for convenience, it is not one pot.")
 
     shared = accounts[accounts["n_seats"] > 1]
     if not shared.empty:
@@ -213,6 +229,7 @@ if not positions.empty:
     st.dataframe(
         p.sort_values("upnl"), use_container_width=True, hide_index=True,
         column_config={
+            "venue": st.column_config.TextColumn("Venue", width="small"),
             "account": st.column_config.TextColumn("Account", width="medium"),
             "uid": st.column_config.TextColumn("UID", width="small"),
             "symbol": "Symbol", "side": "Side",
@@ -227,7 +244,7 @@ if not positions.empty:
             "tp": st.column_config.NumberColumn("TP", format="%.5f"),
         },
     )
-    naked = p[p["sl"] == 0]
+    naked = p[(p["sl"] == 0) & (p["venue"] == "bybit")]
     if not naked.empty:
         who = ", ".join(sorted(set(naked["account"].astype(str))))
         st.warning(
@@ -245,10 +262,11 @@ if with_bal:
         st.info("No unfilled order is resting on any account that answered.")
     else:
         st.dataframe(
-            orders[["account", "symbol", "side", "order_type", "qty", "price",
-                    "status", "sl", "tp", "reduce_only", "placed", "age_h"]],
+            orders[["venue", "account", "symbol", "side", "order_type", "qty",
+                    "price", "status", "sl", "tp", "reduce_only", "placed", "age_h"]],
             use_container_width=True, hide_index=True,
             column_config={
+                "venue": st.column_config.TextColumn("Venue", width="small"),
                 "account": st.column_config.TextColumn("Account", width="medium"),
                 "symbol": "Symbol", "side": "Side",
                 "order_type": st.column_config.TextColumn("Type", width="small"),
@@ -334,91 +352,173 @@ if with_bal:
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  3 · Performance over the window
-# ══════════════════════════════════════════════════════════════════════════════
-st.header(f"3 · Last {days} days")
+st.header(f"3 · Performance — last {days} days")
+st.caption(
+    "Scope it before you read it: pick the bots you care about, then choose how "
+    "finely to slice time. Everything below — the headline numbers, both charts, "
+    "the scoreboard and the ledger — obeys the same two controls."
+)
 
-t1 = books[books["tier"] == 1]
-t2 = books[books["tier"] == 2]
-t3 = books[books["tier"] == 3]
-w_trades = int(books["n_7d"].sum())
-w_pnl = float(t1["pnl_usd_7d"].fillna(0).sum())
-w_r1 = float(t1["sum_r_7d"].fillna(0).sum())
-w_r2 = float(t2["sum_r_7d"].fillna(0).sum())
-w_r3 = float(t3["sum_r_7d"].fillna(0).sum())
-t1_tr = trades[trades["tier"] == 1]
-w_wr = float((t1_tr["r"] > 0).mean()) if len(t1_tr) and t1_tr["r"].notna().any() else float("nan")
+buckets = buckets_frame(raw)
+active = books[(books["n_7d"] > 0) | (books["open_n"] > 0) | (books["working_n"] > 0)]
 
+f1, f2, f3, f4 = st.columns([2.6, 1.2, 1.2, 1.2])
+tier_scope = f1.multiselect(
+    "Tiers in scope", [1, 2, 3], default=[1, 2, 3],
+    format_func=lambda t: TIER_NAMES[t], key="perf_tiers")
+pool_books = active[active["tier"].isin(tier_scope)] if tier_scope else active.iloc[0:0]
+
+focus = f2.multiselect(
+    "Focus bots", sorted(pool_books["bot"].unique()), default=[], key="perf_focus",
+    help="Empty = every bot in the tiers above. Pick a handful and the charts "
+         "redraw one line per bot instead of one per tier.")
+grain = f3.selectbox(
+    "Granularity", list(GRANULARITY.keys()),
+    index=(0 if days <= 1 else 1 if days <= 3 else 2 if days <= 14 else 3),
+    key="perf_grain",
+    help="How finely time is sliced. Rolled up locally from hourly totals the VPS "
+         "already sent — changing it costs no round trip.")
+measure = f4.radio("Measure", ["R", "$"], horizontal=True, key="perf_measure",
+                   help="R is risk-normalised and comparable across seats. Dollars "
+                        "are only meaningful on Tier 1 — Tier 2 is a virtual book "
+                        "and Tier 3 carries none.")
+
+sel = pool_books[pool_books["bot"].isin(focus)] if focus else pool_books
+names = set(sel["bot"])
+b_win = buckets[buckets["bot"].isin(names)] if names else buckets.iloc[0:0]
+t_win = trades[trades["bot"].isin(names)] if names else trades.iloc[0:0]
+
+if sel.empty:
+    st.info("Nothing in scope — widen the tier or bot selection above.")
+    st.stop()
+
+# ── headline ─────────────────────────────────────────────────────────────────
+hl = window_headline(sel)
+w_trades, w_pnl, w_r, w_r1 = hl["n"], hl["pnl_t1"], hl["sum_r"], hl["sum_r_t1"]
+w_wr, best, worst = hl["win_rate"], hl["best"], hl["worst"]
+
+scope_txt = f"{len(sel)} bot(s)" if focus else f"all {len(sel)} active book(s)"
 k = st.columns(5)
-k[0].metric("Tier-1 realized", f"${w_pnl:,.0f}", delta=f"{w_pnl:,.0f}",
-            help="Closed PnL booked by the order-placing seats over the window. "
-                 "This is the money line — everything else is a rehearsal or an instrument.")
-k[1].metric("Tier-1 ΣR", f"{w_r1:+.2f}R", delta=f"{w_r1:+.2f}",
-            help="Same trades in risk units: R = PnL ÷ the dollars risked on that trade. "
-                 "Net of the fee/slip toll unless a label says gross.")
+k[0].metric("Realized $ (Tier 1)", f"${w_pnl:,.0f}", delta=f"{w_pnl:,.0f}",
+            help="Closed PnL from the seats in scope that place real orders. "
+                 "Tier-2 dollars are virtual and Tier-3 has none, so neither is counted here.")
+k[1].metric("ΣR in scope", f"{w_r:+.2f}R", delta=f"{w_r:+.2f}",
+            help=f"R summed across every book in scope ({scope_txt}); Tier 1 alone is "
+                 f"{w_r1:+.2f}R. Net of the fee/slip toll unless a label says gross.")
 k[2].metric("Trades closed", f"{w_trades:,}",
-            help=f"Across all three tiers in the last {days} days, counted on the VPS "
-                 f"(not from the capped ledger below). Tier 1: {int(t1['n_7d'].sum()):,}.")
-k[3].metric("Tier-1 win rate", "—" if w_wr != w_wr else f"{w_wr:.0%}",
-            help="Share of Tier-1 closes with R > 0. A high win rate with negative ΣR "
-                 "still loses money — the losers are simply bigger.")
-k[4].metric("Tier-2 / Tier-3 ΣR", f"{w_r2:+.1f} / {w_r3:+.1f}R",
-            help="Paper book and shadow recorders. Tier-3 R is dimensionless by design "
-                 "(no sizing) — an edge-measuring instrument, not a P&L.")
+            help="Counted on the VPS across the whole window — not from the capped ledger below.")
+k[3].metric("Win rate", "—" if w_wr != w_wr else f"{w_wr:.0%}",
+            help="Share of closes with R > 0 (or $ > 0 where the book has no R). "
+                 "A high win rate with negative ΣR still loses — the losers are just bigger.")
+def _cav(row) -> str:
+    """A book's standing caveat, so a flagged number never takes an unqualified bow."""
+    note = (row["note"] or "").strip()
+    tier = f"Tier {int(row['tier'])}"
+    extra = {1: "", 2: " — virtual book",
+             3: " — record-only, dimensionless"}[int(row["tier"])]
+    return f"{row['bot']} ({row['n_7d']} trades, {tier}{extra})" + (f" · {note}" if note else "")
 
-# ── per-day PnL ──────────────────────────────────────────────────────────────
-if not daily.empty:
-    by_day = daily.groupby(["day", "tier"], as_index=False).agg(
-        r=("sum_r", "sum"), pnl=("sum_pnl", "sum"), n=("n", "sum"))
 
+k[4].metric("Best / worst book",
+            "—" if best is None else f"{best['sum_r_7d']:+.1f} / {worst['sum_r_7d']:+.1f}R",
+            help="Ranked on ΣR, so a shadow recorder can top a funded seat — R is "
+                 "dimensionless there and buys nothing.\n\n"
+                 + ("" if best is None else
+                    f"Best: {_cav(best)}.\n\nWorst: {_cav(worst)}."))
+
+# ── charts ───────────────────────────────────────────────────────────────────
+gr = resample_buckets(b_win, grain)
+val_col = "sum_pnl" if measure == "$" else "sum_r"
+unit = "$" if measure == "$" else "R"
+
+if gr.empty:
+    st.info("No closes in the window for the current scope.")
+else:
     gc1, gc2 = st.columns(2)
     with gc1:
-        st.subheader("Realized $ per day — Tier 1", divider="gray")
-        dd = by_day[by_day["tier"] == 1]
-        if dd.empty or dd["pnl"].abs().sum() == 0:
-            st.info("No Tier-1 dollars booked in the window.")
-        else:
-            fig = go.Figure(go.Bar(
-                x=dd["day"], y=dd["pnl"],
-                marker_color=["#2e7d32" if v >= 0 else "#c62828" for v in dd["pnl"]],
-                hovertemplate="%{x}<br>$%{y:,.0f}<extra></extra>"))
-            fig.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10),
-                              yaxis_title="realized $", xaxis_title=None)
-            st.plotly_chart(fig, use_container_width=True)
-            st.caption("Each bar is one UTC day's closed PnL from the seats that place real orders.")
-    with gc2:
-        st.subheader("Cumulative R by tier", divider="gray")
-        fig = go.Figure()
-        for tier in sorted(by_day["tier"].unique()):
-            dd = by_day[by_day["tier"] == tier].sort_values("day")
-            fig.add_trace(go.Scatter(
-                x=dd["day"], y=dd["r"].cumsum(),
-                name=TIER_NAMES[int(tier)].split("·")[0].strip(),
-                mode="lines+markers", line=dict(color=TIER_COLOR[int(tier)], width=2)))
-        fig.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10),
-                          yaxis_title="cumulative R", xaxis_title=None,
-                          legend=dict(orientation="h", y=1.12))
+        st.subheader(f"{unit} per {grain.lower()}", divider="gray")
+        per_t = gr.groupby("t", as_index=False)[val_col].sum()
+        fig = go.Figure(go.Bar(
+            x=per_t["t"], y=per_t[val_col],
+            marker_color=["#2e7d32" if v >= 0 else "#c62828" for v in per_t[val_col]],
+            hovertemplate="%{x|%b %d %H:%M}<br>" +
+                          ("$%{y:,.0f}" if measure == "$" else "%{y:+.2f}R") +
+                          "<extra></extra>"))
+        fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10),
+                          yaxis_title=f"realized {unit}", xaxis_title=None, bargap=0.15)
         st.plotly_chart(fig, use_container_width=True)
-        st.caption("Every closed trade in the window, counted on the VPS. R stacks across "
-                   "tiers on one axis — but only the Tier-1 line is money.")
+        st.caption(f"Each bar is one {grain.lower()} of closed trades in scope. "
+                   + ("Dollars come only from the Tier-1 seats." if measure == "$"
+                      else "R is risk-normalised, so seats of different size compare."))
+    with gc2:
+        by_bot = bool(focus) and len(focus) <= 10
+        st.subheader("Cumulative " + unit + (" by bot" if by_bot else " by tier"),
+                     divider="gray")
+        fig = go.Figure()
+        if by_bot:
+            for i, bot in enumerate(sorted(focus)):
+                dd = gr[gr["bot"] == bot].sort_values("t")
+                if dd.empty:
+                    continue
+                fig.add_trace(go.Scatter(
+                    x=dd["t"], y=dd[val_col].cumsum(), name=bot, mode="lines+markers",
+                    line=dict(width=2, color=PALETTE[i % len(PALETTE)])))
+        else:
+            for tier in sorted(gr["tier"].unique()):
+                dd = (gr[gr["tier"] == tier].groupby("t", as_index=False)[val_col]
+                      .sum().sort_values("t"))
+                fig.add_trace(go.Scatter(
+                    x=dd["t"], y=dd[val_col].cumsum(),
+                    name=TIER_NAMES[int(tier)].split("·")[0].strip(),
+                    mode="lines+markers", line=dict(color=TIER_COLOR[int(tier)], width=2)))
+        fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10),
+                          yaxis_title=f"cumulative {unit}", xaxis_title=None,
+                          legend=dict(orientation="h", y=1.14, font=dict(size=10)))
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption("Every closed trade in the window, counted on the VPS. "
+                   + ("Focus up to 10 bots to see them separately."
+                      if not by_bot else
+                      "One line per focused bot — same axis, so sizes compare directly."))
+
+    # who moved the needle
+    st.subheader(f"Contribution by bot — {unit}", divider="gray")
+    contrib = (gr.groupby(["bot", "tier"], as_index=False)
+                 .agg(v=(val_col, "sum"), n=("n", "sum")))
+    contrib = contrib[contrib["v"].abs() > 0].sort_values("v")
+    if contrib.empty:
+        st.info(f"No {unit} moved in scope over this window.")
+    else:
+        fig = go.Figure(go.Bar(
+            x=contrib["v"], y=contrib["bot"], orientation="h",
+            marker_color=["#2e7d32" if v >= 0 else "#c62828" for v in contrib["v"]],
+            customdata=contrib["n"],
+            hovertemplate="%{y}<br>" +
+                          ("$%{x:,.0f}" if measure == "$" else "%{x:+.2f}R") +
+                          " · %{customdata} trades<extra></extra>"))
+        fig.update_layout(height=max(240, 26 * len(contrib)),
+                          margin=dict(l=10, r=10, t=10, b=10),
+                          xaxis_title=f"{unit} over the window", yaxis_title=None)
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption("The whole window in one bar per bot — who actually moved the "
+                   "needle, rather than who traded the most.")
 
 # ── per-bot table ────────────────────────────────────────────────────────────
 st.subheader("Per-bot scoreboard", divider="gray")
 h1, h2 = st.columns([1, 3])
 hide_empty = h1.toggle("Hide silent books", value=True,
-                       help="Hide books with no trade ever and nothing running — dead or "
-                            "not-yet-armed seats. Turn off to audit the full roster.")
-view = books.copy()
-if hide_empty:
-    view = view[(view["n"] > 0) | (view["open_n"] > 0) | (view["working_n"] > 0)]
+                       help="Hide books with no trade in the window and nothing "
+                            "running. Turn off to audit the full roster.")
+view = sel if hide_empty else books[books["tier"].isin(tier_scope)]
+if focus:
+    view = view[view["bot"].isin(focus)]
 
 tabs = st.tabs([TIER_NAMES[t] for t in (1, 2, 3)])
 for tab, tier in zip(tabs, (1, 2, 3)):
     with tab:
         v = view[view["tier"] == tier].sort_values("n_7d", ascending=False)
         if v.empty:
-            st.info("No book in this tier matches the filter.")
+            st.info("No book in this tier matches the current scope.")
             continue
-        cols = ["bot", "n_7d", "mean_r_7d", "sum_r_7d"]
         cfg = {
             "bot": st.column_config.TextColumn("Bot", width="medium"),
             "n_7d": st.column_config.NumberColumn(f"n ({days}d)", width="small"),
@@ -435,7 +535,7 @@ for tab, tier in zip(tabs, (1, 2, 3)):
             "working_n": st.column_config.NumberColumn("working", width="small"),
             "note": st.column_config.TextColumn("Caveat", width="large"),
         }
-        cols += ["win_rate_7d"]
+        cols = ["bot", "n_7d", "mean_r_7d", "sum_r_7d", "win_rate_7d"]
         if tier != 3:
             cols += ["pnl_usd_7d"]
         cols += ["open_n", "working_n", "n", "mean_r", "sum_r"]
@@ -449,27 +549,31 @@ for tab, tier in zip(tabs, (1, 2, 3)):
                        "out-earn before anything is left over.")
         elif tier == 2:
             st.caption("A virtual $100k book: the dollars are simulated and uncapped, so "
-                       "read the R column. This tier answers *would this pass a challenge*.")
+                       "read the R column. This tier answers *would this pass a challenge*. "
+                       "The Alpaca analyst-drift seat sits here — US equities, a $ book "
+                       "with no stop-defined R.")
         else:
             st.caption("Dimensionless by design — no sizing, so no dollars. A deep-negative "
                        "line here is a confirmed-dead detector still faithfully recording: "
                        "the black box on a plane that already landed.")
 
 # ── trade ledger ─────────────────────────────────────────────────────────────
-st.subheader(f"Trade ledger — every close in the last {days} days", divider="gray")
-if trades.empty:
-    st.info("No book closed a trade in the window.")
+st.subheader(f"Trade ledger — closes in the last {days} days", divider="gray")
+if t_win.empty:
+    st.info("No book in scope closed a trade in the window.")
 else:
-    f1, f2, f3 = st.columns([1.2, 2, 1])
-    ledger_tiers = f1.multiselect("Tier", [1, 2, 3], default=[1],
-                                  format_func=lambda t: f"Tier {t}", key="ledger_tiers")
-    pool = trades[trades["tier"].isin(ledger_tiers)] if ledger_tiers else trades
-    bot_pick = f2.multiselect("Bot", sorted(pool["bot"].unique()), default=[],
-                              help="Empty = every bot in the selected tiers.")
-    if bot_pick:
-        pool = pool[pool["bot"].isin(bot_pick)]
-    only_losers = f3.toggle("Losers only", value=False)
-    if only_losers:
+    l1, l2, l3 = st.columns([1.4, 1.4, 1.2])
+    sym_pick = l1.multiselect("Symbol", sorted({s for s in t_win["symbol"].dropna().unique()}),
+                              default=[], help="Empty = every symbol in scope.")
+    pool = t_win[t_win["symbol"].isin(sym_pick)] if sym_pick else t_win
+    side_pick = l2.multiselect("Side", sorted({str(s) for s in pool["side"].dropna().unique()}),
+                               default=[])
+    if side_pick:
+        pool = pool[pool["side"].astype(str).isin(side_pick)]
+    outcome = l3.radio("Outcome", ["All", "Winners", "Losers"], horizontal=True)
+    if outcome == "Winners":
+        pool = pool[pool["r"] > 0]
+    elif outcome == "Losers":
         pool = pool[pool["r"] < 0]
 
     st.dataframe(
@@ -491,7 +595,7 @@ else:
         f"{len(pool):,} close(s) shown · ΣR **{s_r:+.2f}** · Σ$ **{s_p:,.2f}** "
         "(dollars only where the book prices in dollars — Tier-3 rows carry none). "
         "The ledger keeps the newest 500 closes **per book**, so a chatty shadow "
-        "recorder is trimmed here; the scoreboard and charts above count every row."
+        "recorder is trimmed here; the headline, charts and scoreboard count every row."
     )
     st.download_button(
         "⬇ Download this ledger (CSV)",
