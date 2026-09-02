@@ -38,7 +38,14 @@ import pandas as pd
 
 # Reused helpers from the LR module — same DVOL data, same band thresholds
 # as live MM config_base (IV_MED_THRESHOLD=45 / IV_HIGH_THRESHOLD=65).
-from .lr_faithful_filters import attach_dvol, dvol_band, MIN_MTF_SCORE  # noqa: F401
+# compute_daily_mtf / compute_4h_structure / mtf_score are PURE functions of a
+# 15m frame (no look-ahead of their own — the look-ahead lives at the CALL SITE,
+# in which daily row / 4h bin you decide is readable at time t). We import the
+# helpers and do our own, corrected, call sites below; see _mtf_at().
+from .lr_faithful_filters import (  # noqa: F401
+    attach_dvol, dvol_band, MIN_MTF_SCORE,
+    compute_daily_mtf, compute_4h_structure, mtf_score,
+)
 
 
 # ── Proprietary new5 regime classifier (optional) ────────────────────
@@ -82,6 +89,35 @@ def compute_regimes_new5(df: pd.DataFrame, symbol: str = "BTC") -> Optional[np.n
     return series.to_numpy(dtype=object)
 
 
+def _mtf_at(ets, direction: str, daily_mtf: pd.DataFrame, h4_struct: pd.DataFrame):
+    """MTF score + daily bias readable AT ``ets`` — no look-ahead.
+
+    Two boundaries decide whether this is honest or not, and the live LR feed
+    got both wrong until the 2026-08-17 fix (a copy of which is still what the
+    VPS runs, so we do NOT inherit its call sites):
+
+    * daily: the row labelled ``bar_date`` carries THAT DAY'S FINAL close, so an
+      intraday bar may only read rows STRICTLY BEFORE its own date. Reading
+      today's row at 09:00 is reading this evening's close.
+    * 4h: a bin labelled ``T`` covers ``[T, T+4h)``, so it is only closed —
+      and only knowable — once ``ets >= T + 4h``.
+
+    Returns ``(score, daily_bias)``; bias is "NEUTRAL" when nothing is readable
+    yet, which scores 0 on the daily leg (fail-safe: fewer signals, never more).
+    """
+    try:
+        r0 = daily_mtf.loc[daily_mtf.index < ets.normalize()].iloc[-1]
+        d_bias, d_strength = str(r0["bias"]), float(r0["strength"])
+    except (IndexError, KeyError):
+        d_bias, d_strength = "NEUTRAL", 0.0
+    try:
+        r1 = h4_struct.loc[h4_struct.index <= ets - pd.Timedelta(hours=4)].iloc[-1]
+        h4_v, h4_s = str(r1["h4_structure"]), float(r1["h4_strength"])
+    except (IndexError, KeyError):
+        h4_v, h4_s = "MIXED", 0.0
+    return mtf_score(direction, d_bias, d_strength, h4_v, h4_s), d_bias
+
+
 # ── Wrapper adapter: MM faithful drop-in ─────────────────────────────
 
 class FaithfulMMAdapter:
@@ -104,8 +140,36 @@ class FaithfulMMAdapter:
                  *, blocked_regimes: Iterable[str] = ("quiet_trend", "quiet_chop"),
                  block_bands: Iterable[str] = (),
                  partial_exit_pct: float = 0.5,
+                 min_mtf: float = 0.0,
+                 block_opposite_daily: bool = False,
                  ):
         """
+        min_mtf : MTF-score floor (0-100), or 0.0 to DISABLE the gate. Default
+            0.0 keeps every existing research/WFO caller byte-identical — MM has
+            never carried an MTF gate, and switching one on by default would
+            silently invalidate the studies that use this adapter. The live MMC
+            feed arms it (see ``mm_candle_depth_feed.MMC_MIN_MTF``).
+
+            WHY THIS EXISTS (2026-09-02 depth audit): the MMC arm of the depth
+            demo books was trading with NO directional filter of any kind — its
+            only gates were the new5 regime block and an IV band gate that
+            ``mm_candle_depth_feed`` left inert by constructing ``block_bands=()``.
+            All 15 of its closed trades scored MTF <= 35 (median 20 = the bare
+            base score, i.e. nothing aligned on either timeframe), it was 16% of
+            the trades and 39% of the loss, and on 2026-08-31 it sold ETH four
+            times into a daily bias of LONG with 4H structure BULLISH.
+        block_opposite_daily : refuse a signal whose direction opposes the daily
+            EMA50/200 bias outright, independent of the score. This is NOT
+            redundant with ``min_mtf``: the score is 20 base + 50 x daily +
+            30 x h4, so a fully-aligned 4H leg alone reaches exactly 50 and
+            clears a floor of 50 while the daily points the other way. That hole
+            is the one the LR arm has open; MM starts life with it shut.
+
+            Deliberately NOT the LR "counter_trend" rule, which keys on the old4
+            ``trending_up``/``trending_down`` labels and needs ADX > 30. MM runs
+            on new5 labels (different label space), and the audit measured that
+            ADX>30 held on only 23.4% of live entries — a gate that cannot fire
+            on three bars in four.
         partial_exit_pct : fraction of position closed at TP1 (default 0.5
             mirrors live ``PARTIAL_EXIT_PCT`` on the BTC config). 0.0 disables
             partial-TP entirely (signals exit the simulator's existing
@@ -122,6 +186,8 @@ class FaithfulMMAdapter:
         self.blocked_regimes = tuple(blocked_regimes)
         self.block_bands = tuple(block_bands)
         self.partial_exit_pct = float(partial_exit_pct)
+        self.min_mtf = float(min_mtf)
+        self.block_opposite_daily = bool(block_opposite_daily)
         # Caches keyed by id(df) — same trick as the LR faithful adapter.
         self._cache: dict = {}
 
@@ -167,8 +233,18 @@ class FaithfulMMAdapter:
             "df": df_dv,
             "regime_arr": compute_regimes_new5(df_dv, self.symbol),
         }
+        # MTF frames are built ONLY when the gate is armed — a WFO sweep that
+        # leaves min_mtf at 0 should not pay for a daily/4h resample it will
+        # never read. Cached by id(df) like everything else here, so a sweep
+        # over many param combos builds them once.
+        if self._mtf_armed():
+            ctx["daily_mtf"] = compute_daily_mtf(df_dv)
+            ctx["h4_struct"] = compute_4h_structure(df_dv)
         self._cache[key] = ctx
         return ctx
+
+    def _mtf_armed(self) -> bool:
+        return self.min_mtf > 0 or self.block_opposite_daily
 
     def generate_signals(self, df: pd.DataFrame, params: dict,
                          scan_start_idx: int, scan_end_idx: int):
@@ -180,8 +256,27 @@ class FaithfulMMAdapter:
         regime_arr = ctx["regime_arr"]
         blocked_regs = set(self.blocked_regimes)
         blocked_bands = set(self.block_bands)
+        mtf_armed = self._mtf_armed()
         survivors = []
         for sig in signals:
+            # MTF gate (2026-09-02) — cheapest meaningful directional filter, so
+            # it runs first. "The trend is your friend", enforced rather than
+            # assumed: a momentum signal that disagrees with both higher
+            # timeframes is a sprinter running the wrong way up the track.
+            if mtf_armed:
+                ets = pd.Timestamp(getattr(sig, "time"))
+                if ets.tzinfo is None:
+                    ets = ets.tz_localize("UTC")
+                direction = ("LONG" if getattr(sig, "direction", None)
+                             in (1, "LONG", "BUY") else "SHORT")
+                score, d_bias = _mtf_at(ets, direction,
+                                        ctx["daily_mtf"], ctx["h4_struct"])
+                if self.block_opposite_daily and d_bias not in ("NEUTRAL", direction):
+                    continue
+                if self.min_mtf > 0 and score < self.min_mtf:
+                    continue
+                md = getattr(sig, "metadata", None) or {}
+                sig.metadata = dict(md, mtf_score=score, daily_bias=d_bias)
             # Regime gate (new5).
             if regime_arr is not None and blocked_regs:
                 idx = getattr(sig, "idx", -1)
