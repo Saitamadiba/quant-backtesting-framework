@@ -1,8 +1,30 @@
 """Bayesian estimation of strategy edge using conjugate priors.
 
-Uses Beta-Binomial for win rate and Normal-Normal for mean R-multiple.
-All posteriors computed analytically (except expectancy, which uses
-lightweight Monte Carlo from the posteriors). No MCMC libraries needed.
+Uses Beta-Binomial for win rate and, for the mean R-multiple, a
+Normal-Inverse-Gamma conjugate (Student-t posterior for the mean) — the
+variance is a parameter with its own uncertainty, not a plug-in from the
+sample. All posteriors are analytic except expectancy, which uses lightweight
+Monte Carlo from the posteriors. No MCMC libraries needed.
+
+Faithfulness review 2026-09-03 (fleet plan WS1):
+  * The old Normal-Normal "known variance" step plugged the SAMPLE variance in
+    as if it were known. Measured on the same draws, the honest Student-t
+    interval is 5–50% wider below n≈16 (how much depends on how the sample
+    variance happened to fall — the very thing the plug-in ignores) and agrees
+    to 2% by n≈50. Small books are exactly what the fleet page shows. The
+    mean-R posterior is now Student-t (NIG conjugate, weak variance prior);
+    `variance='plugin'` keeps the old behaviour for comparison.
+  * The 'skeptical' prior is Beta(50,50) — a hundred pseudo-trades insisting on
+    a 50% win rate — with the mean-R prior centred on ZERO, i.e. on "no toll".
+    For a fee-paying seat the honest null is the toll itself: the new 'toll'
+    prior centres mean R on −0.25R (sd 0.5) with a 10-pseudo-trade 50% WR.
+  * Every trade counted as an independent draw. Fleet books cluster (several
+    same-direction fills in one 15-minute bucket are one bet), so `fit()` takes
+    an effective sample size `n_eff` that scales both the pseudo-counts and the
+    likelihood precision.
+  * P(mean R > 0) is not the question a fee-paying book faces; `p_above(x)` and
+    `summary(threshold=...)` report P(mean R > toll) alongside it.
+  * The Kelly summary labelled a median as 'posterior_mean'; both are reported.
 """
 
 import logging
@@ -29,8 +51,18 @@ class BayesianPrior:
 
 PRIORS = {
     'uninformative': BayesianPrior('uninformative', 1.0, 1.0, 0.0, 10.0),
+    # 100 pseudo-trades at a 50% win rate, mean R centred on zero (no toll).
+    # Kept for the research pages; NOT the right null for a fee-paying seat.
     'skeptical':     BayesianPrior('skeptical', 50.0, 50.0, 0.0, 0.5),
+    # The fleet's null: a seat that pays the ~0.25R fee/slip crossing charge and
+    # has no edge. 10 pseudo-trades at 50% WR so the data can speak by n≈20.
+    'toll':          BayesianPrior('toll', 5.0, 5.0, -0.25, 0.5),
 }
+
+# Normal-Inverse-Gamma variance prior: a weak belief that R has unit-ish scale.
+# nu0 pseudo-observations of variance s0^2. Small nu0 = let the data decide.
+NIG_NU0 = 2.0
+NIG_S0 = 1.0
 
 
 class BayesianEdgeEstimator:
@@ -59,9 +91,12 @@ class BayesianEdgeEstimator:
         # Win rate posterior
         self._wr_alpha_post = None
         self._wr_beta_post = None
-        # Mean R posterior
+        # Mean R posterior — Student-t (NIG) unless variance='plugin'
         self._r_mu_post = None
-        self._r_sigma_post = None
+        self._r_sigma_post = None       # scale of the t (or sd of the normal)
+        self._r_df_post = None          # None → normal (plugin variance)
+        self._n_eff = None
+        self._variance_mode = 'nig'
         # Win/loss R posteriors (for expectancy)
         self._win_r_mu_post = None
         self._win_r_sigma_post = None
@@ -73,13 +108,23 @@ class BayesianEdgeEstimator:
         r_multiples: Any,
         prior: str = 'skeptical',
         custom_prior: Optional[BayesianPrior] = None,
+        n_eff: Optional[float] = None,
+        variance: str = 'nig',
     ) -> 'BayesianEdgeEstimator':
         """Fit the Bayesian model on observed R-multiples.
 
         Args:
             r_multiples: R-multiple values (positive = win, negative = loss).
-            prior: Prior name ('uninformative', 'skeptical').
+            prior: Prior name ('uninformative', 'skeptical', 'toll').
             custom_prior: Custom BayesianPrior (overrides prior name).
+            n_eff: Effective number of independent bets (≤ n). Clustered fills
+                (same family, same direction, same 15-min bucket) are one bet;
+                pass the cluster count and every count/precision is scaled by
+                n_eff/n. Default n (independent).
+            variance: 'nig' (default) — Normal-Inverse-Gamma conjugate, the mean
+                has a Student-t posterior; 'plugin' — the old known-variance
+                Normal with the sample variance plugged in (overconfident at
+                small n; kept for comparison).
 
         Returns:
             self (for chaining).
@@ -93,6 +138,15 @@ class BayesianEdgeEstimator:
 
         if self._n < 2:
             raise ValueError(f"Need at least 2 trades, got {self._n}")
+        if n_eff is None:
+            n_eff = float(self._n)
+        if not (0 < n_eff <= self._n + 1e-9):
+            raise ValueError(f"n_eff must be in (0, n]; got {n_eff} for n={self._n}")
+        self._n_eff = float(n_eff)
+        w = self._n_eff / self._n            # per-trade weight
+        if variance not in ('nig', 'plugin'):
+            raise ValueError("variance must be 'nig' or 'plugin'")
+        self._variance_mode = variance
 
         # Resolve prior
         if custom_prior is not None:
@@ -111,22 +165,39 @@ class BayesianEdgeEstimator:
         self._n_wins = int(np.sum(wins))
         self._n_losses = self._n - self._n_wins
 
-        self._wr_alpha_post = p.wr_alpha + self._n_wins
-        self._wr_beta_post = p.wr_beta + self._n_losses
+        self._wr_alpha_post = p.wr_alpha + self._n_wins * w
+        self._wr_beta_post = p.wr_beta + self._n_losses * w
 
-        # --- Mean R (Normal-Normal conjugate, known-variance approx) ---
+        # --- Mean R ---
         x_bar = float(np.mean(r))
-        s2 = float(np.var(r, ddof=1))
-        s2 = max(s2, 1e-10)  # avoid division by zero
+        s2 = max(float(np.var(r, ddof=1)), 1e-10)
+        n_e = self._n_eff
 
-        prior_prec = 1.0 / (p.r_sigma ** 2)
-        like_prec = self._n / s2
-        post_prec = prior_prec + like_prec
-        self._r_sigma_post = float(np.sqrt(1.0 / post_prec))
-        self._r_mu_post = float(
-            self._r_sigma_post ** 2
-            * (p.r_mu * prior_prec + self._n * x_bar / s2)
-        )
+        if variance == 'plugin':
+            # Known-variance Normal-Normal with the sample variance plugged in.
+            prior_prec = 1.0 / (p.r_sigma ** 2)
+            like_prec = n_e / s2
+            post_prec = prior_prec + like_prec
+            self._r_sigma_post = float(np.sqrt(1.0 / post_prec))
+            self._r_mu_post = float(self._r_sigma_post ** 2
+                                    * (p.r_mu * prior_prec + n_e * x_bar / s2))
+            self._r_df_post = None
+        else:
+            # Normal-Inverse-Gamma conjugate. Prior: mu ~ N(mu0, sigma^2/kappa0),
+            # sigma^2 ~ InvGamma(nu0/2, nu0*s0^2/2). The prior's stated r_sigma
+            # is the marginal sd of mu, so kappa0 = s0^2 / r_sigma^2 pseudo-obs.
+            mu0 = p.r_mu
+            kappa0 = max((NIG_S0 ** 2) / (p.r_sigma ** 2), 1e-6)
+            nu0, s0sq = NIG_NU0, NIG_S0 ** 2
+            kappa_n = kappa0 + n_e
+            nu_n = nu0 + n_e
+            mu_n = (kappa0 * mu0 + n_e * x_bar) / kappa_n
+            ss = (self._n - 1) * s2 * w              # effective within-sample SS
+            nu_n_s2 = nu0 * s0sq + ss + (kappa0 * n_e / kappa_n) * (x_bar - mu0) ** 2
+            sigma_n_sq = nu_n_s2 / nu_n
+            self._r_mu_post = float(mu_n)
+            self._r_sigma_post = float(np.sqrt(sigma_n_sq / kappa_n))   # t scale
+            self._r_df_post = float(nu_n)
 
         # --- Separate win/loss R posteriors (for expectancy MC) ---
         win_r = r[wins]
@@ -169,11 +240,29 @@ class BayesianEdgeEstimator:
         self._fitted = True
         return self
 
-    def summary(self) -> dict:
+    def _r_dist(self):
+        """The mean-R posterior: Student-t (NIG) or Normal (plugin)."""
+        from scipy import stats as sp_stats
+        if self._r_df_post is None:
+            return sp_stats.norm(self._r_mu_post, self._r_sigma_post)
+        return sp_stats.t(df=self._r_df_post, loc=self._r_mu_post, scale=self._r_sigma_post)
+
+    def p_above(self, threshold: float = 0.0) -> float:
+        """P(mean R > threshold) under the posterior. Pass the toll (e.g. 0.25R
+        for a taker seat) to ask the question a fee-paying book actually faces."""
+        if not self._fitted:
+            raise RuntimeError("Call .fit() before .p_above()")
+        return float(self._r_dist().sf(threshold))
+
+    def summary(self, threshold: float = 0.0) -> dict:
         """Return full posterior summary.
 
+        Args:
+            threshold: an R level to test the mean against in addition to zero
+                (e.g. the fee/slip toll). Reported as mean_r.p_above_threshold.
+
         Returns:
-            Dict with keys: prior, n_trades, n_wins, win_rate, mean_r,
+            Dict with keys: prior, n_trades, n_eff, n_wins, win_rate, mean_r,
             expectancy, kelly_fraction, shrinkage, sample_size_assessment.
         """
         if not self._fitted:
@@ -191,12 +280,14 @@ class BayesianEdgeEstimator:
         wr_ci = (float(wr_dist.ppf(0.025)), float(wr_dist.ppf(0.975)))
         p_above_50 = float(1.0 - wr_dist.cdf(0.5))
 
-        # --- Mean R Posterior ---
-        r_dist = sp_stats.norm(self._r_mu_post, self._r_sigma_post)
+        # --- Mean R Posterior (Student-t under NIG) ---
+        r_dist = self._r_dist()
         r_mean = float(r_dist.mean())
-        r_std = self._r_sigma_post
+        r_std = float(r_dist.std()) if (self._r_df_post is None or self._r_df_post > 2) \
+            else float('nan')
         r_ci = (float(r_dist.ppf(0.025)), float(r_dist.ppf(0.975)))
-        p_positive = float(1.0 - r_dist.cdf(0.0))
+        p_positive = float(r_dist.sf(0.0))
+        p_above_thr = float(r_dist.sf(threshold))
 
         # --- Expectancy Posterior (MC from component posteriors) ---
         wr_samples = sp_stats.beta.rvs(
@@ -232,7 +323,8 @@ class BayesianEdgeEstimator:
         odds = win_r_samples / avg_loss_abs
         kelly_samples = (wr_samples * (1 + odds) - 1) / odds
         kelly_samples = np.clip(kelly_samples, -1.0, 2.0)
-        kelly_mean = float(np.median(kelly_samples))
+        kelly_median = float(np.median(kelly_samples))
+        kelly_mean = float(np.mean(kelly_samples))
         kelly_ci = (
             float(np.percentile(kelly_samples, 2.5)),
             float(np.percentile(kelly_samples, 97.5)),
@@ -276,7 +368,9 @@ class BayesianEdgeEstimator:
                 'r_sigma': p.r_sigma,
             },
             'n_trades': self._n,
+            'n_eff': round(self._n_eff, 2),
             'n_wins': self._n_wins,
+            'variance_model': 'student_t_nig' if self._r_df_post is not None else 'normal_plugin',
 
             'win_rate': {
                 'posterior_mean': round(wr_mean, 4),
@@ -287,9 +381,12 @@ class BayesianEdgeEstimator:
 
             'mean_r': {
                 'posterior_mean': round(r_mean, 4),
-                'posterior_std': round(r_std, 4),
+                'posterior_std': round(r_std, 4) if r_std == r_std else None,
+                'posterior_df': round(self._r_df_post, 2) if self._r_df_post is not None else None,
                 'credible_interval_95': (round(r_ci[0], 4), round(r_ci[1], 4)),
                 'p_positive': round(p_positive, 4),
+                'threshold': threshold,
+                'p_above_threshold': round(p_above_thr, 4),
             },
 
             'expectancy': {
@@ -300,6 +397,7 @@ class BayesianEdgeEstimator:
 
             'kelly_fraction': {
                 'posterior_mean': round(kelly_mean, 4),
+                'posterior_median': round(kelly_median, 4),
                 'credible_interval_95': (round(kelly_ci[0], 4), round(kelly_ci[1], 4)),
             },
 
@@ -337,13 +435,9 @@ class BayesianEdgeEstimator:
             other._wr_alpha_post, other._wr_beta_post, size=N, random_state=rng,
         )
 
-        # Mean R comparison
-        r_a = sp_stats.norm.rvs(
-            self._r_mu_post, self._r_sigma_post, size=N, random_state=rng,
-        )
-        r_b = sp_stats.norm.rvs(
-            other._r_mu_post, other._r_sigma_post, size=N, random_state=rng,
-        )
+        # Mean R comparison (each from its own posterior family)
+        r_a = self._r_dist().rvs(size=N, random_state=rng)
+        r_b = other._r_dist().rvs(size=N, random_state=rng)
 
         # Expectancy comparison
         win_a = np.clip(sp_stats.norm.rvs(
@@ -401,7 +495,7 @@ class BayesianEdgeEstimator:
         mu = self._r_mu_post
         sigma = self._r_sigma_post
         x_r = np.linspace(mu - 4 * sigma, mu + 4 * sigma, 500)
-        r_pdf = sp_stats.norm.pdf(x_r, mu, sigma)
+        r_pdf = self._r_dist().pdf(x_r)
         r_prior = sp_stats.norm.pdf(x_r, p.r_mu, p.r_sigma)
         axes[1].plot(x_r, r_pdf, 'b-', label='Posterior')
         axes[1].plot(x_r, r_prior, 'r--', alpha=0.5, label='Prior')

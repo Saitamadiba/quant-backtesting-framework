@@ -13,8 +13,23 @@ at bar t uses only data up to and including bar t.  This is the causal,
 non-anticipatory analog of the Viterbi or forward-backward algorithms.
 
 Classes:
-    GaussianHMM       — Manual 2-state multivariate Gaussian HMM (Baum-Welch EM).
+    GaussianHMM       — Manual K-state multivariate Gaussian HMM (Baum-Welch EM).
     HMMRegimeAssessor  — WFO integration wrapper for IS fit / OOS forward-filter.
+
+Faithfulness review 2026-09-03 (fleet plan WS3):
+  * K > 2 used to be silently broken — the init only seeded states 0 and 1 and
+    the relabel only compared them, so a 3-state model carried a zero-mean,
+    1e-6-sigma ghost state. Init now splits on quantiles of the volatility
+    feature for any K and states are relabelled by ascending volatility mean.
+  * The "calm = state 0" convention assumed the volatility feature sat in
+    column 1 ([LogReturn, RealizedVol20]). Fleet features put realized vol
+    first, so the volatility column is now an explicit `vol_feature_index`.
+  * The OOS forward filter restarted from the fitted initial distribution `pi`
+    at the first OOS bar — a seam where the filter forgets everything the IS
+    window knew. `forward_filter(init_state_probs=...)` lets a caller carry the
+    last IS posterior across, and `HMMRegimeAssessor` does so automatically.
+  * The forward/backward/xi recursions are vectorised over states (K is small,
+    T is not); results are identical, rolling refits stop taking minutes.
 """
 
 import logging
@@ -41,10 +56,16 @@ class GaussianHMM:
     the first feature dimension, which is typically RealizedVol).
     """
 
-    def __init__(self, n_states: int = 2, max_iter: int = 100, tol: float = 1e-4):
+    def __init__(self, n_states: int = 2, max_iter: int = 100, tol: float = 1e-4,
+                 vol_feature_index: int = 1):
+        if n_states < 2:
+            raise ValueError("n_states must be >= 2")
         self.K = n_states
         self.max_iter = max_iter
         self.tol = tol
+        # Column of X that carries the volatility measure. States are ordered by
+        # their mean on this column: state 0 = calmest, state K-1 = most volatile.
+        self.vol_feature_index = vol_feature_index
 
         # Parameters (set by fit)
         self.mu: Optional[np.ndarray] = None      # (K, D)
@@ -71,32 +92,26 @@ class GaussianHMM:
 
     def fit(self, X: np.ndarray) -> 'GaussianHMM':
         """Fit HMM via Baum-Welch EM on observations X of shape (T, D)."""
+        X = np.asarray(X, dtype=float)
         T, D = X.shape
         self.D = D
         K = self.K
+        v = min(self.vol_feature_index, D - 1)
 
-        # --- K-means init ---
-        # Split by median of first feature (typically volatility)
-        med = np.median(X[:, 0])
-        mask_lo = X[:, 0] <= med
-        mask_hi = ~mask_lo
-
+        # --- Quantile init on the volatility feature (any K) ---
+        edges = np.quantile(X[:, v], np.linspace(0, 1, K + 1))
         self.mu = np.zeros((K, D))
         self.sigma = np.zeros((K, D))
-
-        if np.sum(mask_lo) > 0:
-            self.mu[0] = np.mean(X[mask_lo], axis=0)
-            self.sigma[0] = np.maximum(np.std(X[mask_lo], axis=0), 1e-6)
-        else:
-            self.mu[0] = np.mean(X, axis=0) - 0.1
-            self.sigma[0] = np.maximum(np.std(X, axis=0), 1e-6)
-
-        if np.sum(mask_hi) > 0:
-            self.mu[1] = np.mean(X[mask_hi], axis=0)
-            self.sigma[1] = np.maximum(np.std(X[mask_hi], axis=0), 1e-6)
-        else:
-            self.mu[1] = np.mean(X, axis=0) + 0.1
-            self.sigma[1] = np.maximum(np.std(X, axis=0), 1e-6)
+        glob_mu, glob_sd = np.mean(X, axis=0), np.maximum(np.std(X, axis=0), 1e-6)
+        for k in range(K):
+            lo, hi = edges[k], edges[k + 1]
+            mask = (X[:, v] >= lo) & ((X[:, v] <= hi) if k == K - 1 else (X[:, v] < hi))
+            if mask.sum() >= 2:
+                self.mu[k] = np.mean(X[mask], axis=0)
+                self.sigma[k] = np.maximum(np.std(X[mask], axis=0), 1e-6)
+            else:  # degenerate slice — nudge off the global mean so states differ
+                self.mu[k] = glob_mu + (k - (K - 1) / 2) * 0.1 * glob_sd
+                self.sigma[k] = glob_sd
 
         # Sticky transitions
         self.A = np.full((K, K), 0.1 / (K - 1))
@@ -104,51 +119,38 @@ class GaussianHMM:
         self.pi = np.full(K, 1.0 / K)
 
         prev_ll = -np.inf
-
         for iteration in range(self.max_iter):
             log_B = self._log_emission(X)
+            log_A = np.log(self.A + 1e-300)
 
-            # --- Forward pass ---
+            # --- Forward pass (vectorised over states) ---
             log_alpha = np.zeros((T, K))
             log_alpha[0] = np.log(self.pi + 1e-300) + log_B[0]
-
             for t in range(1, T):
-                for j in range(K):
-                    log_alpha[t, j] = (
-                        _logsumexp(log_alpha[t - 1] + np.log(self.A[:, j] + 1e-300))
-                        + log_B[t, j]
-                    )
-
+                m = log_alpha[t - 1][:, None] + log_A            # (K_from, K_to)
+                mx = m.max(axis=0)
+                log_alpha[t] = mx + np.log(np.exp(m - mx).sum(axis=0)) + log_B[t]
             loglik = _logsumexp(log_alpha[-1])
 
             # --- Backward pass ---
             log_beta = np.zeros((T, K))
             for t in range(T - 2, -1, -1):
-                for i in range(K):
-                    log_beta[t, i] = _logsumexp(
-                        np.log(self.A[i, :] + 1e-300) + log_B[t + 1] + log_beta[t + 1]
-                    )
+                m = log_A + (log_B[t + 1] + log_beta[t + 1])[None, :]   # (K_from, K_to)
+                mx = m.max(axis=1)
+                log_beta[t] = mx + np.log(np.exp(m - mx[:, None]).sum(axis=1))
 
             # --- Posterior gamma ---
             log_gamma = log_alpha + log_beta
-            for t in range(T):
-                log_gamma[t] -= _logsumexp(log_gamma[t])
+            log_gamma -= log_gamma.max(axis=1, keepdims=True)
             gamma = np.exp(log_gamma)
+            gamma /= gamma.sum(axis=1, keepdims=True)
 
-            # --- Xi ---
-            xi = np.zeros((T - 1, K, K))
-            for t in range(T - 1):
-                for i in range(K):
-                    for j in range(K):
-                        xi[t, i, j] = (
-                            log_alpha[t, i]
-                            + np.log(self.A[i, j] + 1e-300)
-                            + log_B[t + 1, j]
-                            + log_beta[t + 1, j]
-                        )
-                norm = _logsumexp(xi[t].ravel())
-                xi[t] -= norm
-            xi = np.exp(xi)
+            # --- Xi (T-1, K, K) ---
+            log_xi = (log_alpha[:-1, :, None] + log_A[None, :, :]
+                      + (log_B[1:] + log_beta[1:])[:, None, :])
+            log_xi -= log_xi.reshape(T - 1, -1).max(axis=1)[:, None, None]
+            xi = np.exp(log_xi)
+            xi /= xi.reshape(T - 1, -1).sum(axis=1)[:, None, None]
 
             # --- Convergence ---
             if abs(loglik - prev_ll) < self.tol and iteration > 0:
@@ -156,65 +158,89 @@ class GaussianHMM:
             prev_ll = loglik
 
             # --- M-step ---
-            self.pi = gamma[0] / np.sum(gamma[0])
-            self.pi = np.clip(self.pi, 1e-6, 1.0)
+            self.pi = np.clip(gamma[0] / np.sum(gamma[0]), 1e-6, 1.0)
             self.pi /= self.pi.sum()
 
+            denom = gamma[:-1].sum(axis=0)                       # (K,)
+            A_new = xi.sum(axis=0)                               # (K, K)
             for i in range(K):
-                denom = np.sum(gamma[:-1, i])
-                if denom > 1e-12:
-                    for j in range(K):
-                        self.A[i, j] = np.sum(xi[:, i, j]) / denom
+                if denom[i] > 1e-12:
+                    self.A[i] = A_new[i] / denom[i]
                 self.A[i] = np.clip(self.A[i], 1e-6, 1.0)
                 self.A[i] /= self.A[i].sum()
 
             for k in range(K):
                 g_sum = np.sum(gamma[:, k])
                 if g_sum > 1e-12:
-                    self.mu[k] = np.sum(gamma[:, k : k + 1] * X, axis=0) / g_sum
+                    self.mu[k] = np.sum(gamma[:, k:k + 1] * X, axis=0) / g_sum
                     diff = X - self.mu[k]
-                    self.sigma[k] = np.sqrt(
-                        np.sum(gamma[:, k : k + 1] * diff ** 2, axis=0) / g_sum
-                    )
+                    self.sigma[k] = np.sqrt(np.sum(gamma[:, k:k + 1] * diff ** 2, axis=0) / g_sum)
                     self.sigma[k] = np.maximum(self.sigma[k], 1e-6)
 
-        # --- Re-label: state 0 = calm (lowest RealizedVol mean, feature dim 1) ---
-        vol_dim = min(1, D - 1)  # second feature if available, else first
-        if self.mu[1, vol_dim] < self.mu[0, vol_dim]:
-            self.mu = self.mu[::-1].copy()
-            self.sigma = self.sigma[::-1].copy()
-            self.A = self.A[::-1, ::-1].copy()
-            self.pi = self.pi[::-1].copy()
+        # --- Re-label: states in ascending order of the volatility feature's mean ---
+        order = np.argsort(self.mu[:, v])
+        self.mu = self.mu[order].copy()
+        self.sigma = self.sigma[order].copy()
+        self.A = self.A[np.ix_(order, order)].copy()
+        self.pi = self.pi[order].copy()
 
         self.fitted = True
         return self
 
-    def forward_filter(self, X: np.ndarray) -> np.ndarray:
+    def forward_filter(self, X: np.ndarray,
+                       init_state_probs: Optional[np.ndarray] = None) -> np.ndarray:
         """Forward-filter ONLY: P(state_t | x_1:t).
 
         Returns array of shape (T, K) with filtered state probabilities.
         No backward pass — safe for OOS use without future leakage.
+
+        `init_state_probs` is the state distribution believed to hold just
+        BEFORE the first row of X (e.g. the last filtered posterior of the IS
+        window). It is propagated one step through A before the first emission,
+        so an OOS segment continues the IS filter instead of restarting from pi.
         """
         if not self.fitted:
             raise ValueError("HMM not fitted. Call fit() first.")
 
+        X = np.asarray(X, dtype=float)
         T = X.shape[0]
         log_B = self._log_emission(X)
+        log_A = np.log(self.A + 1e-300)
 
         log_alpha = np.zeros((T, self.K))
-        log_alpha[0] = np.log(self.pi + 1e-300) + log_B[0]
-        # Normalise
+        if init_state_probs is None:
+            start = np.log(self.pi + 1e-300)
+        else:
+            prev = np.asarray(init_state_probs, dtype=float)
+            prev = prev / prev.sum()
+            start = np.log(prev @ self.A + 1e-300)               # one transition step
+        log_alpha[0] = start + log_B[0]
         log_alpha[0] -= _logsumexp(log_alpha[0])
 
         for t in range(1, T):
-            for j in range(self.K):
-                log_alpha[t, j] = (
-                    _logsumexp(log_alpha[t - 1] + np.log(self.A[:, j] + 1e-300))
-                    + log_B[t, j]
-                )
+            m = log_alpha[t - 1][:, None] + log_A
+            mx = m.max(axis=0)
+            log_alpha[t] = mx + np.log(np.exp(m - mx).sum(axis=0)) + log_B[t]
             log_alpha[t] -= _logsumexp(log_alpha[t])
 
         return np.exp(log_alpha)
+
+    def transition_summary(self) -> Dict:
+        """The switch-sequencing view of a fitted model: P(A→B), expected dwell
+        time per state (1/(1−A_ii) bars), and the stationary distribution."""
+        if not self.fitted:
+            raise ValueError("HMM not fitted. Call fit() first.")
+        A = self.A
+        dwell = 1.0 / np.maximum(1.0 - np.diag(A), 1e-9)
+        evals, evecs = np.linalg.eig(A.T)
+        stat = np.real(evecs[:, np.argmin(np.abs(evals - 1.0))])
+        stat = stat / stat.sum()
+        return {
+            'transition_matrix': A.tolist(),
+            'expected_dwell_bars': dwell.tolist(),
+            'stationary': stat.tolist(),
+            'state_order': 'ascending volatility (state 0 = calmest)',
+        }
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         """Viterbi decoding — for IS labelling only."""
@@ -228,11 +254,11 @@ class GaussianHMM:
         psi = np.zeros((T, self.K), dtype=int)
         log_delta[0] = np.log(self.pi + 1e-300) + log_B[0]
 
+        log_A = np.log(self.A + 1e-300)
         for t in range(1, T):
-            for j in range(self.K):
-                candidates = log_delta[t - 1] + np.log(self.A[:, j] + 1e-300)
-                psi[t, j] = int(np.argmax(candidates))
-                log_delta[t, j] = candidates[psi[t, j]] + log_B[t, j]
+            cand = log_delta[t - 1][:, None] + log_A            # (K_from, K_to)
+            psi[t] = np.argmax(cand, axis=0)
+            log_delta[t] = cand[psi[t], np.arange(self.K)] + log_B[t]
 
         # Back-track
         labels = np.zeros(T, dtype=int)
@@ -260,20 +286,28 @@ class HMMRegimeAssessor:
 
     FEATURES = ['LogReturn', 'RealizedVol20']
 
-    def __init__(self, n_states: int = 2):
+    def __init__(self, n_states: int = 2, features: Optional[List[str]] = None,
+                 vol_feature: Optional[str] = None):
         self.n_states = n_states
-        self.hmm = GaussianHMM(n_states=n_states)
+        self.features = list(features) if features else list(self.FEATURES)
+        vol_feature = vol_feature or ('RealizedVol20' if 'RealizedVol20' in self.features
+                                      else self.features[-1])
+        if vol_feature not in self.features:
+            raise ValueError(f"vol_feature {vol_feature!r} not in features {self.features}")
+        self.hmm = GaussianHMM(n_states=n_states,
+                               vol_feature_index=self.features.index(vol_feature))
         self.is_mean: Optional[np.ndarray] = None
         self.is_std: Optional[np.ndarray] = None
+        self.is_last_posterior: Optional[np.ndarray] = None   # carried into OOS
 
     def _extract_features(self, df) -> Optional[np.ndarray]:
         """Extract [LogReturn, RealizedVol20] features from DataFrame."""
-        missing = [f for f in self.FEATURES if f not in df.columns]
+        missing = [f for f in self.features if f not in df.columns]
         if missing:
             logger.warning(f"HMM features missing: {missing}")
             return None
 
-        X = df[self.FEATURES].values.copy()
+        X = df[self.features].values.copy()
 
         # Drop NaN rows
         mask = ~np.isnan(X).any(axis=1)
@@ -298,6 +332,8 @@ class HMMRegimeAssessor:
 
         try:
             self.hmm.fit(X_std)
+            # Where the IS window left the filter — the OOS segment starts here.
+            self.is_last_posterior = self.hmm.forward_filter(X_std)[-1]
             return True
         except Exception as e:
             logger.warning(f"HMM fit failed: {e}")
@@ -311,7 +347,7 @@ class HMMRegimeAssessor:
         if not self.hmm.fitted or self.is_mean is None:
             return None
 
-        X_raw = oos_df[self.FEATURES].values.copy()
+        X_raw = oos_df[self.features].values.copy()
         nan_mask = np.isnan(X_raw).any(axis=1)
         # Fill NaN with IS mean (conservative: no info from OOS)
         for i in range(X_raw.shape[1]):
@@ -321,7 +357,7 @@ class HMMRegimeAssessor:
         X_std = (X_raw - self.is_mean) / self.is_std
 
         try:
-            return self.hmm.forward_filter(X_std)
+            return self.hmm.forward_filter(X_std, init_state_probs=self.is_last_posterior)
         except Exception as e:
             logger.warning(f"HMM forward filter failed: {e}")
             return None
@@ -338,8 +374,12 @@ class HMMRegimeAssessor:
             P(volatile) >= 0.60 → 0.3  (defensive)
             else → 0.5  (uncertain)
         """
+        # NOTE: these multipliers are the article's heuristic for the research
+        # WFO. On the live fleet the HyroTrader standard forbids dimming size
+        # below the 1% floor — a regime verdict may gate a seat ON/OFF, never
+        # shrink it. Use forward_filter() + a pre-registered rule for that.
         p_calm = state_probs[0]
-        p_volatile = state_probs[1] if len(state_probs) > 1 else 1 - p_calm
+        p_volatile = state_probs[-1] if len(state_probs) > 1 else 1 - p_calm
 
         if p_calm >= HMMRegimeAssessor.FULL_SIZE_THRESHOLD:
             return 1.0
@@ -368,6 +408,7 @@ class HMMRegimeAssessor:
         result['hmm_means'] = self.hmm.mu.tolist()
         result['hmm_stds'] = self.hmm.sigma.tolist()
         result['transition_matrix'] = self.hmm.A.tolist()
+        result['switch_sequencing'] = self.hmm.transition_summary()
 
         # Forward-filter OOS
         probs = self.filter_oos(oos_df)

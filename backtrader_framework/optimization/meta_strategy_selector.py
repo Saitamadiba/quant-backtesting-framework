@@ -11,6 +11,21 @@ Usage:
     dataset = selector.build_dataset(wfo_filepaths, ohlcv_df)
     train_result = selector.train(dataset)
     backtest_result = selector.backtest(dataset)
+
+Faithfulness review 2026-09-03 (fleet plan WS5) — two leaks, one mis-count:
+  * OVERLAPPING-LABEL LEAK. The label at day t is the best strategy over days
+    t+1..t+H. Training on rows up to t-1 therefore trains on labels that already
+    contain the returns of days t..t+H-2 — the very returns the day-t prediction
+    is then scored on. Any persistent feature lets the model "remember" them.
+    `train()` and `backtest()` now leave an embargo of H rows between the last
+    training label and the first evaluated day (TimeSeriesSplit(gap=H) in CV).
+  * H-FOLD OVER-COUNT. The backtest scored EVERY day's forward H-day sum as that
+    day's return and summed them — each realized day counted H times, with the
+    Sharpe annualised as if the series were daily and independent. The walk-
+    forward now decides at day t, holds the pick for H days, and books the
+    DAILY returns actually earned (stored per strategy at build time), so total
+    R is the R a follower would have banked and the Sharpe is a daily Sharpe.
+  * The regime × strategy heatmap is computed in-sample and is labelled so.
 """
 
 import numpy as np
@@ -143,6 +158,9 @@ class MetaStrategySelector:
             ).sum().shift(-self.lookforward_days)
 
         fwd_df = pd.DataFrame(fwd_cols, index=daily_df.index)
+        # Daily REALIZED returns per strategy — what a follower actually books.
+        daily_cols = {f'daily_{label}': daily_df[label] for label in self.strategy_labels}
+        daily_ret_df = pd.DataFrame(daily_cols, index=daily_df.index)
 
         # ── Assign label = best strategy ─────────────────────────────
         fwd_only = fwd_df[[f'fwd_{l}' for l in self.strategy_labels]]
@@ -161,8 +179,8 @@ class MetaStrategySelector:
 
         # ── Merge everything ─────────────────────────────────────────
         dataset = features_df.join(fwd_df, how='inner').join(
-            labels, how='inner'
-        )
+            daily_ret_df, how='left'
+        ).join(labels, how='inner')
 
         # Drop rows with NaN label (end of data, no forward window)
         dataset = dataset.dropna(subset=['label'])
@@ -220,11 +238,14 @@ class MetaStrategySelector:
 
         X = dataset[self.feature_names].values
         y = dataset['label'].values
+        H = int(self.lookforward_days)
 
-        # Chronological split
+        # Chronological split WITH an embargo of H rows: the last H training
+        # labels overlap the first test days' returns, so they are dropped.
         split_idx = int(len(X) * (1 - test_size))
-        X_train, X_test = X[:split_idx], X[split_idx:]
-        y_train, y_test = y[:split_idx], y[split_idx:]
+        train_end = max(split_idx - H, 1)
+        X_train, X_test = X[:train_end], X[split_idx:]
+        y_train, y_test = y[:train_end], y[split_idx:]
 
         # Bayesian hyperparameter tuning (optional)
         bayesian_result = None
@@ -233,7 +254,9 @@ class MetaStrategySelector:
         if use_bayesian_tuning:
             try:
                 from .bayesian_tuner import OptunaTuner, TunerConfig
-                tuner = OptunaTuner(tuner_config or TunerConfig())
+                cfg = tuner_config or TunerConfig()
+                cfg.embargo = max(cfg.embargo, H)      # never tune on leaked folds
+                tuner = OptunaTuner(cfg)
                 bayesian_result = tuner.tune_classifier(X_train, y_train)
                 rf_params = dict(bayesian_result['best_params'])
                 rf_params['random_state'] = 42
@@ -260,8 +283,8 @@ class MetaStrategySelector:
             zero_division=0,
         )
 
-        # Time-series CV on training set
-        tscv = TimeSeriesSplit(n_splits=min(5, max(2, split_idx // 30)))
+        # Time-series CV on training set — with the same H-row embargo (gap)
+        tscv = TimeSeriesSplit(n_splits=min(5, max(2, train_end // 30)), gap=H)
         cv_rf_params = dict(self._tuned_rf_params) if self._tuned_rf_params else {
             'n_estimators': 100, 'max_depth': 10,
             'class_weight': 'balanced', 'random_state': 42, 'n_jobs': -1,
@@ -284,6 +307,7 @@ class MetaStrategySelector:
             'cv_std': round(float(np.std(cv_scores)), 4),
             'n_train': len(X_train),
             'n_test': len(X_test),
+            'embargo_rows': H,
             'n_classes': len(self.model.classes_),
             'classes': self.model.classes_.tolist(),
             'confusion_matrix': cm.tolist(),
@@ -390,19 +414,31 @@ class MetaStrategySelector:
         if n < min_train_days + 10:
             return {'valid': False, 'reason': f'Insufficient data: {n} days'}
 
-        # Walk-forward
-        meta_hard_returns = []
-        meta_soft_returns = []
-        equal_weight_returns = []
-        best_single_returns = []
-        selection_timeline = []
-        bt_dates = []
+        # Daily realized returns per strategy (stored by build_dataset). Fall
+        # back to the forward sums with a stride of H if an old dataset lacks them.
+        H = int(self.lookforward_days)
+        daily_cols = [f'daily_{l}' for l in self.strategy_labels]
+        have_daily = all(c in dataset.columns for c in daily_cols)
+        if have_daily:
+            daily_mat = dataset[daily_cols].fillna(0.0).values          # (n, S)
+        else:
+            daily_mat = None
+            fwd_mat = dataset[[f'fwd_{l}' for l in self.strategy_labels]].fillna(0.0).values
+
+        # Walk-forward: decide at day i on a model trained with an H-row embargo,
+        # HOLD the pick for the next H days, book each of those days once.
+        meta_hard_returns, meta_soft_returns = [], []
+        equal_weight_returns, best_single_returns = [], []
+        selection_timeline, bt_dates = [], []
 
         current_model = None
         last_train_idx = -1
-
-        for i in range(min_train_days, n):
-            # Retrain periodically
+        i = min_train_days
+        while i < n:
+            train_end = i - H                       # labels up to here are fully realized
+            if train_end < 10:
+                i += H
+                continue
             if current_model is None or (i - last_train_idx) >= retrain_every:
                 if self._tuned_rf_params:
                     current_model = RandomForestClassifier(**self._tuned_rf_params)
@@ -411,56 +447,54 @@ class MetaStrategySelector:
                         n_estimators=100, max_depth=10,
                         class_weight='balanced', random_state=42, n_jobs=-1,
                     )
-                current_model.fit(X[:i], y[:i])
+                current_model.fit(X[:train_end], y[:train_end])
                 last_train_idx = i
 
-            # Predict
-            x_today = X[i:i+1]
+            x_today = X[i:i + 1]
             pred = current_model.predict(x_today)[0]
             proba = current_model.predict_proba(x_today)[0]
             prob_dict = dict(zip(current_model.classes_.tolist(), proba.tolist()))
 
-            # Get actual forward returns for each strategy
-            actual_fwd = {}
-            for label in self.strategy_labels:
-                col = f'fwd_{label}'
-                actual_fwd[label] = dataset[col].iloc[i] if col in dataset.columns else 0.0
+            # The block of days this decision governs: i+1 .. i+H (clipped)
+            lo, hi = i + 1, min(i + H, n - 1)
+            if have_daily:
+                block = daily_mat[lo:hi + 1]                 # (h, S) daily returns
+            else:  # legacy fallback: one forward sum per block, no daily detail
+                block = fwd_mat[i:i + 1]
+            per_strat = block.sum(axis=0)                    # realized over the block
+            strat_returns = {l: float(per_strat[k]) for k, l in enumerate(self.strategy_labels)}
 
-            # Meta-hard: 100% to predicted strategy (skip if "none")
-            if pred == 'none':
-                meta_hard_r = 0.0
+            hard_r = 0.0 if pred == 'none' else strat_returns.get(pred, 0.0)
+            soft_r = sum(prob_dict.get(l, 0.0) * strat_returns[l] for l in self.strategy_labels)
+            equal_r = float(np.mean(list(strat_returns.values())))
+            best_r = float(max(strat_returns.values()))
+
+            # Book the block DAY BY DAY so the equity curve and Sharpe are daily.
+            if have_daily and len(block) > 0:
+                w_soft = np.array([prob_dict.get(l, 0.0) for l in self.strategy_labels])
+                k_hard = (self.strategy_labels.index(pred) if pred in self.strategy_labels else None)
+                for d in range(len(block)):
+                    meta_hard_returns.append(float(block[d, k_hard]) if k_hard is not None else 0.0)
+                    meta_soft_returns.append(float(block[d] @ w_soft))
+                    equal_weight_returns.append(float(block[d].mean()))
+                    best_single_returns.append(float(block[d].max()))
+                    bt_dates.append(dates[lo + d])
             else:
-                meta_hard_r = actual_fwd.get(pred, 0.0)
+                meta_hard_returns.append(hard_r); meta_soft_returns.append(soft_r)
+                equal_weight_returns.append(equal_r); best_single_returns.append(best_r)
+                bt_dates.append(dates[i])
 
-            # Meta-soft: probability-weighted
-            meta_soft_r = 0.0
-            for label in self.strategy_labels:
-                p = prob_dict.get(label, 0.0)
-                meta_soft_r += p * actual_fwd.get(label, 0.0)
-            # Subtract "none" probability (allocated to cash = 0 return)
-            none_p = prob_dict.get('none', 0.0)
-            # Already handled: none contributes 0
-
-            # Equal weight
-            strat_returns = [actual_fwd.get(l, 0.0) for l in self.strategy_labels]
-            equal_r = np.mean(strat_returns) if strat_returns else 0.0
-
-            # Best single (oracle)
-            best_r = max(strat_returns) if strat_returns else 0.0
-
-            meta_hard_returns.append(meta_hard_r)
-            meta_soft_returns.append(meta_soft_r)
-            equal_weight_returns.append(equal_r)
-            best_single_returns.append(best_r)
-            bt_dates.append(dates[i])
-
+            actual_best = max(strat_returns, key=strat_returns.get)
+            correct_target = actual_best if best_r > 0 else 'none'
             selection_timeline.append({
                 'date': str(dates[i]),
                 'predicted': pred,
                 'probabilities': {k: round(v, 4) for k, v in prob_dict.items()},
-                'actual_best': self.strategy_labels[np.argmax(strat_returns)] if strat_returns else 'none',
-                'correct': pred == (self.strategy_labels[np.argmax(strat_returns)] if strat_returns and max(strat_returns) > 0 else 'none'),
+                'actual_best': actual_best,
+                'correct': pred == correct_target,
+                'block_days': int(hi - lo + 1),
             })
+            i += H                                          # next decision after the hold
 
         # Compute metrics for each approach
         def _compute_metrics(returns, name):
@@ -474,7 +508,9 @@ class MetaStrategySelector:
             dd = cum - peak
             max_dd = float(np.min(dd)) if len(dd) > 0 else 0.0
 
-            # Sharpe (annualized from daily, assuming ~365 trading days for crypto)
+            # Sharpe annualised from DAILY, non-overlapping bookings (crypto ~365d).
+            # Before 2026-09-03 the series was H-day sums taken every day — H×
+            # overlapping — and this number was not a Sharpe of anything real.
             mean_r = np.mean(arr) if n_periods > 0 else 0.0
             std_r = np.std(arr, ddof=1) if n_periods > 1 else 1.0
             sharpe = float(mean_r / std_r * np.sqrt(365)) if std_r > 0 else 0.0
@@ -500,7 +536,11 @@ class MetaStrategySelector:
 
         results = {
             'valid': True,
-            'n_test_days': total_preds,
+            'n_decisions': total_preds,
+            'n_test_days': len(bt_dates),
+            'hold_days': H,
+            'embargo_rows': H,
+            'booking': 'daily, hold-for-horizon' if have_daily else 'per-block forward sum (legacy dataset)',
             'prediction_accuracy': round(correct / total_preds, 4) if total_preds > 0 else 0.0,
             'meta_hard': _compute_metrics(meta_hard_returns, 'Meta-Selector (Hard)'),
             'meta_soft': _compute_metrics(meta_soft_returns, 'Meta-Selector (Soft)'),
@@ -519,7 +559,11 @@ class MetaStrategySelector:
 
     def get_regime_strategy_heatmap(self, dataset: pd.DataFrame) -> Dict:
         """
-        Cross-tabulate regime × best-performing strategy.
+        Cross-tabulate regime × PREDICTED strategy over the whole dataset.
+
+        In-sample and descriptive by construction (the model has seen these
+        rows); read it as "what the model would say in each regime", not as
+        an out-of-sample performance claim.
 
         Returns dict with matrix data for heatmap visualization.
         """
@@ -562,6 +606,7 @@ class MetaStrategySelector:
 
         return {
             'valid': True,
+            'in_sample': True,
             'regimes': REGIME_CLASSES,
             'strategies': all_strategies,
             'matrix': matrix,  # regime → strategy → fraction

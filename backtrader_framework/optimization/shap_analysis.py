@@ -56,6 +56,7 @@ class SHAPAnalyzer:
         X: np.ndarray,
         feature_names: List[str],
         class_names: Optional[List[str]] = None,
+        categories: Optional[Dict[str, str]] = None,
     ) -> Dict:
         """
         Compute SHAP values for a trained model.
@@ -65,6 +66,15 @@ class SHAPAnalyzer:
             X: Feature matrix (n_samples × n_features), numpy array.
             feature_names: List of feature name strings.
             class_names: For multiclass, list of class label strings.
+            categories: Optional feature → category map (defaults to the
+                research-feature map; fleet features pass their own).
+
+        Notes (faithfulness review 2026-09-03): for a MULTICLASS model the
+        summary/dependence/insights describe the SHAP values of ONE class —
+        the class with the largest SHAP variance — and every insight now says
+        which. Mean |SHAP| is a description of the fitted model, not evidence
+        that a feature carries information: judge that with an out-of-sample
+        scan under a family-wise bar before reading these as findings.
 
         Returns:
             Dict with global_importance, feature_summary, dependence,
@@ -72,6 +82,7 @@ class SHAPAnalyzer:
         """
         import shap
 
+        cat_map = categories if categories is not None else FEATURE_CATEGORIES
         n_samples, n_features = X.shape
 
         # Subsample for speed
@@ -121,12 +132,16 @@ class SHAPAnalyzer:
             ]
             primary_class_idx = int(np.argmax(shap_var_per_class))
             shap_primary = shap_3d[:, :, primary_class_idx]  # (n_samples, n_features)
+            primary_class_name = (class_names[primary_class_idx]
+                                  if class_names and primary_class_idx < len(class_names)
+                                  else f"class_{primary_class_idx}")
             # Build list-of-arrays for per-class analysis
             shap_values_list = [shap_3d[:, :, ci] for ci in range(n_classes)]
         else:
             shap_agg = np.abs(sv)
             shap_primary = sv
             shap_values_list = None
+            primary_class_name = None
 
         # ── Global importance ────────────────────────────────────────
         mean_abs_shap = np.mean(shap_agg, axis=0)  # (n_features,)
@@ -139,7 +154,7 @@ class SHAPAnalyzer:
                 'feature': feature_names[idx],
                 'importance': round(float(mean_abs_shap[idx]), 6),
                 'rank': rank + 1,
-                'category': FEATURE_CATEGORIES.get(feature_names[idx], 'Other'),
+                'category': cat_map.get(feature_names[idx], 'Other'),
             })
 
         # ── Feature summary ──────────────────────────────────────────
@@ -150,7 +165,7 @@ class SHAPAnalyzer:
                 'mean_abs_shap': round(float(np.mean(np.abs(shap_col))), 6),
                 'std_shap': round(float(np.std(shap_col)), 6),
                 'positive_effect_frac': round(float(np.mean(shap_col > 0)), 4),
-                'category': FEATURE_CATEGORIES.get(fname, 'Other'),
+                'category': cat_map.get(fname, 'Other'),
             }
 
         # ── Dependence data (top features) ───────────────────────────
@@ -209,6 +224,7 @@ class SHAPAnalyzer:
         # ── Insights ─────────────────────────────────────────────────
         insights = SHAPAnalyzer._generate_insights(
             shap_primary, X_shap, feature_names, class_names,
+            target=primary_class_name,
         )
 
         # ── Build result ─────────────────────────────────────────────
@@ -226,6 +242,8 @@ class SHAPAnalyzer:
             'dependence': dependence,
             'insights': insights,
             'per_class': per_class,
+            'primary_class': primary_class_name,
+            'importance_is_descriptive': True,
             'shap_values_sample': shap_primary[sample_idx].tolist(),
             'X_sample': X_shap[sample_idx].tolist(),
             'feature_names': feature_names,
@@ -242,10 +260,16 @@ class SHAPAnalyzer:
         X: np.ndarray,
         feature_names: List[str],
         class_names: Optional[List[str]] = None,
+        target: Optional[str] = None,
     ) -> List[Dict]:
-        """Generate actionable natural-language insights from SHAP values."""
+        """Generate natural-language insights from SHAP values.
+
+        `target` names what the SHAP values push towards (the primary class
+        for multiclass models) so an insight never says "positive effect on
+        predictions" when it means "towards predicting 'none'"."""
         insights = []
         n_samples, n_features = shap_values.shape
+        on = f"P({target})" if target else "predictions"
 
         for i, fname in enumerate(feature_names):
             feat_vals = X[:, i]
@@ -267,9 +291,10 @@ class SHAPAnalyzer:
                         'type': 'monotonic',
                         'insight': (
                             f"{direction.title()} {fname.replace('_', ' ')} has a "
-                            f"{effect} effect on predictions "
+                            f"{effect} effect on {on} "
                             f"(correlation: {corr:.2f})"
                         ),
+                        'target': target,
                         'strength': round(abs_mean, 4),
                         'correlation': round(corr, 4),
                     })
@@ -322,9 +347,10 @@ class SHAPAnalyzer:
                     'feature': fname,
                     'type': 'range_effect',
                     'insight': (
-                        f"{fname.replace('_', ' ')} {range_str} has the strongest "
-                        f"positive effect (mean SHAP: {best_bin[1]:+.4f}, n={best_bin[2]})"
+                        f"{fname.replace('_', ' ')} {range_str} pushes {on} up the most "
+                        f"(mean SHAP: {best_bin[1]:+.4f}, n={best_bin[2]})"
                     ),
+                    'target': target,
                     'strength': round(abs_mean, 4),
                     'best_range': range_str,
                     'best_shap': round(best_bin[1], 4),
@@ -354,10 +380,11 @@ class SHAPAnalyzer:
                             'feature': fname,
                             'type': 'threshold',
                             'insight': (
-                                f"{fname.replace('_', ' ')} crosses impact threshold at "
+                                f"{fname.replace('_', ' ')} crosses its impact threshold on {on} at "
                                 f"{threshold_val:.3f} "
                                 f"(below: {below_mean:+.4f}, above: {above_mean:+.4f} avg SHAP)"
                             ),
+                            'target': target,
                             'strength': round(abs_mean, 4),
                             'threshold': round(threshold_val, 4),
                         })

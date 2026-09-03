@@ -31,7 +31,15 @@ class TunerConfig:
     pruner: str = 'median'        # 'median', 'halving', 'none'
     direction: str = 'maximize'
     n_cv_splits: int = 5
-    scoring_metric: str = 'accuracy'  # 'accuracy', 'f1_weighted'
+    # 'balanced_accuracy' by default: the meta-strategy labels are imbalanced
+    # (one strategy wins most weeks, 'none' is common) and plain accuracy is
+    # maximised by a model that always says so. 'accuracy'/'f1_weighted' allowed.
+    scoring_metric: str = 'balanced_accuracy'
+    # Rows left out between each CV train fold and its test fold. Set to the
+    # label horizon (H) when labels are forward returns — otherwise the last H
+    # training labels contain the test fold's returns and the "CV score" is a
+    # leak measurement, not a skill measurement.
+    embargo: int = 0
     random_seed: int = 42
     n_startup_trials: int = 10
     show_progress_bar: bool = False
@@ -104,7 +112,7 @@ class OptunaTuner:
             search_space = RF_SEARCH_SPACE if classifier_type == 'random_forest' else GB_SEARCH_SPACE
 
         n_splits = min(self.config.n_cv_splits, max(2, len(X_train) // 30))
-        tscv = TimeSeriesSplit(n_splits=n_splits)
+        tscv = TimeSeriesSplit(n_splits=n_splits, gap=int(self.config.embargo))
 
         def objective(trial):
             params = self._suggest_from_search_space(trial, search_space)
@@ -154,6 +162,8 @@ class OptunaTuner:
             'best_params': result_params,
             'best_score': self.best_value,
             'classifier_type': classifier_type,
+            'scoring_metric': self.config.scoring_metric,
+            'embargo': int(self.config.embargo),
             **self.get_visualization_data(),
         }
 
@@ -168,6 +178,11 @@ class OptunaTuner:
     ) -> Dict:
         """
         Bayesian optimization over strategy parameter space.
+
+        A better sampler is not a better test: the best trial's score is still a
+        maximum over `n_trials` searches and must be deflated (cpcv.deflated_
+        sharpe_ratio with num_trials=n_trials) or judged on a frozen holdout
+        before it means anything. This method returns the search result only.
 
         Args:
             param_specs: List of ParamSpec from the strategy adapter.
@@ -218,6 +233,8 @@ class OptunaTuner:
         return {
             'best_params': result_params,
             'best_score': self.best_value,
+            'n_trials': len(self.study.trials),
+            'note': 'best_score is an in-search maximum; deflate for n_trials or validate on a holdout',
             **self.get_visualization_data(),
         }
 
