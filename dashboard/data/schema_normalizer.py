@@ -457,10 +457,12 @@ def normalize_fleet_book(db_path: Path, book) -> pd.DataFrame:
     df["timeframe"] = None
     df["source"] = "Live" if book.tier == 1 else "Paper"
     df["direction"] = raw["side"].map(_canon_side)
-    df["entry_time"] = pd.to_datetime(raw["entry_ts"], errors="coerce", utc=True,
-                                      format="mixed").dt.tz_localize(None)
-    df["exit_time"] = pd.to_datetime(raw["exit_ts"], errors="coerce", utc=True,
-                                     format="mixed").dt.tz_localize(None)
+    # Epoch-integer stamps (ferryman's `orders` stores SECONDS) parse as
+    # nanoseconds under a bare to_datetime and land in 1970; `to_utc` picks the
+    # unit from magnitude. See data/fleet_edge.py.
+    from data.fleet_edge import to_utc
+    df["entry_time"] = to_utc(raw["entry_ts"]).dt.tz_localize(None)
+    df["exit_time"] = to_utc(raw["exit_ts"]).dt.tz_localize(None)
     for src, dst in (("entry", "entry_price"), ("exit_px", "exit_price"),
                      ("sl", "stop_loss"), ("tp", "take_profit"),
                      ("pnl", "pnl_usd"), ("r", "r_multiple")):

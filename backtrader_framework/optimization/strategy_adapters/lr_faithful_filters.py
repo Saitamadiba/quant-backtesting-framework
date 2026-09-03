@@ -214,7 +214,14 @@ def attach_dvol(df_15m: pd.DataFrame, symbol: str,
     if dv.empty:
         out["DVOL"] = np.nan
         return out
-    bar_s = (pd.DatetimeIndex(out.index).tz_convert("UTC").tz_localize(None)
+    # DuckDB frames arrive tz-NAIVE (stamped UTC by convention); localize
+    # before converting, the same guard every other adapter call site uses.
+    # Without it a window whose DVOL column is entirely NaN — e.g. BTC/ETH
+    # bars from 2017, before the Deribit series begins — reaches this line
+    # and dies with "Cannot convert tz-naive timestamps".
+    _bar_idx = pd.DatetimeIndex(out.index)
+    _bar_idx = _bar_idx.tz_localize("UTC") if _bar_idx.tz is None else _bar_idx.tz_convert("UTC")
+    bar_s = (_bar_idx.tz_localize(None)
              .astype("datetime64[s]").astype("int64").to_numpy())
     dv_s = (dv["date"].dt.tz_convert("UTC").dt.tz_localize(None)
             .astype("datetime64[s]").astype("int64").to_numpy())
