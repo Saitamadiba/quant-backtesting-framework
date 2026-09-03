@@ -24,10 +24,18 @@ from components.charts import (
     exit_reason_donut, mfe_mae_scatter,
 )
 from components.filters import source_filter, symbol_filter, date_range_filter, apply_filters
-from config import STRATEGIES
+from config import STRATEGIES, RESEARCH_STRATEGIES
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
-strategy = st.sidebar.selectbox("Strategy", list(STRATEGIES.keys()), key="dd_strat")
+strategy = st.sidebar.selectbox("Strategy", list(RESEARCH_STRATEGIES.keys()), key="dd_strat")
+_undoc = [f for f in STRATEGIES if f not in RESEARCH_STRATEGIES]
+st.caption(
+    "This page documents the five WFO-backed research strategies. The fleet has "
+    f"since deployed **{len(_undoc)}** more families ({', '.join(_undoc)}) — their "
+    "mechanism one-liners are in `config.FLEET_FAMILIES`, their live numbers on "
+    "**🛰️ Live Fleet**, their shadows on **Shadow Trades**, the knife on **Knife Bots**."
+)
+
 src = source_filter(key_prefix="dd")
 df_all = get_all_trades(source_filter=src)
 symbols = symbol_filter(df_all[df_all["strategy"] == strategy], key_prefix="dd")

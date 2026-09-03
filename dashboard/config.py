@@ -101,22 +101,57 @@ VPS_SHADOW_DB_FILES = {
     "bullput_eth_shadow.db":     f"{VPS_REMOTE_BASE}/HyroTrader/bullput_eth_shadow.db",
     "fvg_btc_funded_shadow.db":  f"{VPS_REMOTE_BASE}/HyroTrader/fvg_btc_funded_shadow.db",
     "fvg_nq_funded_shadow.db":   f"{VPS_REMOTE_BASE}/HyroTrader/fvg_nq_funded_shadow.db",
+    # ── Shadow books deployed 2026-07-17 → 09-02 (registered 2026-09-03) ────
+    #    Schema bridges in data/shadow_normalisers.py; era-scoped where the
+    #    recorder was re-based (NEVER pool eras).
+    "antiknife_shadow.db":       f"{VPS_REMOTE_BASE}/HyroTrader/antiknife_shadow.db",
+    "crossvenue_shadow.db":      f"{VPS_REMOTE_BASE}/HyroTrader/crossvenue_shadow.db",
+    "gated_lr_shadow.db":        f"{VPS_REMOTE_BASE}/HyroTrader/gated_lr_shadow.db",
+    "wide_rr_shadow.db":         f"{VPS_REMOTE_BASE}/HyroTrader/wide_rr_shadow.db",
+    "halt_shadow_book.db":       f"{VPS_REMOTE_BASE}/HyroTrader/halt_shadow_book.db",
+    "sweep_engine.db":           f"{VPS_REMOTE_BASE}/sweep_engine/sweep_engine.db",
+    "fib618_shadow.db":          f"{VPS_REMOTE_BASE}/fib618_shadow/fib618_shadow.db",
+    "fvg_alts_shadow.db":        f"{VPS_REMOTE_BASE}/HyroTrader/fvg_alts_shadow.db",
+    "lr_signal_shadow.db":       f"{VPS_REMOTE_BASE}/HyroTrader/lr_shadow_trades.db",
+    "depth_policy_paper_book.db": f"{VPS_REMOTE_BASE}/HyroTrader/depth_policy_paper_book.db",
 }
 
-# ── Knife bot DBs (forward-shadow detector + funded maker/taker arms) ─────────
+# The LR/MM regime + flow GATE shadow fleet: one canonical `shadow_trades` book
+# per (bot, gate) under shadow_books/. Generated so a new gate book only needs
+# adding to this list. Filenames double as the local cache names.
+GATE_SHADOW_BOOKS = [
+    "lr_avaxusdt_flow_gate", "lr_avaxusdt_regime_gate", "lr_bchusdt_flow_gate",
+    "lr_bchusdt_regime_gate", "lr_bnbusdt_flow_gate", "lr_bnbusdt_regime_gate",
+    "lr_btcusdt_flow_gate", "lr_btcusdt_regime_gate", "lr_dogeusdt_flow_gate",
+    "lr_dogeusdt_regime_gate", "lr_dotusdt_flow_gate", "lr_dotusdt_regime_gate",
+    "lr_linkusdt_flow_gate", "lr_linkusdt_regime_gate", "lr_solusdt_flow_gate",
+    "lr_solusdt_regime_gate", "lr_xrpusdt_flow_gate", "lr_xrpusdt_regime_gate",
+    "mm_btcusdt_flow_gate", "mm_ethusdt_flow_gate",
+    "fvg_btcusdt_funding_gate", "fvg_ethusdt_funding_gate",
+]
+for _g in GATE_SHADOW_BOOKS:
+    VPS_SHADOW_DB_FILES[f"{_g}.db"] = f"{VPS_REMOTE_BASE}/shadow_books/{_g}.db"
+
+# ── Knife bot DBs (forward-shadow detector + the funded/demo arms) ───────────
 # The "knife" catches over-extended liquidity sweeps (8-bar extreme break) and
-# fades them back. Three live arms write separate DBs on the VPS:
-#   • knife_shadow.db   — read-only forward-shadow detector (ORIGINAL): records
-#       every break + frozen-model score + hypothetical MAKER fill. table=episodes
-#   • knife_funded_maker / taker / 100k — funded bots that place real (or DRY)
-#       orders; entry_mode column distinguishes maker (post-only limit) vs taker
-#       (market). table=funded_trades
+# fades them back. Six order-placing arms plus the read-only detector write
+# separate DBs on the VPS (all `funded_trades`, entry_mode maker|taker):
+#   • knife_shadow.db          — ORIGINAL read-only forward-shadow detector (table=episodes)
+#   • knife_funded_maker.db    — original maker arm (post-only limit), 2026-06
+#   • knife_funded_taker.db    — taker arm (market at the break)
+#   • knife_funded_100k.db     — maker arm on the $100k demo seat
+#   • knife_funded_10k.db      — $10k challenge seat (key dead since 2026-09, see p.30)
+#   • knife_funded_maker2.db   — maker v2 arm (key dead since 2026-09, see p.30)
+#   • knife_funded_ethmstop.db — ETH maker arm with the managed stop
 # Not synced by default (no local copy until the page's Sync button runs).
 VPS_KNIFE_DB_FILES = {
-    "knife_shadow.db":       f"{VPS_REMOTE_BASE}/HyroTrader/knife_shadow.db",
-    "knife_funded_maker.db": f"{VPS_REMOTE_BASE}/HyroTrader/knife_bybit_funded.db",
-    "knife_funded_taker.db": f"{VPS_REMOTE_BASE}/HyroTrader/knife_bybit_funded_taker.db",
-    "knife_funded_100k.db":  f"{VPS_REMOTE_BASE}/HyroTrader/knife_bybit_funded_100k.db",
+    "knife_shadow.db":          f"{VPS_REMOTE_BASE}/HyroTrader/knife_shadow.db",
+    "knife_funded_maker.db":    f"{VPS_REMOTE_BASE}/HyroTrader/knife_bybit_funded.db",
+    "knife_funded_taker.db":    f"{VPS_REMOTE_BASE}/HyroTrader/knife_bybit_funded_taker.db",
+    "knife_funded_100k.db":     f"{VPS_REMOTE_BASE}/HyroTrader/knife_bybit_funded_100k.db",
+    "knife_funded_10k.db":      f"{VPS_REMOTE_BASE}/HyroTrader/knife_bybit_funded_challenge.db",
+    "knife_funded_maker2.db":   f"{VPS_REMOTE_BASE}/HyroTrader/knife_bybit_funded_maker2.db",
+    "knife_funded_ethmstop.db": f"{VPS_REMOTE_BASE}/HyroTrader/knife_bybit_funded_ethmakerstop.db",
 }
 
 # Frozen knife-detector v1 spec (features, K-window, folds, score cut, dev AUC).
@@ -181,7 +216,30 @@ SHADOW_DB_STRATEGY_MAP = {
     "bullput_eth_shadow.db":     ("Bull-Put Paper", "ETH"),
     "fvg_btc_funded_shadow.db":  ("FVG Funded Shadow", "BTC"),
     "fvg_nq_funded_shadow.db":   ("FVG Funded Shadow", "NQ"),
+    # MM 15m / 5m forward-shadows (synced since 2026-07-16, labelled 2026-09-03)
+    "mm_15m_shadow.db":          ("MM 15m Shadow", "MULTI"),
+    "mm_5m_shadow.db":           ("MM 5m Shadow", "MULTI"),
+    # ── Registered 2026-09-03 (deployed 07-17 → 09-02). MULTI = asset in the row.
+    "antiknife_shadow.db":       ("Anti-Knife Shadow", "MULTI"),
+    "crossvenue_shadow.db":      ("Knife Cross-Venue", "MULTI"),
+    "gated_lr_shadow.db":        ("Gated LR Shadow", "MULTI"),
+    "wide_rr_shadow.db":         ("Wide-RR Shadow", "MULTI"),
+    # era-2 only — era-1 is the CLOSED phantom-fill book (memory 2026-08-24).
+    "halt_shadow_book.db":       ("Halt Shadow e2", "MULTI"),
+    # GROSS R by construction: the fee/slip toll is not deducted.
+    "sweep_engine.db":           ("Sweep Engine gross", "MULTI"),
+    "fib618_shadow.db":          ("Fib618 Shadow", "MULTI"),
+    # current era only (era-1/2 were invalidated; the loader keeps the latest).
+    "fvg_alts_shadow.db":        ("FVG Alts Shadow", "MULTI"),
+    # era-2 only: the fee-charged, fill-adjudicated LR signal shadow.
+    "lr_signal_shadow.db":       ("LR Signal Shadow e2", "BTC"),
+    "depth_policy_paper_book.db": ("Depth Policy Paper", "MULTI"),
 }
+for _g in GATE_SHADOW_BOOKS:
+    _fam, _sym, *_gate = _g.split("_")
+    SHADOW_DB_STRATEGY_MAP[f"{_g}.db"] = (
+        f"{_fam.upper()} {' '.join(_gate).title()} Shadow",
+        _sym.upper().replace("USDT", ""))
 
 # ── Remote ML Training DB Mapping ────────────────────────────────────────────
 VPS_ML_FILES = {
@@ -199,7 +257,12 @@ VPS_ML_FILES = {
 }
 
 # ── Strategy Registry ─────────────────────────────────────────────────────────
-STRATEGIES = {
+# RESEARCH_STRATEGIES are the WFO-backed families the Explainer / Deep-Dive /
+# WFO / Shadow-Backtest pages have hand-written content and adapters for.
+# STRATEGIES is the full palette: those five plus every family the live fleet
+# has deployed since (their books come in via data/fleet_registry.py and show
+# on the Overview / Journal / Equity / Session / Monthly pages and page 30).
+RESEARCH_STRATEGIES = {
     "FVG": {"color": "#2196F3", "symbols": ["BTC", "ETH", "NQ"]},
     "Liquidity Raid": {"color": "#FF9800", "symbols": ["BTC", "ETH", "NQ", "SOL"]},
     "Momentum Mastery": {"color": "#4CAF50", "symbols": ["BTC", "ETH", "NQ"]},
@@ -207,9 +270,46 @@ STRATEGIES = {
     "SBS": {"color": "#9C27B0", "symbols": ["BTC", "ETH"]},
 }
 
+# Fleet families (2026-07 → 09), one line each — the mechanism in plain words.
+# Colours are distinct from the research five so mixed charts stay legible.
+FLEET_FAMILIES = {
+    "Knife":         {"color": "#E53935", "symbols": ["ADA", "AVAX", "BCH", "BNB", "BTC", "DOGE", "DOT", "LINK", "LTC", "SOL", "XRP"],
+                      "desc": "fade an over-extended liquidity sweep (8-bar extreme break) back to the level"},
+    "Depth":         {"color": "#6D4C41", "desc": "L2-absorption entries at a level, taker and maker arms, policy exits"},
+    "Desk":          {"color": "#8E24AA", "desc": "resting-limit seats at pre-computed levels, one claim per level"},
+    "Retest":        {"color": "#5E35B1", "desc": "level retest seats with a managed backstop"},
+    "SMC":           {"color": "#3949AB", "desc": "smart-money-concept setups (12h/4h and 1d/1h structure)"},
+    "OFCS":          {"color": "#1E88E5", "desc": "order-flow conditioned sweeps; challenge rule-set since 2026-09-01"},
+    "London Raid":   {"color": "#039BE5", "desc": "fade the London raid of the Asia range (maker + taker arms)"},
+    "LRR":           {"color": "#00ACC1", "desc": "liquidity-raid reversal, short-only demo + paper book"},
+    "Ferryman":      {"color": "#00897B", "desc": "600s markout scalp on the knife break — killed 2026-08, still recording"},
+    "FVG Alts":      {"color": "#43A047", "desc": "FVG continuation on alts, 1-min scanner, demo twin"},
+    "Funding Carry": {"color": "#7CB342", "desc": "delta-neutral cash-and-carry harvesting funding; $ book, no stop R"},
+    "Momentum 4H":   {"color": "#C0CA33", "desc": "4H trend momentum on ADA (live) with SOL/XRP/LTC shadows"},
+    "Displacement":  {"color": "#FDD835", "desc": "displacement-candle continuation on BTC"},
+    "Phantom":       {"color": "#FFB300", "desc": "demo executor of the meta-conductor's ACTIVE tags"},
+    "Options":       {"color": "#FB8C00", "symbols": ["BTC", "ETH"], "desc": "bull-put spreads, iron flies and calendars on BTC/ETH options"},
+    "Analyst Drift": {"color": "#F4511E", "desc": "US equities: MOO→MOC drift after out-of-hours analyst news (Alpaca paper)"},
+    "Level Seats":   {"color": "#757575", "desc": "generic level-seat shape (desk/retest family)"},
+}
+
+STRATEGIES = {
+    **RESEARCH_STRATEGIES,
+    **{k: {"color": v["color"], "symbols": list(v.get("symbols", []))} for k, v in FLEET_FAMILIES.items()},
+}
+try:  # symbols per family come from the fleet registry's literal symbol columns
+    from data.fleet_registry import FAMILIES as _FLEET_FAMS, family_symbols as _fam_syms
+    for _f in _FLEET_FAMS:
+        STRATEGIES.setdefault(_f, {"color": "#888888", "symbols": []})
+        STRATEGIES[_f]["symbols"] = _fam_syms(_f) or STRATEGIES[_f]["symbols"]
+except Exception:  # registry import must never break the dashboard config
+    pass
+
 STRATEGY_COLORS = {s: v["color"] for s, v in STRATEGIES.items()}
 
-# local DB file -> (strategy, symbol)
+# local DB file -> (strategy, symbol) — the LEGACY unified-universe books.
+# Fleet books (Tier 1 + 2) join the same universe through FLEET_CACHE_DIR +
+# data/fleet_registry.py; see data/schema_normalizer.load_all_live_trades.
 DB_STRATEGY_MAP = {
     "fvg_btc.db": ("FVG", "BTC"),
     "fvg_eth.db": ("FVG", "ETH"),
@@ -224,48 +324,153 @@ DB_STRATEGY_MAP = {
     "sbs.db":     ("SBS", "ALL"),
 }
 
-# ── VPS Systemd Services ──────────────────────────────────────────────────────
+# ── Fleet books (Tier 1 + Tier 2) synced as ONE rsync batch ──────────────────
+# Local copies keep the VPS-relative path under databases/fleet/, so the same
+# registry that drives page 30 drives the unified trade pages offline.
+FLEET_CACHE_DIR = VPS_CACHE_DIR / "fleet"
+
+
+def fleet_db_relpaths() -> list:
+    """VPS-relative paths of every Tier-1/2 fleet book (deduped, globs skipped)."""
+    try:
+        from data.fleet_registry import BOOKS as _BOOKS
+    except Exception:
+        return []
+    seen, out = set(), []
+    for _b in _BOOKS:
+        if _b.tier > 2 or any(c in _b.db for c in "*?["):
+            continue
+        if _b.db not in seen:
+            seen.add(_b.db)
+            out.append(_b.db)
+    return out
+
+
+# ── VPS Systemd Services / timers / cron seats ───────────────────────────────
+# unit  → {strategy, symbol, kind, log}. `kind` is "service" (systemctl
+# is-active on the .service), "timer" (a oneshot fired by a .timer — status is
+# the timer's), or "cron" (no unit; health = log freshness). `log` is the file
+# the seat actually writes (None = journal-only, which the trader login cannot
+# read — an operator-side `StandardOutput=append:` fix). Rebuilt 2026-09-03
+# from `systemctl list-units` + crontab; lr-btc / lr-sol / sbs-* were removed
+# because those units no longer exist.
+_L = f"{VPS_REMOTE_BASE}/logs"
 BOT_SERVICES = {
-    "fvg-btc": {"strategy": "FVG", "symbol": "BTC"},
-    "fvg-eth": {"strategy": "FVG", "symbol": "ETH"},
-    "fvg-nq":  {"strategy": "FVG", "symbol": "NQ"},
-    "lr-btc":  {"strategy": "Liquidity Raid", "symbol": "BTC"},
-    "lr-eth":  {"strategy": "Liquidity Raid", "symbol": "ETH"},
-    "lr-nq":   {"strategy": "Liquidity Raid", "symbol": "NQ"},
-    "lr-sol":  {"strategy": "Liquidity Raid", "symbol": "SOL"},
-    "mm-btc":  {"strategy": "Momentum Mastery", "symbol": "BTC"},
-    "mm-eth":  {"strategy": "Momentum Mastery", "symbol": "ETH"},
-    "mm-nq":   {"strategy": "Momentum Mastery", "symbol": "NQ"},
-    "mm-btc-shadow": {"strategy": "Momentum Mastery", "symbol": "BTC-SHADOW"},
-    "straddle-btc":  {"strategy": "Vol Edge", "symbol": "BTC"},
-    "straddle-eth":  {"strategy": "Vol Edge", "symbol": "ETH"},
-    "sbs-btc": {"strategy": "SBS", "symbol": "BTC"},
-    "sbs-eth": {"strategy": "SBS", "symbol": "ETH"},
+    # ── Tier 1 · knife funded/demo arms ──
+    "knife_bybit_funded_100k.service":        {"strategy": "Knife", "symbol": "$100k maker", "kind": "service", "log": "/var/log/knife_funded_100k/knife-funded-100k.log"},
+    "knife_bybit_funded_challenge.service":   {"strategy": "Knife", "symbol": "$10k challenge", "kind": "service", "log": None},
+    "knife_bybit_funded_taker.service":       {"strategy": "Knife", "symbol": "taker", "kind": "service", "log": None},
+    "knife_bybit_funded_maker2.service":      {"strategy": "Knife", "symbol": "maker2", "kind": "service", "log": None},
+    "knife_bybit_funded_ethmakerstop.service": {"strategy": "Knife", "symbol": "ETH mstop", "kind": "service", "log": None},
+    # ── Tier 1 · Liquidity Raid funded + ByBit demo ──
+    "lr-bybit-funded@10000.service":          {"strategy": "Liquidity Raid", "symbol": "BTC funded", "kind": "service", "log": f"{_L}/lr_bybit_funded_10k.log"},
+    "lr-eth-bybit-funded@10000.service":      {"strategy": "Liquidity Raid", "symbol": "ETH funded", "kind": "service", "log": f"{_L}/lr_eth_bybit_funded_10k.log"},
+    "lr-sol-bybit-funded@10000.service":      {"strategy": "Liquidity Raid", "symbol": "SOL funded", "kind": "service", "log": f"{_L}/lr_sol_bybit_funded_10k.log"},
+    "lr-eth-bybit.service":                   {"strategy": "Liquidity Raid", "symbol": "ETH demo", "kind": "service", "log": f"{_L}/lr_eth_bybit.log"},
+    "lr-avax-bybit.service":                  {"strategy": "Liquidity Raid", "symbol": "AVAX demo", "kind": "service", "log": f"{_L}/lr_avax_bybit.log"},
+    "lr-doge-bybit.service":                  {"strategy": "Liquidity Raid", "symbol": "DOGE demo", "kind": "service", "log": f"{_L}/lr_doge_bybit.log"},
+    "lr-dot-bybit.service":                   {"strategy": "Liquidity Raid", "symbol": "DOT demo", "kind": "service", "log": f"{_L}/lr_dot_bybit.log"},
+    "lr-link-bybit.service":                  {"strategy": "Liquidity Raid", "symbol": "LINK demo", "kind": "service", "log": f"{_L}/lr_link_bybit.log"},
+    # ── Tier 1 · other order-placing seats ──
+    "momentum-4h-ada.service":                {"strategy": "Momentum 4H", "symbol": "ADA", "kind": "service", "log": "/var/log/momentum_4h/ada.log"},
+    "displacement-bybit.service":             {"strategy": "Displacement", "symbol": "BTC demo", "kind": "service", "log": f"{_L}/displacement_bybit.log"},
+    "retest_demo.service":                    {"strategy": "Retest", "symbol": "daemon", "kind": "service", "log": f"{_L}/retest_demo_daemon.log"},
+    "retest_demo.bot":                        {"strategy": "Retest", "symbol": "cycle", "kind": "cron", "log": f"{_L}/retest_demo.log"},
+    "desk_demo.bot":                          {"strategy": "Desk", "symbol": "cycle", "kind": "cron", "log": f"{_L}/desk_demo.log"},
+    "lr_wide_demo.bot":                       {"strategy": "Liquidity Raid", "symbol": "wide demo", "kind": "cron", "log": f"{_L}/lr_wide_demo.log"},
+    "lrr_short_demo.bot":                     {"strategy": "LRR", "symbol": "short demo", "kind": "cron", "log": f"{_L}/lrr_short_demo.log"},
+    "smc_demo.bot":                           {"strategy": "SMC", "symbol": "1d/1h demo", "kind": "cron", "log": f"{_L}/smc_demo.log"},
+    "smc12h4h_demo.bot":                      {"strategy": "SMC", "symbol": "12h/4h demo", "kind": "cron", "log": f"{_L}/smc12h4h_demo.log"},
+    "depth_policy_taker":                     {"strategy": "Depth", "symbol": "policy taker", "kind": "cron", "log": f"{_L}/depth_policy_taker.log"},
+    "depth_policy_maker":                     {"strategy": "Depth", "symbol": "policy maker", "kind": "cron", "log": f"{_L}/depth_policy_maker.log"},
+    "depth_taker_v1":                         {"strategy": "Depth", "symbol": "taker v1", "kind": "cron", "log": f"{_L}/depth_taker_bot.log"},
+    "depth_maker_v1":                         {"strategy": "Depth", "symbol": "maker v1", "kind": "cron", "log": f"{_L}/depth_maker_bot.log"},
+    "ofcs-demo.timer":                        {"strategy": "OFCS", "symbol": "demo/challenge", "kind": "timer", "log": "/var/log/ofcs_demo/ofcs-demo.log"},
+    "ofcs-demo-manage.timer":                 {"strategy": "OFCS", "symbol": "1-min manage", "kind": "timer", "log": "/var/log/ofcs_demo/ofcs-demo.log"},
+    "london-raid-demo.timer":                 {"strategy": "London Raid", "symbol": "maker demo", "kind": "timer", "log": "/var/log/london_raid_demo/london-raid-demo.log"},
+    "ferryman-demo.service":                  {"strategy": "Ferryman", "symbol": "demo", "kind": "service", "log": f"{_L}/ferryman_bot.log"},
+    "fvg_alts_demo":                          {"strategy": "FVG Alts", "symbol": "demo twin", "kind": "cron", "log": f"{_L}/fvg_alts_demo.log"},
+    "funding_carry_demo.bot":                 {"strategy": "Funding Carry", "symbol": "demo", "kind": "cron", "log": f"{_L}/funding_carry_demo.log"},
+    "bullput-btc-demo.service":               {"strategy": "Options", "symbol": "BTC bull-put", "kind": "service", "log": f"{_L}/bullput_btc_bybit.log"},
+    "bullput-eth-demo.service":               {"strategy": "Options", "symbol": "ETH bull-put", "kind": "service", "log": f"{_L}/bullput_eth_bybit.log"},
+    "ironfly-btc-bybit.service":              {"strategy": "Options", "symbol": "BTC iron fly", "kind": "service", "log": f"{_L}/ironfly_btc_bybit.log"},
+    "ironfly-eth-bybit.service":              {"strategy": "Options", "symbol": "ETH iron fly", "kind": "service", "log": f"{_L}/ironfly_eth_bybit.log"},
+    "straddle-btc.service":                   {"strategy": "Vol Edge", "symbol": "BTC", "kind": "service", "log": f"{_L}/straddle_btc.log"},
+    "straddle-eth.service":                   {"strategy": "Vol Edge", "symbol": "ETH", "kind": "service", "log": f"{_L}/straddle_eth.log"},
+    "asia-basket-tactical.service":           {"strategy": "Asia Basket", "symbol": "tactical", "kind": "service", "log": "/var/log/asia_basket/asia_basket_tactical.log"},
+    # ── Tier 1/2 · the research families' live + paper bots ──
+    "fvg-btc.service":                        {"strategy": "FVG", "symbol": "BTC", "kind": "service", "log": f"{_L}/fvg_btc.log"},
+    "fvg-eth.service":                        {"strategy": "FVG", "symbol": "ETH", "kind": "service", "log": f"{_L}/fvg_eth.log"},
+    "fvg-nq.service":                         {"strategy": "FVG", "symbol": "NQ", "kind": "service", "log": f"{_L}/fvg_nq.log"},
+    "lr-eth.service":                         {"strategy": "Liquidity Raid", "symbol": "ETH paper", "kind": "service", "log": f"{_L}/lr_eth.log"},
+    "lr-nq.service":                          {"strategy": "Liquidity Raid", "symbol": "NQ paper", "kind": "service", "log": f"{_L}/lr_nq.log"},
+    **{f"lr-{a}-paper.service": {"strategy": "Liquidity Raid", "symbol": f"{a.upper()} paper", "kind": "service", "log": None}
+       for a in ("avax", "bch", "bnb", "doge", "dot", "link", "xrp")},
+    "mm-btc.service":                         {"strategy": "Momentum Mastery", "symbol": "BTC (stopped)", "kind": "service", "log": f"{_L}/mm_btc.log"},
+    "mm-eth.service":                         {"strategy": "Momentum Mastery", "symbol": "ETH", "kind": "service", "log": f"{_L}/mm_eth.log"},
+    "mm-nq.service":                          {"strategy": "Momentum Mastery", "symbol": "NQ", "kind": "service", "log": f"{_L}/mm_nq.log"},
+    "mm-btc-shadow.service":                  {"strategy": "Momentum Mastery", "symbol": "BTC shadow", "kind": "service", "log": f"{_L}/mm_btc_shadow.log"},
+    "displacement-btc.service":               {"strategy": "Displacement", "symbol": "BTC signal", "kind": "service", "log": f"{_L}/displacement_btc.log"},
+    "analyst_drift_paper.bot":                {"strategy": "Analyst Drift", "symbol": "Alpaca paper", "kind": "cron", "log": f"{_L}/analyst_drift_paper.log"},
+    "lrr_paper_bot":                          {"strategy": "LRR", "symbol": "paper book", "kind": "cron", "log": f"{_L}/lrr_paper_bot.log"},
+    "depth_paper_bot":                        {"strategy": "Depth", "symbol": "paper book", "kind": "cron", "log": f"{_L}/depth_paper_bot.log"},
+    "depth_policy_paper_bot":                 {"strategy": "Depth", "symbol": "policy paper", "kind": "cron", "log": f"{_L}/depth_policy_paper_bot.log"},
+    "ofcs-paper-bot.timer":                   {"strategy": "OFCS", "symbol": "paper book", "kind": "timer", "log": "/var/log/ofcs_shadow/ofcs-paper-bot.log"},
+    "capital_ladder":                         {"strategy": "Fleet", "symbol": "capital ladder", "kind": "cron", "log": f"{_L}/capital_ladder.log"},
+    "meta_conductor":                         {"strategy": "Fleet", "symbol": "meta-conductor", "kind": "cron", "log": None},
+    # ── Tier 3 · shadow recorders ──
+    "knife_detector_shadow.service":          {"strategy": "Knife", "symbol": "shadow", "kind": "service", "log": "/var/log/knife_shadow/knife-shadow.log"},
+    "knife_crossvenue_shadow.service":        {"strategy": "Knife", "symbol": "cross-venue", "kind": "service", "log": f"{VPS_REMOTE_BASE}/HyroTrader/knife_crossvenue_shadow.log"},
+    "antiknife_shadow":                       {"strategy": "Knife", "symbol": "anti-knife", "kind": "cron", "log": None},
+    "asia-basket-shadow.service":             {"strategy": "Asia Basket", "symbol": "shadow", "kind": "service", "log": "/var/log/asia_basket/asia_basket_shadow.log"},
+    "ifvg-sweep-shadow.service":              {"strategy": "iFVG", "symbol": "shadow", "kind": "service", "log": "/var/log/ifvg_sweep/shadow.log"},
+    "momentum-4h-sol-shadow.service":         {"strategy": "Momentum 4H", "symbol": "SOL shadow", "kind": "service", "log": "/var/log/momentum_4h/sol-shadow.log"},
+    "momentum-4h-xrp-shadow.service":         {"strategy": "Momentum 4H", "symbol": "XRP shadow", "kind": "service", "log": "/var/log/momentum_4h/xrp-shadow.log"},
+    "momentum-4h-ltc-shadow.service":         {"strategy": "Momentum 4H", "symbol": "LTC shadow", "kind": "service", "log": "/var/log/momentum_4h/ltc-shadow.log"},
+    "ofcs-shadow.timer":                      {"strategy": "OFCS", "symbol": "shadow", "kind": "timer", "log": "/var/log/ofcs_shadow/ofcs-shadow.log"},
+    "fvg-funded-shadow.timer":                {"strategy": "FVG", "symbol": "funded shadow", "kind": "timer", "log": f"{_L}/fvg_funded_shadow.log"},
+    "gated_lr_shadow":                        {"strategy": "Liquidity Raid", "symbol": "gated shadow", "kind": "cron", "log": f"{_L}/gated_lr_shadow.log"},
+    "lrr_shadow_scanner":                     {"strategy": "LRR", "symbol": "shadow scanner", "kind": "cron", "log": f"{_L}/lrr_shadow_scanner.log"},
+    "wide_rr_shadow":                         {"strategy": "Wide RR", "symbol": "shadow", "kind": "cron", "log": None},
+    "halt_shadow":                            {"strategy": "Fleet", "symbol": "halt shadow", "kind": "cron", "log": f"{_L}/halt_shadow.log"},
+    "sweep_engine.shadow":                    {"strategy": "Sweep Engine", "symbol": "shadow", "kind": "cron", "log": f"{_L}/sweep_engine.log"},
+    "fib618_shadow.run":                      {"strategy": "Fib618", "symbol": "shadow", "kind": "cron", "log": f"{_L}/fib618_shadow.log"},
+    "mm_5m_shadow":                           {"strategy": "Momentum Mastery", "symbol": "5m shadow", "kind": "cron", "log": f"{_L}/mm_5m_shadow.log"},
+    "mm_15m_shadow":                          {"strategy": "Momentum Mastery", "symbol": "15m shadow", "kind": "cron", "log": f"{_L}/mm_15m_shadow.log"},
+    "fvg_alts_shadow":                        {"strategy": "FVG Alts", "symbol": "1-min shadow", "kind": "cron", "log": f"{_L}/fvg_alts_shadow.log"},
+    "erl_irl_shadow":                         {"strategy": "ERL/IRL", "symbol": "shadow", "kind": "cron", "log": f"{_L}/erl_irl_shadow.log"},
+    "news_shadow.recorder":                   {"strategy": "News", "symbol": "PIT recorder", "kind": "cron", "log": f"{_L}/news_shadow.log"},
+    "fomc_shadow.shadow":                     {"strategy": "FOMC", "symbol": "shadow", "kind": "cron", "log": f"{_L}/fomc_shadow.log"},
+    # ── legacy / failing (kept visible so nobody forgets it is looping) ──
+    "eth-enhanced-raid-bot.service":          {"strategy": "Legacy", "symbol": "ETH raid (auto-restart loop)", "kind": "service", "log": None},
 }
 
 SERVICE_WORK_DIRS = {
-    "fvg-btc": f"{VPS_REMOTE_BASE}/FVG_Strategy/BTC",
-    "fvg-eth": f"{VPS_REMOTE_BASE}/FVG_Strategy/ETH",
-    "fvg-nq":  f"{VPS_REMOTE_BASE}/FVG_Strategy/NQ",
-    "lr-btc":  f"{VPS_REMOTE_BASE}/Liquidity_Raid/BTC_V2",
-    "lr-eth":  f"{VPS_REMOTE_BASE}/Liquidity_Raid/ETH_V2",
-    "lr-nq":   f"{VPS_REMOTE_BASE}/Liquidity_Raid/NQ_V2",
-    "lr-sol":  f"{VPS_REMOTE_BASE}/Liquidity_Raid/SOL_V2",
-    "mm-btc":  f"{VPS_REMOTE_BASE}/Momentum_Mastery/BTC",
-    "mm-eth":  f"{VPS_REMOTE_BASE}/Momentum_Mastery/ETH",
-    "mm-nq":   f"{VPS_REMOTE_BASE}/Momentum_Mastery/NQ",
-    "mm-btc-shadow": f"{VPS_REMOTE_BASE}/Momentum_Mastery/BTC",
-    "straddle-btc":  f"{VPS_REMOTE_BASE}/Vol_Edge/Straddle_V1",
-    "straddle-eth":  f"{VPS_REMOTE_BASE}/Vol_Edge/Straddle_V1",
-    "sbs-btc": f"{VPS_REMOTE_BASE}/SBS/bots/btc",
-    "sbs-eth": f"{VPS_REMOTE_BASE}/SBS/bots/eth",
+    "fvg-btc.service": f"{VPS_REMOTE_BASE}/FVG_Strategy/BTC",
+    "fvg-eth.service": f"{VPS_REMOTE_BASE}/FVG_Strategy/ETH",
+    "fvg-nq.service":  f"{VPS_REMOTE_BASE}/FVG_Strategy/NQ",
+    "lr-eth.service":  f"{VPS_REMOTE_BASE}/Liquidity_Raid/ETH_V2",
+    "lr-nq.service":   f"{VPS_REMOTE_BASE}/Liquidity_Raid/NQ_V2",
+    "mm-btc.service":  f"{VPS_REMOTE_BASE}/Momentum_Mastery/BTC",
+    "mm-eth.service":  f"{VPS_REMOTE_BASE}/Momentum_Mastery/ETH",
+    "mm-nq.service":   f"{VPS_REMOTE_BASE}/Momentum_Mastery/NQ",
+    "mm-btc-shadow.service": f"{VPS_REMOTE_BASE}/Momentum_Mastery/BTC",
+    "straddle-btc.service":  f"{VPS_REMOTE_BASE}/Vol_Edge/Straddle_V1",
+    "straddle-eth.service":  f"{VPS_REMOTE_BASE}/Vol_Edge/Straddle_V1",
+    "displacement-btc.service": f"{VPS_REMOTE_BASE}/Displacement/BTC",
+    **{u: f"{VPS_REMOTE_BASE}/HyroTrader" for u in BOT_SERVICES
+       if u.startswith(("knife_", "lr-", "momentum-4h", "displacement-bybit", "ferryman",
+                        "bullput", "ironfly", "asia-basket", "ifvg", "manual"))
+       and u.endswith(".service") and u not in ("lr-eth.service", "lr-nq.service")
+       and "paper" not in u},
+    **{f"lr-{a}-paper.service": f"{VPS_REMOTE_BASE}/Liquidity_Raid/{a.upper()}_V2"
+       for a in ("avax", "bch", "bnb", "doge", "dot", "link", "xrp")},
 }
 
-# ── VPS Log Files (read directly — journalctl requires systemd-journal group) ─
-SERVICE_LOG_FILES = {
-    svc: f"{VPS_REMOTE_BASE}/logs/{svc.replace('-', '_')}.log"
-    for svc in BOT_SERVICES
-}
+# ── VPS Log Files (read directly — journalctl needs the systemd-journal group) ─
+# None means the unit logs ONLY to the journal, which the trader login cannot
+# read; the Live Logs page says so instead of failing on a missing file.
+SERVICE_LOG_FILES = {svc: info.get("log") for svc, info in BOT_SERVICES.items()}
 
 VPS_BACKUP_SCRIPT = f"{VPS_REMOTE_BASE}/backup_dbs.sh"
 

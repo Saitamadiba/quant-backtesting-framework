@@ -20,8 +20,17 @@ def symbol_filter(df: pd.DataFrame, key_prefix: str = "") -> list:
 
 
 def source_filter(key_prefix: str = "") -> str:
-    """Render a sidebar radio selector for data source (All/Live/Backtest)."""
-    return st.sidebar.radio("Source", ["All", "Live", "Backtest"], key=f"{key_prefix}_src")
+    """Render a sidebar radio selector for data source.
+
+    Live = real exchange fills (funded + demo seats), Paper = the Tier-2
+    virtual $100k books (simulated dollars — read them as R), Backtest = local
+    research output. Keeping Paper apart from Live is what stops a virtual
+    book's dollars landing in the money line.
+    """
+    return st.sidebar.radio("Source", ["All", "Live", "Paper", "Backtest"],
+                            key=f"{key_prefix}_src",
+                            help="Live = exchange fills · Paper = virtual $100k books "
+                                 "(simulated $, read the R) · Backtest = local research.")
 
 
 def direction_filter(key_prefix: str = "") -> list:

@@ -87,6 +87,11 @@ st.caption(
 
 _FLEET = {
     "Paper-execution books (fee-modeled forward tests)": [
+        ("Depth Policy Paper — `depth_policy_paper_book.db` [tab] (2026-07)",
+         "**What:** the depth-cohort signals under the POLICY exit (−0.40R hard "
+         "stop / trail / TP), fee-modeled, on a virtual book. Same skeleton as the "
+         "Depth Paper Bot; `stale_signal` rows and unscorable exits are excluded "
+         "to match the session recap."),
         ("Depth Paper Bot — `depth_paper_book.db` [tab]",
          "**Runs:** trader cron :06/:21/:36/:51 (`depth_paper_bot.py`). "
          "**Params:** fee haircut **0.10R** round-trip (`r_net = r_gross − 0.10`); "
@@ -161,6 +166,53 @@ _FLEET = {
          "the book, never inside it."),
     ],
     "Signal shadows (record-only detectors — structurally cannot order)": [
+        ("Anti-Knife Shadow — `antiknife_shadow.db` [tab] (2026-07)",
+         "**What:** the knife's mirror — same break, the OPPOSITE side, its own "
+         "bracket. **Why:** to test whether inverting a net-negative book earns "
+         "anything. **Result (closed 2026-08):** no — the ~2.9bps first-passage "
+         "asymmetry is smaller than one spread crossing; both sides pay the toll. "
+         "Kept recording as the control."),
+        ("Knife Cross-Venue — `crossvenue_shadow.db` [tab] (2026-07)",
+         "**What:** every knife fill tagged with the cross-venue dislocation at the "
+         "break. **Why:** a dislocation is a candidate PRE-fill gate. Read the "
+         "`tag` column as the exit_reason stand-in."),
+        ("Gated LR Shadow — `gated_lr_shadow.db` [tab] (2026-07)",
+         "**What:** LR signals the live gates rejected, scored as if taken, with "
+         "`g_*` flags naming the gate. **Why:** confront each gate with its live "
+         "cost. Sits beside the per-(bot,gate) books below."),
+        ("Wide-RR Shadow — `wide_rr_shadow.db` [tab] (2026-07)",
+         "**What:** the LR raid replayed at wider brackets (1.5R…4R ladder); the "
+         "LIVE arm is the headline. **Why:** is the live TP leaving money on the "
+         "table? Lifetime ≈ −113R on ~2k rows says the answer is no."),
+        ("Halt Shadow **era 2** — `halt_shadow_book.db` [tab] (resolver 2026-08-29)",
+         "**What:** what a HALTED seat would have taken. **Caveat, loudly:** era 1 "
+         "is a CLOSED phantom-fill book — 96% of entries booked at prices the "
+         "market had already left, +6,603R on fills that never existed — and is "
+         "**dropped**, not labelled. Only the fill-adjudicating era-2 rows load."),
+        ("Sweep Engine (GROSS) — `sweep_engine.db` [tab] (2026-07)",
+         "**What:** every qualified sweep on the ByBit feed resolved to a GROSS R "
+         "— no fee/slip toll. **Read it as an upper bound**, never a P&L; the "
+         "session recap labels it `(gross)` for the same reason. Alias rows and "
+         "the Binance.US feed are excluded to match that definition."),
+        ("Fib618 Shadow — `fib618_shadow.db` [tab] (2026-07)",
+         "**What:** the 0.618 retrace of a BOS leg, taker-cost R as headline "
+         "(`net_taker`), maker-cost alongside. **Why:** one more test of "
+         "fade-at-a-visible-level — the closure library says the space is dead; "
+         "this is the recorder that keeps it honest."),
+        ("FVG Alts Shadow (current era) — `fvg_alts_shadow.db` [tab] (1-min scanner 2026-09-02)",
+         "**What:** FVG continuation on alts at 1-min cadence, tp1/tp2 ladder. "
+         "**Eras 1–2 were invalidated** (stale entries at 15-min cadence); only "
+         "the newest era loads. Pre-registered kill bar: 30 distinct signals by "
+         "2026-09-21."),
+        ("LR Signal Shadow **era 2** — `lr_signal_shadow.db` [tab] (2026-08-29)",
+         "**What:** the LR funded seats' signal shadow. Era 1 had no fee and exact "
+         "SL/TP exits (+102R gross → +4.3R once charged) so it is **not pooled**; "
+         "era 2's fee-charged, fill-adjudicated `r_net` is the headline."),
+        ("LR/MM/FVG **gate** books — `shadow_books/*_gate.db` ×22 [tab] (2026-08)",
+         "**What:** one canonical book per (bot, gate): every live signal the "
+         "regime / flow / funding gate blocked, tracked as if taken. **Why:** the "
+         "gate's live cost, per bot, per gate. Labelled e.g. `LR Flow Gate Shadow "
+         "BTC`."),
         ("Momentum 4H — SOL & LTC shadows — `momentum_4h_{sol,ltc}_shadow.db` [tab]",
          "**Runs:** systemd `momentum-4h-sol-shadow` / `-ltc-shadow`. "
          "**Params:** EMA **50/200** trend bias, **ADX(14) ≥ 20**, 20-bar "

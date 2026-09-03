@@ -11,7 +11,7 @@ import pandas as pd
 
 from config import (
     VPS_CACHE_DIR, DB_STRATEGY_MAP, SESSIONS, TRADE_SCHEMA_COLS,
-    SBS_TRAINING_CSV,
+    SBS_TRAINING_CSV, FLEET_CACHE_DIR, VPS_DB_FILES, VPS_REMOTE_BASE,
 )
 
 logger = logging.getLogger(__name__)
@@ -412,10 +412,103 @@ def normalize_sbs_live(db_path: Path, strategy: str, symbol: str) -> pd.DataFram
     return _ensure_schema(df)
 
 
+# ── Fleet books (Tier 1 + Tier 2) via the fleet registry ─────────────────────
+# One generic bridge instead of one hand-written normaliser per seat: the
+# registry already knows each book's timestamp, price, R and $ columns (it is
+# what page 30 reads live), so the same SELECT runs here against the synced
+# copy. Tier 1 rows are `source="Live"`, Tier 2 rows `source="Paper"` — the
+# virtual $100k books answer "would this pass a challenge", not "what did we
+# earn", and the Source filter keeps the two apart.
+
+_DIR_MAP = {"long": "Long", "buy": "Long", "l": "Long", "bull": "Long", "bullish": "Long",
+            "short": "Short", "sell": "Short", "s": "Short", "bear": "Short",
+            "bearish": "Short"}
+
+
+def _canon_side(v) -> str:
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return "Unknown"
+    return _DIR_MAP.get(str(v).strip().lower(), "Unknown")
+
+
+def _fleet_local_path(rel_db: str) -> Path:
+    return FLEET_CACHE_DIR / rel_db
+
+
+def normalize_fleet_book(db_path: Path, book) -> pd.DataFrame:
+    """Bridge one fleet book's closed rows into the unified schema."""
+    from data.fleet_registry import build_history_sql
+    try:
+        uri = f"file:{db_path}?mode=ro"
+        with sqlite3.connect(uri, uri=True) as conn:
+            raw = pd.read_sql_query(build_history_sql(book), conn)
+    except Exception as e:
+        logger.warning(f"fleet book {book.key} ({db_path.name}) unreadable: {e}")
+        return pd.DataFrame(columns=TRADE_SCHEMA_COLS)
+    if raw.empty:
+        return pd.DataFrame(columns=TRADE_SCHEMA_COLS)
+
+    df = pd.DataFrame()
+    df["trade_id"] = [f"{book.key}:{i}" for i in range(len(raw))]
+    df["strategy"] = book.family or book.label
+    sym = raw["symbol"].astype(str).str.upper().str.replace("USDT", "", regex=False)
+    df["symbol"] = sym.where(sym.notna() & (sym != "NONE"), "?")
+    df["timeframe"] = None
+    df["source"] = "Live" if book.tier == 1 else "Paper"
+    df["direction"] = raw["side"].map(_canon_side)
+    df["entry_time"] = pd.to_datetime(raw["entry_ts"], errors="coerce", utc=True,
+                                      format="mixed").dt.tz_localize(None)
+    df["exit_time"] = pd.to_datetime(raw["exit_ts"], errors="coerce", utc=True,
+                                     format="mixed").dt.tz_localize(None)
+    for src, dst in (("entry", "entry_price"), ("exit_px", "exit_price"),
+                     ("sl", "stop_loss"), ("tp", "take_profit"),
+                     ("pnl", "pnl_usd"), ("r", "r_multiple")):
+        df[dst] = pd.to_numeric(raw[src], errors="coerce")
+    if book.pnl is None:
+        df["pnl_usd"] = None
+    df["pnl_pct"] = None
+    df["session"] = df["entry_time"].apply(_classify_session)
+    df["exit_reason"] = raw["exit_reason"].where(raw["exit_reason"].notna(), "Unknown")
+    df["duration_minutes"] = (df["exit_time"] - df["entry_time"]).dt.total_seconds() / 60
+    df["running_balance"] = None
+    df["mfe"] = None
+    df["mae"] = None
+    df["is_open"] = False
+    df["bot"] = book.label            # the seat, kept beside the family
+    return _ensure_schema(df).assign(bot=book.label)
+
+
+def load_fleet_live_trades() -> pd.DataFrame:
+    """Every synced Tier-1/2 fleet book, bridged — skipping any DB the legacy
+    map already reads so a seat is never counted twice."""
+    try:
+        from data.fleet_registry import BOOKS
+    except Exception as e:
+        logger.warning(f"fleet registry unavailable: {e}")
+        return pd.DataFrame(columns=TRADE_SCHEMA_COLS)
+    legacy_remote = {v.replace(VPS_REMOTE_BASE + "/", "") for v in VPS_DB_FILES.values()}
+    frames = []
+    for b in BOOKS:
+        if b.tier > 2 or any(c in b.db for c in "*?[") or b.db in legacy_remote:
+            continue
+        p = _fleet_local_path(b.db)
+        if not p.exists():
+            continue
+        df = normalize_fleet_book(p, b)
+        if not df.empty:
+            frames.append(df)
+    if not frames:
+        return pd.DataFrame(columns=TRADE_SCHEMA_COLS)
+    cleaned = [f.dropna(axis=1, how="all") for f in frames]
+    out = pd.concat(cleaned, ignore_index=True)
+    return _ensure_schema(out).assign(bot=out.get("bot"))
+
+
 # ── Load all VPS cached DBs ──────────────────────────────────────────────────
 
 def load_all_live_trades() -> pd.DataFrame:
-    """Load & normalize all VPS-cached SQLite databases."""
+    """Load & normalize all VPS-cached SQLite databases — the legacy map first,
+    then every synced fleet book (Tier 1 = Live, Tier 2 = Paper)."""
     frames = []
     for db_file, (strategy, symbol) in DB_STRATEGY_MAP.items():
         db_path = VPS_CACHE_DIR / db_file
@@ -431,6 +524,10 @@ def load_all_live_trades() -> pd.DataFrame:
 
         if not df.empty:
             frames.append(df)
+
+    fleet = load_fleet_live_trades()
+    if not fleet.empty:
+        frames.append(fleet)
 
     if not frames:
         return pd.DataFrame(columns=TRADE_SCHEMA_COLS)

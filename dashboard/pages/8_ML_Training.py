@@ -939,7 +939,9 @@ with tab_ml:
     # Section D: VPS Bot Management
     # ══════════════════════════════════════════════════════════════════════
     st.header("D. VPS Bot Management")
-    st.caption("Live status of all trading bots running on your VPS. Green means the bot is active and trading; red means it's stopped. Use Start/Stop/Restart to manage bots remotely. After ML retraining, restart bots so they pick up the new model.")
+    st.caption("Live status of every fleet seat on the VPS — systemd units by `is-active`, cron seats by log freshness. "
+               "Start/Stop/Restart do **not** run from here: the dashboard's `trader` login has no sudo by design, so each button "
+               "backs the seat's DBs up and hands you the exact `sudo systemctl` command to paste in an `admin` session.")
 
     st.caption(f"VPS: {VPS_USER}@{VPS_HOST}:{VPS_PORT}")
 
@@ -964,13 +966,22 @@ with tab_ml:
                 bc1, bc2, bc3 = st.columns(3)
                 if bc1.button("Start", key=f"start_{svc}", help="Start this bot's systemd service on the VPS. Use after a manual stop or initial deployment."):
                     r = manage_bot_service(svc, "start")
-                    st.toast(f"Start {svc}: {'OK' if r['success'] else r['stderr']}")
-                    st.rerun()
+                    if r.get("operator_command"):
+                        st.code(r["operator_command"], language="bash")
+                        st.caption(r["stderr"])
+                    else:
+                        st.warning(r.get("stderr") or r.get("error", ""))
                 if bc2.button("Stop", key=f"stop_{svc}", help="Stop this bot's systemd service on the VPS. The bot will stop trading immediately."):
                     r = manage_bot_service(svc, "stop")
-                    st.toast(f"Stop {svc}: {'OK' if r['success'] else r['stderr']}")
-                    st.rerun()
+                    if r.get("operator_command"):
+                        st.code(r["operator_command"], language="bash")
+                        st.caption(r["stderr"])
+                    else:
+                        st.warning(r.get("stderr") or r.get("error", ""))
                 if bc3.button("Restart", key=f"restart_{svc}", help="Restart this bot's systemd service on the VPS. Required after deploying new code or retraining ML models."):
                     r = manage_bot_service(svc, "restart")
-                    st.toast(f"Restart {svc}: {'OK' if r['success'] else r['stderr']}")
-                    st.rerun()
+                    if r.get("operator_command"):
+                        st.code(r["operator_command"], language="bash")
+                        st.caption(r["stderr"])
+                    else:
+                        st.warning(r.get("stderr") or r.get("error", ""))

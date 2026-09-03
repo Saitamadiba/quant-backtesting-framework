@@ -32,9 +32,12 @@ except ImportError:
 st.sidebar.markdown("---")
 st.sidebar.subheader("Bot Selection")
 
-# Build display labels from BOT_SERVICES
+# Build display labels from BOT_SERVICES — "Family · seat" so the 80-odd seats
+# sort by family in the picker. Journal-only units are marked: their output is
+# not on disk where the trader login can read it.
 service_labels = {
-    svc: f"{info['strategy']} {info['symbol']}" for svc, info in BOT_SERVICES.items()
+    svc: f"{info['strategy']} · {info['symbol']}" + ("" if info.get("log") else "  (journal-only)")
+    for svc, info in sorted(BOT_SERVICES.items(), key=lambda kv: (kv[1]["strategy"], kv[1]["symbol"]))
 }
 selected_label = st.sidebar.selectbox(
     "Bot",
@@ -102,16 +105,27 @@ status_icons = {
 }
 icon, label = status_icons.get(svc_status, ("\U0001F7E1", svc_status.title()))
 
+_kind = BOT_SERVICES[selected_service].get("kind", "service")
 c1, c2, c3 = st.columns([2, 2, 3])
-c1.metric("Bot", selected_label)
-c2.metric("Service Status", f"{icon} {label}")
-c3.metric("Service Name", f"`{selected_service}.service`")
+c1.metric("Bot", selected_label.replace("  (journal-only)", ""))
+c2.metric("Status" if _kind != "cron" else "Log freshness", f"{icon} {label}")
+c3.metric("Unit" if _kind != "cron" else "Cron seat",
+          f"`{selected_service}`" if _kind != "cron" else "no systemd unit")
 
 st.markdown("---")
 
 # ── Fetch Logs ───────────────────────────────────────────────────────────────
 # Read the log file directly via tail (journalctl requires systemd-journal group)
-log_file = SERVICE_LOG_FILES.get(selected_service, "")
+log_file = SERVICE_LOG_FILES.get(selected_service)
+if not log_file:
+    st.warning(
+        f"**`{selected_service}` logs only to the systemd journal**, which the read-only "
+        "`trader` login cannot open (that needs the `adm`/`systemd-journal` group). "
+        "Its trades are still on **🛰️ Live Fleet**. To make its log readable here, the "
+        "operator adds `StandardOutput=append:/home/trader/trading_bots/logs/<name>.log` "
+        "to the unit (as `admin`) and reloads — a small plumbing job, not a code change."
+    )
+    st.stop()
 cmd = f"tail -n {num_lines} {log_file}"
 
 # Server-side grep for performance (fewer bytes over SSH)

@@ -74,6 +74,17 @@ class Book:
     working_ts: Optional[str] = None
     working_max_age_h: int = 6
 
+    # Strategy FAMILY for the unified trade universe (Overview / Journal / Equity /
+    # Session pages): several books roll up under one family ("Knife" has six
+    # arms, "Liquidity Raid" a dozen seats). Colours and filters key off this.
+    family: str = ""
+    # Full-history columns (closed rows) — used LOCALLY on a synced copy, so
+    # they carry the fields the unified schema wants and the window dump does
+    # not: when the trade opened, its stop, and why it closed. Each falls back
+    # to the running-leg column of the same meaning when unset.
+    entry_ts: Optional[str] = None
+    exit_reason: Optional[str] = None
+
     # The env-file seat whose ByBit account this book trades ("desk_demo/desk_demo").
     # Only set where it is KNOWN — reconciliation treats an unknown seat as
     # "cannot check", never as "orphan".
@@ -109,6 +120,7 @@ _KNIFE = dict(
     working_filter="placed_at_utc IS NOT NULL AND filled_at_utc IS NULL "
                    "AND closed_at_utc IS NULL AND COALESCE(exit_reason,'')=''",
     working_ts="placed_at_utc",
+    family="Knife", exit_reason="exit_reason",
 )
 
 _SEATS = dict(  # desk / retest / lr_wide / lrr_short share the `seats` shape
@@ -117,7 +129,7 @@ _SEATS = dict(  # desk / retest / lr_wide / lrr_short share the `seats` shape
     entry="fill_px",
     open_filter="fill_time IS NOT NULL AND closed_at IS NULL",
     open_ts="fill_time", open_entry="fill_px", open_sl="sl", open_tp="tp",
-    open_qty="qty", open_risk="risk_usd",
+    open_qty="qty", open_risk="risk_usd", exit_reason="close_reason",
 )
 
 _SMC = dict(
@@ -126,7 +138,7 @@ _SMC = dict(
     entry="real_fill_price",
     open_filter="real_fill_time IS NOT NULL AND closed_at IS NULL",
     open_ts="real_fill_time", open_entry="real_fill_price", open_sl="stop",
-    open_tp="tp", open_qty="qty",
+    open_tp="tp", open_qty="qty", family="SMC", exit_reason="close_reason",
 )
 
 _DEPTH_ORDERS = dict(
@@ -138,14 +150,14 @@ _DEPTH_ORDERS = dict(
     open_ts="filled_at_utc", open_entry="COALESCE(avg_entry,entry)",
     open_sl="COALESCE(trail_sl,sl)", open_tp="tp", open_qty="qty", open_risk="risk_usd",
     working_filter="status IN ('OPEN','PLACED','NEW') AND filled_at_utc IS NULL",
-    working_ts="opened_at_utc",
+    working_ts="opened_at_utc", family="Depth", exit_reason="note",
 )
 
 _PAPER = dict(  # lrr / depth virtual books
     table="paper_trades", ts="closed_at_utc", r="r_net", pnl="pnl_usd",
     symbol="asset", side="direction", entry="entry_price",
     open_filter="status='OPEN'", open_ts="opened_at_utc", open_entry="entry_price",
-    open_sl="sl", open_tp="tp", open_risk="risk_usd",
+    open_sl="sl", open_tp="tp", open_risk="risk_usd", exit_reason="exit_reason",
 )
 
 _LR_TRADES = dict(
@@ -153,12 +165,14 @@ _LR_TRADES = dict(
     pnl="realized_pnl", side="signal_type", entry="entry_price", exit="exit_price",
     open_filter="status='open'", open_ts="timestamp", open_entry="entry_price",
     open_sl="stop_loss", open_tp="take_profit", open_qty="position_size",
+    family="Liquidity Raid", exit_reason="COALESCE(exit_reason, reason)",
 )
 
 _OPT = dict(  # option seats book $ only — no R (the risk leg is the spread)
     table="trades", ts="exit_timestamp", closed_filter="realized_pnl IS NOT NULL",
     pnl="realized_pnl", side="status",
     open_filter="status='open'", open_ts="timestamp",
+    family="Options", exit_reason="exit_reason",
 )
 
 
@@ -169,9 +183,9 @@ def _knife(key: str, label: str, db: str, recap: bool = True,
 
 
 def _seats(key: str, label: str, db: str, recap: bool = False,
-           seat: Optional[str] = None, **kw) -> Book:
+           seat: Optional[str] = None, family: str = "Level Seats", **kw) -> Book:
     return Book(key=key, label=label, tier=1, db=db, seat=seat, in_recap=recap,
-                **{**_SEATS, **kw})
+                family=family, **{**_SEATS, **kw})
 
 
 def _lr(key: str, label: str, db: str, recap: bool = False) -> Book:
@@ -231,25 +245,28 @@ BOOKS: list[Book] = [
          symbol="'ADA'", side="direction", entry="entry", exit="exit_price",
          open_filter="opened_at_utc IS NOT NULL AND closed_at_utc IS NULL",
          open_ts="opened_at_utc", open_entry="entry", open_sl="sl", open_tp="tp",
-         open_qty="qty", open_risk="risk_usd"),
+         open_qty="qty", open_risk="risk_usd", family="Momentum 4H",
+         exit_reason="exit_reason"),
     Book(key="mm_demo_btc", label="mm-demo-btc", tier=1,
-         db="HyroTrader/mm_bybit_btc.db", **_LR_TRADES, symbol="'BTC'"),
+         db="HyroTrader/mm_bybit_btc.db", **{**_LR_TRADES, "family": "Momentum Mastery"},
+         symbol="'BTC'", seat="HyroTrader/HyroTrader"),
     Book(key="displacement_btc", label="displacement-btc", tier=1,
          db="HyroTrader/displacement_bybit_btc.db", table="displacement_trades",
          ts="closed_at_utc", closed_filter="r_net IS NOT NULL", r="r_net",
          symbol="symbol", side="direction", entry="entry_price", exit="exit_price",
          open_filter="closed_at_utc IS NULL", open_ts="opened_at_utc",
          open_entry="entry_price", open_sl="stop_price", open_tp="target_price",
-         open_qty="bybit_qty"),
+         open_qty="bybit_qty", family="Displacement", exit_reason="exit_reason",
+         seat="HyroTrader/HyroTrader"),
     _seats("desk_demo", "desk-demo", "desk_demo/desk_demo.db", recap=True,
-           seat="desk_demo/desk_demo"),
+           seat="desk_demo/desk_demo", family="Desk"),
     _seats("retest_demo", "retest-demo", "retest_demo/retest_demo.db", recap=True,
-           seat="retest_demo/retest_demo"),
+           seat="retest_demo/retest_demo", family="Retest"),
     _seats("lr_wide_demo", "lr-wide-demo", "lr_wide_demo/lr_wide_demo.db",
-           seat="lr_wide_demo/lr_wide_demo", open_sl="sl", open_tp="tp",
-           entry="fill_px"),
+           seat="lr_wide_demo/lr_wide_demo", family="Liquidity Raid",
+           open_sl="sl", open_tp="tp", entry="fill_px"),
     _seats("lrr_short_demo", "lrr-short-demo", "lrr_short_demo/lrr_short_demo.db",
-           seat="lrr_short_demo/lrr_short_demo"),
+           seat="lrr_short_demo/lrr_short_demo", family="LRR"),
     Book(key="smc_demo", label="smc-demo", tier=1, in_recap=True,
          db="smc_demo/smc_demo.db", seat="smc_demo/smc_demo", **_SMC),
     Book(key="smc12h4h_demo", label="smc-12h4h-demo", tier=1,
@@ -275,6 +292,7 @@ BOOKS: list[Book] = [
          open_filter="status='filled'", open_ts="fill_ts",
          open_entry="avg_fill_price", open_sl="sl", open_tp="tp", open_qty="final_qty",
          working_filter="status='placed' AND fill_ts IS NULL", working_ts="placed_at",
+         family="OFCS", exit_reason="close_reason",
          note="one book, era-scoped: challenge rules from 2026-09-01"),
     Book(key="london_raid", label="london-raid-demo", tier=1,
          seat="london_raid_demo/london_raid_demo",
@@ -285,7 +303,8 @@ BOOKS: list[Book] = [
          open_ts="fill_ts", open_entry="avg_fill_price", open_sl="sl", open_tp="tp",
          open_qty="qty", open_risk="risk_usd",
          working_filter="order_id IS NOT NULL AND fill_ts IS NULL AND status NOT IN "
-                        "('cancelled','closed','orphaned')", working_ts="placed_at"),
+                        "('cancelled','closed','orphaned')", working_ts="placed_at",
+         family="London Raid", exit_reason="note"),
     Book(key="london_raid_taker", label="london-raid-taker", tier=1,
          db="london_raid_taker_demo/london_raid_taker_demo.db", table="trades",
          ts="exit_ts", closed_filter="realized_r IS NOT NULL", r="realized_r",
@@ -293,7 +312,7 @@ BOOKS: list[Book] = [
          entry="avg_fill_price", exit="exit_price",
          open_filter="avg_fill_price IS NOT NULL AND exit_ts IS NULL",
          open_ts="fill_ts", open_entry="avg_fill_price", open_sl="sl", open_tp="tp",
-         open_qty="qty", open_risk="risk_usd"),
+         open_qty="qty", open_risk="risk_usd", family="London Raid", exit_reason="note"),
     Book(key="ferryman", label="ferryman-demo", tier=1,
          seat="HyroTrader/ferryman_demo",
          db="HyroTrader/ferryman_demo.db", table="orders", ts="exit_at",
@@ -303,7 +322,7 @@ BOOKS: list[Book] = [
          open_entry="fill_px", open_sl="sl", open_qty="qty", open_risk="risk_usd",
          working_filter="order_id IS NOT NULL AND fill_at IS NULL AND status NOT IN "
                         "('EXPIRED','REJECTED','CLOSED','SKIPPED_CAP','SKIPPED_BUSY')",
-         working_ts="placed_at"),
+         working_ts="placed_at", family="Ferryman", exit_reason="exit_reason"),
     Book(key="fvg_alts", label="fvg-alts-demo", tier=1, seat="fvgalt",
          db="HyroTrader/fvg_alts_demo.db", table="trades", ts="exit_ts",
          closed_filter="realized_r IS NOT NULL", r="realized_r", pnl="realized_pnl",
@@ -311,20 +330,23 @@ BOOKS: list[Book] = [
          open_filter="fill_ts IS NOT NULL AND exit_ts IS NULL", open_ts="fill_ts",
          open_entry="avg_fill_price", open_sl="sl", open_tp="tp1",
          open_qty="filled_qty",
-         working_filter="status='placed' AND fill_ts IS NULL", working_ts="placed_at"),
+         working_filter="status='placed' AND fill_ts IS NULL", working_ts="placed_at",
+         family="FVG Alts", exit_reason="close_reason"),
     Book(key="funding_carry", label="funding-carry-demo", tier=1,
          seat="funding_carry_demo/funding_carry_demo",
          db="funding_carry_demo/funding_carry_demo.db", table="holds", ts="closed_at",
          closed_filter="status='closed' AND realized_pnl IS NOT NULL",
          pnl="realized_pnl", symbol="symbol", entry="perp_fill_px",
          open_filter="status='open'", open_ts="opened_at", open_entry="perp_fill_px",
-         open_qty="q", note="cash-and-carry: $ only, no stop-defined R"),
+         open_qty="q", family="Funding Carry", exit_reason="close_reason",
+         note="cash-and-carry: $ only, no stop-defined R"),
     Book(key="phantom", label="phantom-conductor", tier=1,
          db="phantom_conductor/phantom_conductor.db", table="mirrors", ts="closed_at",
          closed_filter="r_geom IS NOT NULL", r="r_geom", pnl="pnl_usd",
          symbol="symbol", side="direction", entry="entry_fill", exit="exit_fill",
          open_filter="status='open'", open_ts="opened_at", open_entry="entry_fill",
-         open_sl="sl", open_tp="tp", open_qty="qty", open_risk="risk_usd"),
+         open_sl="sl", open_tp="tp", open_qty="qty", open_risk="risk_usd",
+         family="Phantom", exit_reason="close_note"),
     _opt("bullput_btc", "bullput-btc(opt)", "bullput_btc_bybit.db", recap=True,
          seat="bullput"),
     _opt("bullput_eth", "bullput-eth(opt)", "bullput_eth_bybit.db", recap=True,
@@ -337,25 +359,34 @@ BOOKS: list[Book] = [
     _opt("bullput_btc_10k", "bullput-btc-funded", "bullput_btc_funded_10k.db"),
     _opt("bullput_eth_10k", "bullput-eth-funded", "bullput_eth_funded_10k.db"),
 
+    # ── Tier 2 · LR paper signal books (Liquidity_Raid/<SYM>_V2, no exchange) ──
+    # NQ is deliberately absent: the legacy dashboard map already reads it as
+    # `lr_nq.db`, and a book counted twice is a book counted wrong.
+    *[Book(key=f"lr_paper_{s_.lower()}", label=f"lr-paper-{s_.lower()}", tier=2,
+           db=f"Liquidity_Raid/{s_}_V2/{s_.lower()}_liquidity_raid_v2.db",
+           symbol=f"'{s_}'", **_LR_TRADES)
+      for s_ in ("BTC", "ETH", "SOL", "AVAX", "BCH", "BNB", "DOGE", "DOT", "LINK", "XRP")],
+
     # ── Tier 2 · paper / virtual books ───────────────────────────────────────
     Book(key="lrr_paper", label="lrr-paper", tier=2, in_recap=True,
-         db="HyroTrader/lrr_paper_book.db", closed_filter="r_net IS NOT NULL", **_PAPER),
+         db="HyroTrader/lrr_paper_book.db", closed_filter="r_net IS NOT NULL",
+         family="LRR", **_PAPER),
     Book(key="depth_paper", label="depth-paper(fresh)", tier=2, in_recap=True,
          db="HyroTrader/depth_paper_book.db",
          closed_filter="r_net IS NOT NULL AND COALESCE(stale_signal,0)=0 AND "
                        "COALESCE(exit_reason,'') NOT IN ('POLICY_UNSCORABLE','SOURCE_GONE')",
-         **_PAPER),
+         family="Depth", **_PAPER),
     Book(key="depth_policy_paper", label="depth-policy-paper(fresh)", tier=2, in_recap=True,
          db="HyroTrader/depth_policy_paper_book.db",
          closed_filter="r_net IS NOT NULL AND COALESCE(stale_signal,0)=0 AND "
                        "COALESCE(exit_reason,'') NOT IN ('POLICY_UNSCORABLE','SOURCE_GONE')",
-         **_PAPER),
+         family="Depth", **_PAPER),
     Book(key="ofcs_paper_e1", label="ofcs-paper(gross,era1)", tier=2, in_recap=True,
          db="ofcs_shadow/ofcs_paper_book.db", table="ofcs_paper_trades",
          ts="replace(resolved_at,' UTC','')",
          closed_filter="realized_r IS NOT NULL AND COALESCE(era,1)<2",
          r="realized_r", symbol="asset", side="direction", entry="entry",
-         exit="exit_price"),
+         exit="exit_price", family="OFCS", entry_ts="entry_ts", exit_reason="exit_reason"),
     Book(key="ofcs_paper_e2", label="ofcs-paper(net,era2)", tier=2, in_recap=True,
          db="ofcs_shadow/ofcs_paper_book.db", table="ofcs_paper_trades",
          ts="replace(resolved_at,' UTC','')",
@@ -364,13 +395,15 @@ BOOKS: list[Book] = [
          exit="exit_price",
          open_filter="realized_r IS NULL AND era=2 AND status NOT IN ('rejected','skipped')",
          open_ts="entry_ts", open_entry="COALESCE(effective_entry,entry)",
-         open_sl="sl", open_tp="tp", open_qty="qty"),
+         open_sl="sl", open_tp="tp", open_qty="qty", family="OFCS",
+         exit_reason="exit_reason"),
     Book(key="analyst_drift", label="analyst-drift(alpaca)", tier=2,
          seat="analyst_drift_paper", reconcilable=False,
          db="analyst_drift_paper/analyst_paper.db", table="events", ts="resolved_at",
          closed_filter="status='closed' AND pnl_usd IS NOT NULL", pnl="pnl_usd",
          symbol="symbol", entry="entry_fill", exit="exit_fill",
          open_filter="status='slated'", open_ts="created_utc", open_qty="qty",
+         family="Analyst Drift", exit_reason="reason",
          note="US equities, Alpaca paper — $ book, no stop-defined R"),
 
     # ── Tier 3 · shadow / record-only (dimensionless R) ──────────────────────
@@ -504,6 +537,26 @@ def build_trades_sql(b: Book, days: int = 7, limit: int = 500) -> str:
     )
 
 
+def build_history_sql(b: Book) -> str:
+    """Every closed row with the unified-schema fields — no window, no cap.
+
+    Meant for a LOCAL synced copy (the unified trade pages), never for the SSH
+    round trip: it is the whole ledger, not this week's page of it.
+    """
+    entry_ts = b.entry_ts or b.open_ts
+    return (
+        f"SELECT {_expr(entry_ts)} AS entry_ts, {b.ts} AS exit_ts,"
+        f" {_expr(b.symbol)} AS symbol, {_expr(b.side)} AS side,"
+        f" {_expr(b.entry)} AS entry, {_expr(b.exit)} AS exit_px,"
+        f" {_expr(b.open_sl)} AS sl, {_expr(b.open_tp)} AS tp,"
+        f" {_expr(b.open_qty)} AS qty, {_expr(b.open_risk)} AS risk_usd,"
+        f" {_expr(b.r)} AS r, {_expr(b.pnl)} AS pnl,"
+        f" {_expr(b.exit_reason)} AS exit_reason"
+        f" FROM {b.table} WHERE {b.closed_filter}"
+        f" ORDER BY datetime({b.ts})"
+    )
+
+
 def build_bucket_sql(b: Book, days: int = 7) -> str:
     """Per-HOUR totals inside the window — aggregated ON the VPS.
 
@@ -566,3 +619,22 @@ def build_spec(days: int = 7, trade_limit: int = 500,
         if osql:
             plan.append({"id": f"{b.key}::open", "db": b.db, "sql": osql})
     return plan
+
+
+# Families present in the fleet, in roster order — the unified universe's
+# strategy list (Tier 1 + Tier 2 only; shadows are dimensionless by design).
+FAMILIES: list[str] = []
+for _b in BOOKS:
+    if _b.tier <= 2 and _b.family and _b.family not in FAMILIES:
+        FAMILIES.append(_b.family)
+
+
+def family_symbols(family: str) -> list[str]:
+    """Symbols a family trades, read off its books' literal symbol columns."""
+    out: list[str] = []
+    for _b in BOOKS:
+        if _b.family == family and _b.symbol and _b.symbol.startswith("'"):
+            sym = _b.symbol.strip("'")
+            if sym not in out:
+                out.append(sym)
+    return out

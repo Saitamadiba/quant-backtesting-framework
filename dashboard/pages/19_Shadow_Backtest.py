@@ -5,7 +5,7 @@ import plotly.graph_objects as go
 import pandas as pd
 import numpy as np
 
-from config import STRATEGIES, STRATEGY_COLORS, BOT_SERVICES
+from config import STRATEGIES, STRATEGY_COLORS, BOT_SERVICES, RESEARCH_STRATEGIES
 from data.wfo_loader import list_shadow_results, load_shadow_result, get_latest_shadow
 
 st.set_page_config(page_title="Shadow Backtest", layout="wide")
@@ -16,7 +16,7 @@ st.caption("Compare live bot signals against WFO adapter reconstructions")
 shadow_results = list_shadow_results()
 
 strategies_available = sorted({r["strategy"] for r in shadow_results}) if shadow_results else []
-all_strategies = sorted({s for s in STRATEGIES})
+all_strategies = sorted({s for s in RESEARCH_STRATEGIES})
 
 sel_strategy = st.sidebar.selectbox(
     "Strategy",
@@ -27,7 +27,7 @@ sel_strategy = st.sidebar.selectbox(
 symbols_available = sorted(
     {r["symbol"] for r in shadow_results if r["strategy"] == sel_strategy}
 ) if shadow_results else []
-all_symbols = STRATEGIES.get(sel_strategy, {}).get("symbols", ["BTC", "ETH"])
+all_symbols = RESEARCH_STRATEGIES.get(sel_strategy, {}).get("symbols", ["BTC", "ETH"])
 
 sel_symbol = st.sidebar.selectbox(
     "Symbol",
@@ -37,9 +37,17 @@ sel_symbol = st.sidebar.selectbox(
 
 # ── All Bots Grid ─────────────────────────────────────────────────────────────
 st.subheader("Running Bots Overview")
+st.caption(
+    "Only the WFO-backed research bots have an adapter to shadow against; the "
+    "rest of the fleet (knife, depth, OFCS, …) is measured on **🛰️ Live Fleet** and "
+    "**Shadow Trades** instead."
+)
 
-bot_cols = st.columns(min(len(BOT_SERVICES), 5))
-for i, (svc_name, svc_info) in enumerate(BOT_SERVICES.items()):
+_wfo_units = {u: i for u, i in BOT_SERVICES.items()
+              if i["strategy"] in RESEARCH_STRATEGIES and i.get("kind") == "service"
+              and "shadow" not in i["symbol"].lower()}
+bot_cols = st.columns(min(len(_wfo_units), 5))
+for i, (svc_name, svc_info) in enumerate(_wfo_units.items()):
     col = bot_cols[i % len(bot_cols)]
     strat = svc_info["strategy"]
     sym = svc_info["symbol"]

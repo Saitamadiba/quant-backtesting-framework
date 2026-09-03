@@ -29,6 +29,8 @@ st.title("🎚️ Vol Edge — Options Lab")
 st.caption(
     "Two strategies, one thesis: **sell overpriced insurance, manage the tail**. "
     "Vol Edge sells ATM straddles; the Bull-Put bot sells defined-risk credit spreads. "
+    "Live option seats today: `straddle-btc/eth`, `bullput-btc/eth-demo`, `ironfly-btc/eth-bybit` "
+    "(plus a calendar book) — their realized $ is on 🛰️ Live Fleet under **Options**. "
     "Below: a plain-English primer, payoff diagrams, both pricers, and a gate simulator "
     "that switches between strategies so you can see *why* each one waits for the regime it does."
 )

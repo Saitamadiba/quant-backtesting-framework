@@ -28,11 +28,15 @@ from data.funded_sim import (
     ACCOUNT_SIZES, HYRO_TRIAL, prepare_trades, simulate, compare_sizes,
 )
 
-# Knife funded arms — VPS-only `funded_trades` tables not in the unified loader.
+# Knife funded arms — VPS-only `funded_trades` tables, read here directly so the
+# maker/taker split survives (the unified loader folds them into one "Knife"
+# family). The other fleet seats (desk, retest, OFCS, depth, …) arrive through
+# get_all_trades() as their own strategies once the fleet books are synced.
 # We read every present knife funded DB and split rows by their `entry_mode`
 # (maker post-only limit vs taker market), since the arms can co-exist in one DB
 # (e.g. the $100k demo) and older rows pre-date the entry_mode column (= maker).
-KNIFE_DBS = ["knife_funded_maker.db", "knife_funded_taker.db", "knife_funded_100k.db"]
+KNIFE_DBS = ["knife_funded_maker.db", "knife_funded_taker.db", "knife_funded_100k.db",
+             "knife_funded_10k.db", "knife_funded_maker2.db", "knife_funded_ethmstop.db"]
 KNIFE_FEE_BPS = {"maker": 4.0, "taker": 11.0}  # round-trip: ~2 / ~5.5 bps a side
 # Configured funded roster (KNIFE_FUNDED_SYMBOLS, USDT stripped). NB: no ETH.
 KNIFE_FUNDED_UNIVERSE = ["ADA", "AVAX", "BCH", "BNB", "BTC", "DOGE", "DOT",

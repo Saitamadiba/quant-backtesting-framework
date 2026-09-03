@@ -13,7 +13,7 @@ st.caption(
     "each strategy seeks — designed as an educational overview."
 )
 
-from config import STRATEGIES
+from config import STRATEGIES, RESEARCH_STRATEGIES
 from data.data_loader import get_all_trades
 
 # Load live data for performance context
@@ -22,8 +22,15 @@ df_all = get_all_trades()
 # ── Strategy selector ─────────────────────────────────────────────────────────
 strategy = st.selectbox(
     "Select Strategy",
-    list(STRATEGIES.keys()),
-    help="Choose a strategy to see its conceptual breakdown.",
+    list(RESEARCH_STRATEGIES.keys()),
+    help="Choose a research strategy to see its conceptual breakdown.",
+)
+_undoc = [f for f in STRATEGIES if f not in RESEARCH_STRATEGIES]
+st.caption(
+    "This page documents the five WFO-backed research strategies. The fleet has "
+    f"since deployed **{len(_undoc)}** more families ({', '.join(_undoc)}) — their "
+    "mechanism one-liners are in `config.FLEET_FAMILIES`, their live numbers on "
+    "**🛰️ Live Fleet**, their shadows on **Shadow Trades**, the knife on **Knife Bots**."
 )
 
 st.markdown("---")
@@ -1115,7 +1122,7 @@ if not df_all.empty:
     st.caption("How each strategy is actually performing with real money.")
 
     rows = []
-    for strat in STRATEGIES:
+    for strat in sorted(df_all["strategy"].dropna().unique()):
         sdf = df_all[df_all["strategy"] == strat]
         if sdf.empty:
             continue

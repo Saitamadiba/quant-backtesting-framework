@@ -10,7 +10,7 @@ st.set_page_config(
 )
 
 from datetime import datetime
-from config import REFRESH_OPTIONS, DB_STRATEGY_MAP, VPS_CACHE_DIR
+from config import REFRESH_OPTIONS, DB_STRATEGY_MAP, VPS_CACHE_DIR, FLEET_CACHE_DIR, fleet_db_relpaths
 from data.vps_sync import sync_all_vps_data, get_cached_db_status
 
 # ── Auto-Refresh ──────────────────────────────────────────────────────────────
@@ -28,7 +28,7 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("VPS Data Sync")
 
 if st.sidebar.button("Sync from VPS", type="primary"):
-    with st.sidebar.status("Syncing trade DBs + ML training data...", expanded=True) as status:
+    with st.sidebar.status("Syncing legacy DBs, ML data and the fleet books…", expanded=True) as status:
         results = sync_all_vps_data()
         ok = sum(1 for r in results.values() if r.get("status") == "ok")
         fail = sum(1 for r in results.values() if r.get("status") != "ok")
@@ -40,7 +40,7 @@ if st.sidebar.button("Sync from VPS", type="primary"):
 last_sync = st.session_state.get("last_sync", "Never")
 st.sidebar.caption(f"Last sync: {last_sync}")
 
-# Per-bot status dots
+# Per-bot status dots — the legacy research books, then the fleet as a count
 db_status = get_cached_db_status()
 status_line = ""
 for db_file, (strategy, symbol) in DB_STRATEGY_MAP.items():
@@ -48,6 +48,9 @@ for db_file, (strategy, symbol) in DB_STRATEGY_MAP.items():
     dot = "🟢" if info.get("exists") else "🔴"
     status_line += f"{dot} {strategy} {symbol}  "
 st.sidebar.caption(status_line)
+_fleet = fleet_db_relpaths()
+_fleet_ok = sum(1 for rp in _fleet if (FLEET_CACHE_DIR / rp).exists())
+st.sidebar.caption(f"Fleet books (Tier 1 + 2): {_fleet_ok}/{len(_fleet)} synced")
 
 # ML training data status
 from config import VPS_ML_FILES
@@ -58,10 +61,18 @@ st.sidebar.caption(f"ML training data: {ml_ok}/{ml_total} synced")
 # ── Landing Page ──────────────────────────────────────────────────────────────
 st.title("📊 Trading Bot Performance Dashboard")
 st.markdown(
-    "Monitor live bots (FVG, Liquidity Raid, Momentum Mastery) and backtest results (SBS) "
-    "across BTC, ETH, and NQ from a single interface."
+    "Monitor the whole fleet from one place: the WFO-backed research strategies "
+    "(FVG, Liquidity Raid, Momentum Mastery, Vol Edge, SBS) **and** every seat "
+    "deployed since — knife arms, depth, desk/retest, SMC, OFCS, London raid, "
+    "funding carry, options, the Alpaca equities seat — across 18 ByBit "
+    "sub-accounts and one Alpaca paper account."
 )
-st.markdown("**Navigate** using the sidebar pages.")
+st.markdown(
+    "**Start with 🛰️ Live Fleet** (balances, running entries, rolling PnL, read live "
+    "over SSH). The trade-analytics pages (Overview → Monthly) read the **synced** "
+    "copies — click *Sync from VPS* first. Tier-2 paper books appear under "
+    "Source = *Paper*; shadow recorders live on *Shadow Trades* and *Knife Bots*."
+)
 
 # Quick stats
 from data.data_loader import get_all_trades

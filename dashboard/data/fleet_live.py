@@ -69,14 +69,19 @@ def _payload(spec: dict) -> str:
 
 
 def fetch_raw(days: int = 7, with_balances: bool = True, trade_limit: int = 500,
-              timeout: int = 90) -> dict:
-    """Run the collector on the VPS and return its parsed JSON (fails closed)."""
+              timeout: int = 90, plan: Optional[list] = None,
+              only_alpaca: bool = False) -> dict:
+    """Run the collector on the VPS and return its parsed JSON (fails closed).
+
+    `plan=[]` skips the book queries (accounts only); `only_alpaca` skips the
+    ByBit key scan so the Alpaca panel costs one HTTP call, not twenty.
+    """
     if not VPS_HOST:
         return {"ok": False, "error": "VPS_HOST not configured (dashboard/.env)."}
     spec = {
-        "plan": build_spec(days=days, trade_limit=trade_limit),
+        "plan": build_spec(days=days, trade_limit=trade_limit) if plan is None else plan,
         "balances": {"enabled": bool(with_balances), "env_globs": ENV_GLOBS,
-                     "skip": ENV_SKIP, "workers": 6},
+                     "skip": ENV_SKIP, "workers": 6, "only_alpaca": bool(only_alpaca)},
         "alpaca": ALPACA,
     }
     try:
@@ -458,3 +463,22 @@ def seat_status_frame(raw: dict) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values(
         ["status", "seats"], key=lambda c: c.str.lower() if c.name == "seats" else c
     ) if rows else pd.DataFrame(columns=["seats", "key_digest", "env", "uid", "status"])
+
+
+def fetch_accounts_only(timeout: int = 90) -> dict:
+    """Every account (ByBit subs + the Alpaca seat), no book queries — for the
+    broker panels, which want one account in depth rather than the fleet in breadth."""
+    return fetch_raw(with_balances=True, plan=[], timeout=timeout)
+
+
+def fetch_alpaca_only(timeout: int = 60) -> dict:
+    """Just the Alpaca equities seat, read with the bot's own paper key."""
+    return fetch_raw(with_balances=True, plan=[], only_alpaca=True, timeout=timeout)
+
+
+def account_detail(raw: dict, uid: str) -> Optional[dict]:
+    """The full account block (wallet incl. coins, positions, orders) for one uid."""
+    for a in (raw.get("balances") or {}).get("accounts", []):
+        if str(a.get("uid", "")) == str(uid):
+            return a
+    return None

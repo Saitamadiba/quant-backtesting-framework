@@ -22,7 +22,7 @@ _BASE = Path(__file__).resolve().parent.parent.parent
 if str(_BASE) not in sys.path:
     sys.path.insert(0, str(_BASE))
 
-from config import STRATEGY_COLORS, STRATEGIES
+from config import STRATEGY_COLORS, STRATEGIES, RESEARCH_STRATEGIES
 from components.charts import REGIME_COLORS
 from data.wfo_loader import (
     list_wfo_results, load_wfo_result, get_latest_wfo,
@@ -394,7 +394,7 @@ st.sidebar.header("WFO Configuration")
 
 # Use display names from STRATEGIES (matches running bots)
 strategy_name = st.sidebar.selectbox(
-    "Strategy", list(STRATEGIES.keys()), key="wfo_strategy",
+    "Strategy", list(RESEARCH_STRATEGIES.keys()), key="wfo_strategy",
     help="The trading strategy to optimize. Each strategy has its own "
          "parameter space and signal logic. Choose the one running on your "
          "target asset.",

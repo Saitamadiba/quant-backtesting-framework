@@ -67,13 +67,25 @@ def _alias(df: pd.DataFrame, src: str, dst: str) -> pd.DataFrame:
 
 def _open_where_null(df: pd.DataFrame) -> pd.DataFrame:
     """Rows still open carry a NULL/empty exit_reason in several books —
-    the page counts open shadows via ``exit_reason == 'OPEN'``."""
-    if "exit_reason" in df.columns:
-        _blank = df["exit_reason"].isna() | (df["exit_reason"].astype(str)
-                                             .str.strip() == "")
-        df.loc[_blank, "exit_reason"] = "OPEN"
-    else:
-        df["exit_reason"] = "OPEN"
+    the page counts open shadows via ``exit_reason == 'OPEN'``.
+
+    Books with NO exit label at all (anti-knife, gated LR, cross-venue) still
+    resolve: a row with a closed timestamp and a booked R is a finished trade,
+    so its label is derived from the sign of R (WIN / LOSS / BE). Only rows
+    with no R yet are OPEN — a blank label is not an open position.
+    """
+    if "exit_reason" not in df.columns:
+        df["exit_reason"] = None
+    blank = df["exit_reason"].isna() | (df["exit_reason"].astype(str).str.strip() == "")
+    if "r_multiple" in df.columns:
+        r = pd.to_numeric(df["r_multiple"], errors="coerce")
+        closed_ts = df["closed_at_utc"].notna() if "closed_at_utc" in df.columns else r.notna()
+        resolved = blank & r.notna() & closed_ts
+        df.loc[resolved & (r > 0), "exit_reason"] = "WIN"
+        df.loc[resolved & (r < 0), "exit_reason"] = "LOSS"
+        df.loc[resolved & (r == 0), "exit_reason"] = "BE"
+        blank = blank & ~resolved
+    df.loc[blank, "exit_reason"] = "OPEN"
     return df
 
 
@@ -187,6 +199,21 @@ def normalise_paper_book(df: pd.DataFrame) -> pd.DataFrame:
     loader folds it into the bot label ("DP MM BTC").
     """
     df = df.copy()
+    # The depth feeds re-emitted months of history as "new" signals until the
+    # 2026-09-02 age gate; rows flagged ``stale_signal`` are that bug, not
+    # trades, and pooling them flips the book's sign (−195R → +637R). Same
+    # definition the session recap uses ("fresh").
+    if "stale_signal" in df.columns:
+        df = df[df["stale_signal"].fillna(0) == 0].copy()
+    if "exit_reason" in df.columns:
+        df = df[~df["exit_reason"].isin(["POLICY_UNSCORABLE", "SOURCE_GONE"])].copy()
+    # A risk-halted or capped skip never became a position: label it by its
+    # status so it is neither an open shadow nor a loss.
+    if "status" in df.columns:
+        skipped = df["status"].isin(["HALTED_RISK", "SKIPPED_CAP", "SKIPPED", "NO_FILL"])
+        if "exit_reason" not in df.columns:
+            df["exit_reason"] = None
+        df.loc[skipped & df["exit_reason"].isna(), "exit_reason"] = df.loc[skipped, "status"]
     if "strategy" in df.columns:
         df = df.rename(columns={"strategy": "family"})
     df = _alias(df, "sl", "stop_loss")
@@ -430,6 +457,210 @@ def normalise_mm5m(df: pd.DataFrame) -> pd.DataFrame:
     return _open_where_null(df)
 
 
+
+
+# ── Books registered 2026-09-03 (deployed 2026-07-17 → 09-02) ────────────────
+
+def _latest_era_only(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep only the newest recorder era. Eras are re-basings of the recorder
+    (fill adjudication, fee charging) — pooling them averages a corrected
+    instrument with the broken one it replaced."""
+    if "era" in df.columns and df["era"].notna().any():
+        return df[df["era"] == df["era"].max()].copy()
+    return df
+
+
+def normalise_antiknife(df: pd.DataFrame) -> pd.DataFrame:
+    """``HyroTrader/antiknife_shadow.py`` (table=anti) — the knife's mirror: the
+    same break, the OPPOSITE side, with its own bracket (``rr_own``). ``fill_ts``
+    → opened, ``exit_ts`` → closed, ``fill_price`` → entry, ``r_net`` is the
+    headline. ``knife_exit`` (what happened to the knife leg) is kept for detail.
+    """
+    df = df.copy()
+    df = _alias(df, "fill_ts", "opened_at_utc")
+    df = _alias(df, "exit_ts", "closed_at_utc")
+    df = _alias(df, "fill_price", "entry_price")
+    df = _alias(df, "sl", "stop_loss")
+    df = _alias(df, "tp", "take_profit")
+    df = _alias(df, "r_net", "r_multiple")
+    df = _alias(df, "symbol", "asset")
+    df = _canon_direction(df)
+    return _open_where_null(df)
+
+
+def normalise_crossvenue(df: pd.DataFrame) -> pd.DataFrame:
+    """``HyroTrader/knife_crossvenue_shadow.py`` (table=cv) — knife fills tagged
+    with the cross-venue dislocation at the break. Prices beyond the level are
+    not stored; ``level`` stands in as entry, ``tagged_at`` closes the row.
+    """
+    df = df.copy()
+    df = _alias(df, "fill_ts", "opened_at_utc")
+    df = _alias(df, "tagged_at", "closed_at_utc")
+    df = _alias(df, "level", "entry_price")
+    df = _alias(df, "r_net", "r_multiple")
+    df = _alias(df, "symbol", "asset")
+    df = _alias(df, "tag", "exit_reason")
+    df = _canon_direction(df)
+    return _open_where_null(df)
+
+
+def normalise_gated_lr(df: pd.DataFrame) -> pd.DataFrame:
+    """``HyroTrader/gated_lr_shadow.py`` (table=gated_signals) — LR signals the
+    live gates rejected, scored as if taken. Canonical timestamps already;
+    ``sym`` is the per-row asset; ``g_*`` flags say which gate fired.
+    """
+    df = df.copy()
+    df = _alias(df, "sym", "asset")
+    if "r_net" in df.columns:          # both columns exist; NET is the headline, gross stays as r_gross
+        if "r_multiple" in df.columns:
+            df = _alias(df, "r_multiple", "r_gross")
+        df["r_multiple"] = df["r_net"]
+    df = _alias(df, "regime", "regime_gate")
+    df = _canon_direction(df)
+    return _open_where_null(df)
+
+
+def normalise_wide_rr(df: pd.DataFrame) -> pd.DataFrame:
+    """``HyroTrader/wide_rr_shadow.py`` (table=wide_rr) — the LR raid replayed
+    at wider brackets. The LIVE arm (``live_tp`` / ``live_r_net``) is the
+    headline; the ``r_rr*`` ladder stays for the RR what-if tabs.
+    """
+    df = df.copy()
+    df = _alias(df, "resolved_at_utc", "closed_at_utc")
+    df = _alias(df, "entry", "entry_price")
+    df = _alias(df, "sl", "stop_loss")
+    df = _alias(df, "live_tp", "take_profit")
+    df = _alias(df, "live_r_net", "r_multiple")
+    df = _alias(df, "exit_note", "exit_reason")
+    df = _alias(df, "symbol", "asset")
+    df = _canon_direction(df)
+    return _open_where_null(df)
+
+
+def normalise_halt_shadow(df: pd.DataFrame) -> pd.DataFrame:
+    """``HyroTrader/halt_shadow.py`` (table=halt_shadows) — what a HALTED seat
+    would have taken. **Era 2 only**: the era-1 rows are the closed phantom-fill
+    book (96% of entries booked at prices the market had already left — a
+    scorecard filled in after the whistle), so they are dropped here, not merely
+    labelled. ``strategy`` (which seat was halted) → ``family``.
+    """
+    df = df.copy()
+    if "era" in df.columns:
+        df = df[df["era"] == 2].copy()
+    if "status" in df.columns:
+        if "exit_reason" not in df.columns:
+            df["exit_reason"] = None
+        nf = (df["status"] == "NO_FILL") & df["exit_reason"].isna()
+        df.loc[nf, "exit_reason"] = "NO_FILL"      # adjudicated: the level never filled
+    if "strategy" in df.columns:
+        df = df.rename(columns={"strategy": "family"})
+    df = _alias(df, "recorded_at_utc", "opened_at_utc")
+    df = _alias(df, "entry", "entry_price")
+    df = _alias(df, "sl", "stop_loss")
+    df = _alias(df, "tp", "take_profit")
+    if "r_net" in df.columns:          # both exist: fee-charged r_net is the headline
+        if "r_multiple" in df.columns:
+            df = _alias(df, "r_multiple", "r_gross")
+        df["r_multiple"] = df["r_net"]
+    df = _alias(df, "symbol", "asset")
+    df = _canon_direction(df)
+    return _open_where_null(df)
+
+
+def normalise_sweep_engine(df: pd.DataFrame) -> pd.DataFrame:
+    """``sweep_engine/shadow.py`` (table=events) — every qualified sweep on the
+    ByBit feed, resolved to a GROSS R (no fee/slip toll — read it as an upper
+    bound, never a P&L). Alias rows and the Binance.US feed are dropped to
+    match the session recap's definition. ``side`` is stored as ±1.
+    """
+    df = df.copy()
+    if "is_alias" in df.columns:
+        df = df[df["is_alias"].fillna(0) == 0]
+    if "feed" in df.columns:
+        df = df[df["feed"].fillna("binance_us") == "bybit"].copy()
+    df = _alias(df, "event_time", "opened_at_utc")
+    df = _alias(df, "resolved_at", "closed_at_utc")
+    df = _alias(df, "entry", "entry_price")
+    df = _alias(df, "stop", "stop_loss")
+    df = _alias(df, "r_gross", "r_multiple")
+    df = _alias(df, "symbol", "asset")
+    if "side" in df.columns:
+        df["direction"] = pd.to_numeric(df["side"], errors="coerce").map(
+            lambda v: "BUY" if v > 0 else ("SELL" if v < 0 else None))
+    return _open_where_null(df)
+
+
+def normalise_fib618(df: pd.DataFrame) -> pd.DataFrame:
+    """``fib618_shadow/run.py`` (table=trades) — the 0.618 retrace of a BOS leg.
+    ``net_taker`` is the headline (taker-cost R); ``net_mm`` / ``gross_r`` stay
+    for the cost-model tabs.
+    """
+    df = df.copy()
+    df = _alias(df, "entry_time", "opened_at_utc")
+    df = _alias(df, "exit_time", "closed_at_utc")
+    df = _alias(df, "entry", "entry_price")
+    df = _alias(df, "stop", "stop_loss")
+    df = _alias(df, "tp", "take_profit")
+    df = _alias(df, "net_taker", "r_multiple")
+    df = _alias(df, "symbol", "asset")
+    if "side" in df.columns and "direction" not in df.columns:
+        df["direction"] = df["side"]
+    df = _canon_direction(df)
+    return _open_where_null(df)
+
+
+def normalise_fvg_alts_shadow(df: pd.DataFrame) -> pd.DataFrame:
+    """``HyroTrader/fvg_alts_shadow.py`` (table=signals) — same shape as the MM
+    15m arm (confirm bar / exit bar / tp1+tp2 ladder / outcome / r_net), plus an
+    ``era`` column: eras 1–2 were invalidated (stale entries), so only the
+    newest era is kept.
+    """
+    df = _latest_era_only(df.copy())
+    df = _alias(df, "confirm_bar_utc", "opened_at_utc")
+    if "exit_utc" in df.columns:
+        if "closed_at_utc" in df.columns:
+            df["closed_at_utc"] = df["exit_utc"].where(
+                df["exit_utc"].notna(), df["closed_at_utc"])
+        else:
+            df["closed_at_utc"] = df["exit_utc"]
+    df = _canon_direction(df)
+    df = _alias(df, "tp1", "take_profit")
+    df = _alias(df, "r_net", "r_multiple")
+    df = _alias(df, "symbol", "asset")
+    if "outcome" in df.columns and "exit_reason" not in df.columns:
+        df["exit_reason"] = df["outcome"].map(
+            {"loss": "SL", "breakeven": "SL", "win_tp1": "TP",
+             "win_tp2": "TP", "timeout": "TIME_EXIT"})
+    return _open_where_null(df)
+
+
+def normalise_lr_signal_e2(df: pd.DataFrame) -> pd.DataFrame:
+    """``HyroTrader/lr_shadow_trades.db`` (table=shadow_trades) — the LR funded
+    seats' signal shadow. Canonical shape already, but **era 2 only**: era 1 had
+    no fee and exact-SL/TP exits (+102R gross → +4.3R net once charged), so its
+    ``r_multiple`` is gross and is not pooled. Era 2's ``r_net`` is the headline.
+    """
+    df = df.copy()
+    if "era" in df.columns:
+        df = df[df["era"] == 2].copy()
+    if "r_net" in df.columns:
+        df["r_multiple"] = df["r_net"]
+    df = _canon_direction(df)
+    return _open_where_null(df)
+
+
+def normalise_gate_book(df: pd.DataFrame) -> pd.DataFrame:
+    """``shadow_books/*.db`` (table=shadow_trades) — the LR/MM/FVG regime, flow
+    and funding GATE shadows: every live signal a gate blocked, tracked as if
+    taken. Canonical shape; ``realized_r`` is the R column.
+    """
+    df = df.copy()
+    df = _alias(df, "realized_r", "r_multiple")
+    df = _alias(df, "pnl", "pnl_usd")
+    df = _canon_direction(df)
+    return _open_where_null(df)
+
+
 # ── Loader dispatch table ─────────────────────────────────────────────────────
 # filename → (table, normaliser|None). Files absent here read the canonical
 # shared/shadow_tracker.py shape: table=shadow_trades, no bridge needed.
@@ -453,7 +684,22 @@ SHADOW_DB_SPECS: dict[str, tuple[str, object]] = {
     "fvg_nq_funded_shadow.db":   ("trades",            normalise_fvg_funded),
     "mm_15m_shadow.db":          ("signals",           normalise_mm15m),
     "mm_5m_shadow.db":           ("signals",           normalise_mm5m),
+    # registered 2026-09-03
+    "antiknife_shadow.db":       ("anti",              normalise_antiknife),
+    "crossvenue_shadow.db":      ("cv",                normalise_crossvenue),
+    "gated_lr_shadow.db":        ("gated_signals",     normalise_gated_lr),
+    "wide_rr_shadow.db":         ("wide_rr",           normalise_wide_rr),
+    "halt_shadow_book.db":       ("halt_shadows",      normalise_halt_shadow),
+    "sweep_engine.db":           ("events",            normalise_sweep_engine),
+    "fib618_shadow.db":          ("trades",            normalise_fib618),
+    "fvg_alts_shadow.db":        ("signals",           normalise_fvg_alts_shadow),
+    "lr_signal_shadow.db":       ("shadow_trades",     normalise_lr_signal_e2),
+    "depth_policy_paper_book.db": ("paper_trades",     normalise_paper_book),
 }
+
+
+def _is_gate_book(local_name: str) -> bool:
+    return local_name.endswith("_gate.db")
 
 
 def table_for(local_name: str) -> str:
@@ -463,4 +709,6 @@ def table_for(local_name: str) -> str:
 
 def normaliser_for(local_name: str):
     """The schema bridge for this synced file (None = canonical already)."""
+    if local_name not in SHADOW_DB_SPECS and _is_gate_book(local_name):
+        return normalise_gate_book
     return SHADOW_DB_SPECS.get(local_name, ("shadow_trades", None))[1]

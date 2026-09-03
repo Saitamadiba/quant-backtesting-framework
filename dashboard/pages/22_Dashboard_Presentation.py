@@ -1436,7 +1436,7 @@ st.plotly_chart(monthly_pnl_bar(df))
     st.markdown("""
 | Metric | Value |
 |--------|-------|
-| Total pages | 24 |
+| Total pages | 31 (incl. 🛰️ Live Fleet, 2026-09) |
 | Total lines of page code | ~14,900 |
 | Largest page | Dashboard Presentation (1,838 lines) |
 | Smallest page | Deploy Bots (126 lines) |
@@ -1463,8 +1463,13 @@ it does and **why** the schema normaliser needs to handle different formats.
     # ── Two-Chain Composition ──
     st.subheader("Two-Chain Composition Pattern")
     st.markdown("""
-Each bot family (FVG, Liquidity Raid, Momentum Mastery, SBS) uses **two
-parallel inheritance chains** joined by **composition**:
+The four ORIGINAL bot families (FVG, Liquidity Raid, Momentum Mastery, SBS) use **two
+parallel inheritance chains** joined by **composition**. The seats deployed since
+mid-2026 (knife arms, depth, desk/retest, SMC, OFCS, London raid, funding carry,
+options, the Alpaca equities seat — 18 ByBit sub-accounts plus one Alpaca paper
+account) are simpler single-file bots that share `HyroTrader/risk_guard.py` and
+`bybit_client.py`; the dashboard reads them through one registry
+(`data/fleet_registry.py`) instead of one normaliser each.
 """)
     st.code("""
 CHAIN 1 — Configuration (inheritance)    CHAIN 2 — Bot Logic (inheritance)

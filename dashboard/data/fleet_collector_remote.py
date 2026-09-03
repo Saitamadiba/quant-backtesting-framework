@@ -237,6 +237,13 @@ def _wallet_and_positions(client) -> dict:
         "upnl": _f(a.get("totalPerpUPL")),
         "im_rate": _f(a.get("accountIMRate")),
         "mm_rate": _f(a.get("accountMMRate")),
+        "coins": [
+            {"coin": c.get("coin"), "equity": _f(c.get("equity")),
+             "wallet_balance": _f(c.get("walletBalance")), "usd_value": _f(c.get("usdValue")),
+             "upnl": _f(c.get("unrealisedPnl"))}
+            for c in (a.get("coin") or [])
+            if _f(c.get("usdValue")) != 0 or _f(c.get("equity")) != 0
+        ],
     }
     try:
         p = client.positions()
@@ -464,7 +471,7 @@ def main(spec: dict) -> None:
         out["results"] = {}
 
     bal = spec.get("balances") or {}
-    if bal.get("enabled"):
+    if bal.get("enabled") and not bal.get("only_alpaca"):
         sys.path.insert(0, os.path.join(os.getcwd(), "HyroTrader"))
         try:
             out["balances"] = collect_balances(

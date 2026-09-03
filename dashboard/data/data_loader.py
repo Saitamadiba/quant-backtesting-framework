@@ -20,12 +20,14 @@ def get_backtest_trades() -> pd.DataFrame:
 def get_all_trades(source_filter: str = "All") -> pd.DataFrame:
     """Load and merge all trade data with deduplication.
 
-    source_filter: "All", "Live", or "Backtest"
+    source_filter: "All", "Live", "Paper", or "Backtest"
     """
     frames = []
 
-    if source_filter in ("All", "Live"):
-        live = get_live_trades()
+    if source_filter in ("All", "Live", "Paper"):
+        live = get_live_trades()          # carries both Live and Paper rows
+        if not live.empty and source_filter != "All" and "source" in live.columns:
+            live = live[live["source"] == source_filter]
         if not live.empty:
             frames.append(live)
 
@@ -49,7 +51,7 @@ def get_all_trades(source_filter: str = "All") -> pd.DataFrame:
     dedup_cols = ["strategy", "symbol", "entry_time", "entry_price"]
     existing = [c for c in dedup_cols if c in df.columns]
     if existing and "source" in df.columns:
-        source_priority = {"Live": 0, "Backtest": 1}
+        source_priority = {"Live": 0, "Paper": 1, "Backtest": 2}
         df["_priority"] = df["source"].map(source_priority).fillna(2)
         df = df.sort_values("_priority").drop_duplicates(subset=existing, keep="first")
         df = df.drop(columns=["_priority"])

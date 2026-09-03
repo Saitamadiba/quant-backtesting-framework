@@ -10,19 +10,41 @@ from data.data_loader import get_all_trades, get_aggregated_stats
 from components.kpi_cards import kpi_row
 from components.charts import strategy_comparison_bar, cumulative_pnl_line
 from components.filters import source_filter
-from config import DB_STRATEGY_MAP
+from config import DB_STRATEGY_MAP, FLEET_CACHE_DIR, fleet_db_relpaths
 from data.vps_sync import get_cached_db_status
+from data.fleet_registry import BOOKS
 
 # ── VPS Status Bar ────────────────────────────────────────────────────────────
-st.caption("Shows whether each bot's trade database has been synced from the VPS. Green means data is available locally; red means you need to sync. Stale data leads to stale decisions.")
+st.caption(
+    "Whether each book has been synced from the VPS — the research strategies as "
+    "tiles, the fleet as a count. Green means the data is here; red means click "
+    "*Sync from VPS* on the home page. Stale data leads to stale decisions."
+)
 db_status = get_cached_db_status()
-cols = st.columns(len(DB_STRATEGY_MAP))
+cols = st.columns(len(DB_STRATEGY_MAP) + 1)
 for i, (db_file, (strategy, symbol)) in enumerate(DB_STRATEGY_MAP.items()):
     info = db_status.get(db_file, {})
     if info.get("exists"):
         cols[i].success(f"{strategy} {symbol} — {info.get('size_kb', '?')}KB", icon="🟢")
     else:
         cols[i].error(f"{strategy} {symbol} — not synced", icon="🔴")
+_fleet = fleet_db_relpaths()
+_fleet_have = [rp for rp in _fleet if (FLEET_CACHE_DIR / rp).exists()]
+(cols[-1].success if len(_fleet_have) == len(_fleet) else
+ cols[-1].warning if _fleet_have else cols[-1].error)(
+    f"Fleet books — {len(_fleet_have)}/{len(_fleet)} synced",
+    icon="🟢" if len(_fleet_have) == len(_fleet) else "🟡" if _fleet_have else "🔴")
+with st.expander("Fleet books synced (Tier 1 = Live, Tier 2 = Paper)"):
+    _rows = [{"bot": b.label, "family": b.family, "tier": b.tier, "db": b.db,
+              "synced": (FLEET_CACHE_DIR / b.db).exists()}
+             for b in BOOKS if b.tier <= 2 and not any(c in b.db for c in "*?[")]
+    st.dataframe(pd.DataFrame(_rows), use_container_width=True, hide_index=True)
+st.caption(
+    "Fleet rows join the tables below under their **family** (Knife, Depth, OFCS…); "
+    "Tier-2 virtual books carry Source = *Paper* so their simulated dollars stay "
+    "out of the Live money line. Shadow recorders are dimensionless and live on "
+    "*Shadow Trades* / *Knife Bots*, not here."
+)
 
 st.markdown("---")
 

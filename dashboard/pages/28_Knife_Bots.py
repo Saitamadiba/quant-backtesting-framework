@@ -1,12 +1,13 @@
-"""Page 28: Knife Bots — the falling-knife fade, its three arms, and its metrics.
+"""Page 28: Knife Bots — the falling-knife fade, its six arms, and its metrics.
 
 The "knife" catches an over-extended liquidity sweep — an 8-bar price extreme
 that spikes through a level — and fades it back, betting the spike is a
 stop-run that snaps back (catching the falling knife by the handle, not the
 blade). This page does three things the user asked for:
 
-  1. Summarises the performance of the three live arms — the ORIGINAL
-     forward-shadow detector, the MAKER funded arm, and the TAKER funded arm.
+  1. Summarises the performance of the live arms — the ORIGINAL forward-shadow
+     detector, the MAKER and TAKER funded arms, and the three arms added since
+     (the $100k maker seat, the $10k challenge seat, maker v2, ETH managed-stop).
   2. Breaks down the strategy + every microstructure metric in plain English
      with a metaphor a non-quant could repeat.
   3. Tells the honest story per metric: why we use it, the shortfall we hit,
@@ -42,7 +43,7 @@ st.title("🔪 Knife Bots — fading the falling knife")
 st.caption(
     "An over-extended liquidity sweep (an 8-bar price extreme that spikes "
     "*through* a level) is a stop-run that often snaps back. The knife fades it. "
-    "This page summarises the three live arms and explains every metric in "
+    "This page summarises the six live arms and explains every metric in "
     "plain English — the precise number first, the picture as a chaser."
 )
 
@@ -219,7 +220,9 @@ def working_frame(source_key: str) -> pd.DataFrame:
     if source_key == "corpus":
         return normalise_knife(load_episodes_all(), "Offline corpus")
     db = {"shadow": "knife_shadow.db", "maker": "knife_funded_maker.db",
-          "taker": "knife_funded_taker.db"}.get(source_key)
+          "taker": "knife_funded_taker.db", "100k": "knife_funded_100k.db",
+          "10k": "knife_funded_10k.db", "maker2": "knife_funded_maker2.db",
+          "ethmstop": "knife_funded_ethmstop.db"}.get(source_key)
     return normalise_knife(load_knife_db(db), source_key) if db else pd.DataFrame()
 
 
@@ -257,9 +260,9 @@ DEV_N_SEL = sel.get("pooled_n_sel", 430)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 1 — performance of the three arms
+#  SECTION 1 — performance of the arms
 # ══════════════════════════════════════════════════════════════════════════════
-st.header("1 · The three arms")
+st.header("1 · The arms")
 st.markdown(
     "One detector, three ways to actually take the trade. The detector's *edge "
     "is selection* — it loses on every break taken blindly and only makes money "
@@ -341,9 +344,14 @@ def render_arm(title, icon, kpis, offline_note):
 shadow_df = load_knife_db("knife_shadow.db")
 maker_df = load_knife_db("knife_funded_maker.db")
 taker_df = load_knife_db("knife_funded_taker.db")
+k100_df = load_knife_db("knife_funded_100k.db")
+k10_df = load_knife_db("knife_funded_10k.db")
+maker2_df = load_knife_db("knife_funded_maker2.db")
+ethm_df = load_knife_db("knife_funded_ethmstop.db")
 
-t_orig, t_maker, t_taker = st.tabs(
-    ["① Original (forward-shadow)", "② Maker arm (funded)", "③ Taker arm (funded)"]
+t_orig, t_maker, t_taker, t_100k, t_10k, t_maker2, t_ethm = st.tabs(
+    ["① Original (forward-shadow)", "② Maker arm (funded)", "③ Taker arm (funded)",
+     "④ $100k maker seat", "⑤ $10k challenge", "⑥ Maker v2", "⑦ ETH managed-stop"]
 )
 with t_orig:
     render_arm(
@@ -372,6 +380,35 @@ with t_taker:
         "taker entry starts **underwater and can't clear** (every v3 taker arm ≈ "
         "−1R). This demo arm exists only to test whether *L2 absorption at entry* "
         "can pay for that fee.",
+    )
+with t_100k:
+    render_arm(
+        "$100k maker seat — the main funded-rules arm", "💯",
+        funded_kpis(k100_df),
+        "Not synced. The largest knife book (≈770 closes): the maker fill on the "
+        "$100k demo seat under the full HyroTrader rule-set. Lifetime ≈ −0.24R/trade; "
+        "read it as a confirmed-dead detector still faithfully recording.",
+    )
+with t_10k:
+    render_arm(
+        "$10k challenge seat", "🎯",
+        funded_kpis(k10_df),
+        "Not synced. The $10k challenge arm (≈50 closes). Its API key has been "
+        "**dead since 2026-09** (retCode 10003) — page 30 flags the seat as dark.",
+    )
+with t_maker2:
+    render_arm(
+        "Maker v2 — re-armed maker with the exit overlay", "🅼²",
+        funded_kpis(maker2_df),
+        "Not synced. The second maker arm (≈500 closes) with the exit-overlay "
+        "counterfactual alongside. Its API key is also **dead since 2026-09**.",
+    )
+with t_ethm:
+    render_arm(
+        "ETH maker with the managed stop", "Ξ",
+        funded_kpis(ethm_df),
+        "Not synced. A single-asset ETH maker arm that manages the stop in software "
+        "(11 closes, ≈ −0.89R/trade) — small, and not the reason anything survives.",
     )
 
 
@@ -456,6 +493,9 @@ KNIFE_LABELS = {
     "knife_funded_maker.db": "Maker (funded)",
     "knife_funded_taker.db": "Taker (funded)",
     "knife_funded_100k.db": "Maker $100k",
+    "knife_funded_10k.db": "$10k challenge",
+    "knife_funded_maker2.db": "Maker v2",
+    "knife_funded_ethmstop.db": "ETH m-stop",
 }
 _bcols = st.columns(len(KNIFE_LABELS))
 for _i, (_fn, _lab) in enumerate(KNIFE_LABELS.items()):
@@ -472,6 +512,10 @@ _SRC = {
     "Original — shadow (live)": "shadow",
     "Maker — funded (live)": "maker",
     "Taker — funded (live)": "taker",
+    "$100k maker seat (live)": "100k",
+    "$10k challenge (live)": "10k",
+    "Maker v2 (live)": "maker2",
+    "ETH managed-stop (live)": "ethmstop",
 }
 src_label = st.radio("Data source", list(_SRC), horizontal=True)
 wf = working_frame(_SRC[src_label])

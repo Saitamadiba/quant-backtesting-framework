@@ -298,7 +298,10 @@ _BT_DEFAULT_TF = {
 }
 
 c1, c2 = st.columns(2)
-strategy = c1.selectbox("Strategy", ["FVG", "SBS", "Liquidity Raid", "Momentum Mastery"], help="Trading strategy to simulate. Each has different risk/reward profiles.")
+strategy = c1.selectbox("Strategy", list(STRATEGIES.keys()),
+                        help="Strategy family to simulate — the five research strategies "
+                             "plus every fleet family with synced trades. Each has a "
+                             "different risk/reward profile.")
 symbol = c2.selectbox("Symbol", ["BTC", "ETH", "NQ"], help="Asset to backtest. BTC/ETH = crypto (24/7, higher costs). NQ = equity futures (session hours, lower costs).")
 
 # ── Auto-detect real trades and WFO results ────────────────────────────────

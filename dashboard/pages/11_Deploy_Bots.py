@@ -15,7 +15,16 @@ from config import (
 from data.vps_sync import deploy_file_to_vps, get_bot_service_status, manage_bot_service
 
 st.caption(f"VPS: {VPS_USER}@{VPS_HOST}:{VPS_PORT}")
-st.markdown("Upload updated bot scripts from your local machine to the VPS, then optionally restart the service. Use this after modifying bot code locally to push changes to production without SSH-ing into the server manually.")
+st.markdown(
+    "Upload updated **research-strategy** bot scripts (FVG / LR / MM / Straddle / SBS) "
+    "to the VPS. Two house rules are enforced here: every upload passes the **diff "
+    "guard** (it is refused if the VPS copy is newer or longer than yours — another "
+    "session's finished work is never overwritten from a stale checkout), and the "
+    "**restart is the operator's**: the `trader` login has no sudo, so the button hands "
+    "you the exact `sudo systemctl` line for an `admin` session. The fleet seats "
+    "deployed since July (knife, depth, OFCS, …) ship through their own `deploy_*.sh` "
+    "scripts, which carry the same guard."
+)
 
 st.markdown("---")
 
@@ -64,15 +73,12 @@ for i in range(0, len(items), cols_per_row):
                 if deploy_result["status"] == "ok":
                     st.success(f"Deployed ({deploy_result.get('size_kb', '?')}KB)")
                     if svc:
-                        if st.button(f"Restart {svc}", key=f"restart_after_{label}", help="Restart this bot's systemd service on the VPS to apply deployed code changes."):
+                        if st.button(f"Restart {svc}", key=f"restart_after_{label}", help="Back the seat's DBs up and get the operator's restart command."):
                             r = manage_bot_service(svc, "restart")
-                            if r["success"]:
-                                st.success(f"`{svc}` restarted")
-                                # Clear deploy state after successful restart
-                                del st.session_state["deploy_results"][label]
-                                st.rerun()
-                            else:
-                                st.error(f"Restart failed: {r['stderr']}")
+                            st.code(r.get("operator_command") or "", language="bash")
+                            st.caption(r.get("stderr", ""))
+                elif deploy_result["status"] == "blocked":
+                    st.warning(f"Deploy **blocked by the diff guard**: {deploy_result.get('error')}")
                 else:
                     st.error(f"Deploy failed: {deploy_result.get('error', deploy_result['status'])}")
 
@@ -106,21 +112,24 @@ if bulk_results:
         st.warning(f"{ok} deployed, {fail} failed.")
 
     for label, result in bulk_results.items():
-        icon = "✅" if result["status"] == "ok" else "❌"
-        detail = f"{result.get('size_kb', '')}KB" if result["status"] == "ok" else result.get("error", "")
+        icon = "✅" if result["status"] == "ok" else "🛡️" if result["status"] == "blocked" else "❌"
+        detail = (f"{result.get('size_kb', '')}KB" if result["status"] == "ok"
+                  else result.get("error", ""))
         st.write(f"{icon} **{label}** — {detail}")
 
     st.markdown("---")
-    if st.button("Restart All Bots", key="restart_all_after_deploy", help="Restart all bot services on the VPS. Required after bulk deploy to activate code changes."):
-        restart_results = []
-        for label in bulk_results:
+    if st.button("Restart commands for the deployed bots", key="restart_all_after_deploy",
+                 help="Backs each seat's DBs up and lists the operator's sudo commands — nothing is restarted from here."):
+        cmds = []
+        for label, result in bulk_results.items():
             svc = DEPLOY_SERVICE_MAP.get(label)
-            if svc:
+            if svc and result["status"] == "ok" and not result.get("noop"):
                 r = manage_bot_service(svc, "restart")
-                icon = "✅" if r["success"] else "❌"
-                restart_results.append(f"{icon} `{svc}` — {'restarted' if r['success'] else r['stderr']}")
-        # Clear bulk state and show results
+                if r.get("operator_command"):
+                    cmds.append(r["operator_command"])
+        if cmds:
+            st.code("\n".join(cmds), language="bash")
+            st.caption("Paste in an `admin` session on the VPS, then verify each with `systemctl status <unit>`.")
+        else:
+            st.info("Nothing changed on the VPS, so nothing needs a restart.")
         st.session_state["bulk_deploy_results"] = {}
-        for line in restart_results:
-            st.write(line)
-        st.rerun()
