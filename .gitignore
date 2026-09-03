@@ -133,6 +133,8 @@ ml_training_data.db*
 # ── Backtest Results (contain optimized parameters) ─────────────────────────
 dashboard/backtest_results/
 backtrader_framework/optimization/results/
+# fleet WFO campaign results (2026-09-03): thousands of local-only JSONs, private research output
+backtrader_framework/optimization/results_campaign/
 SBS/data/
 
 # ── VPS Deployment ──────────────────────────────────────────────────────────
