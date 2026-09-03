@@ -231,6 +231,12 @@ tests/
 # proprietary tests elsewhere stay ignored by the rule above.
 !backtrader_framework/tests/
 !backtrader_framework/tests/**
+# Same exception for dashboard/data/tests/ — hermetic tests for the PUBLIC
+# dashboard (fleet registry, schema bridges, deploy guard, funded sim). They
+# build synthetic SQLite books to the real schemas; nothing proprietary and no
+# data. Without this they were local-only and outside backup-to-private too.
+!dashboard/data/tests/
+!dashboard/data/tests/**
 
 # Telegram bot API tokens — secrets, MUST never be committed. A leaked bot
 # token lets anyone hijack the bot (send as it / redirect signals).
