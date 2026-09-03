@@ -536,112 +536,132 @@ def _render_optuna():
 # Tool 6: DVOL / Implied Volatility Gates
 # ═══════════════════════════════════════════════════════════════════════════════
 def _render_dvol():
-    st.header("DVOL — Implied Volatility Gates")
+    st.header("DVOL — Implied Volatility, the real series")
 
     st.info(
-        '**Metaphor:** "An insurance price gauge. When insurance premiums are '
-        "expensive, the market expects turbulence ahead. DVOL is the crypto "
-        'equivalent of the VIX — it tells you how scared the market is."'
+        '**Metaphor:** "An insurance price gauge. When premiums are expensive, '
+        "the market expects turbulence ahead. DVOL is crypto's VIX — it prices "
+        'how scared the option market is about the next 30 days."'
     )
 
-    st.markdown("### What is DVOL?")
-    st.markdown(
-        "**DVOL** (Deribit Volatility Index) measures the market's expectation "
-        "of future Bitcoin volatility, derived from options prices.\n\n"
-        "- **Low DVOL (< 40):** Market is calm — tight stops, aggressive entries\n"
-        "- **Medium DVOL (40-70):** Normal conditions — standard parameters\n"
-        "- **High DVOL (> 70):** Fear/turbulence expected — wider stops, "
-        "more depth tolerance"
-    )
+    from data.vol_atlas import (ABS_BANDS, dvol_features, load_rr25,
+                                load_vol_series_hourly, realized_by_band)
 
-    # Synthetic DVOL time series
-    np.random.seed(42)
-    dates = pd.date_range("2025-01-01", periods=365, freq="D")
-    dvol_base = 50 + 15 * np.sin(np.linspace(0, 4 * np.pi, 365))
-    dvol = dvol_base + np.random.normal(0, 5, 365)
-    dvol = np.clip(dvol, 20, 120)
+    asset = st.radio("Index", ["BTC", "ETH"], horizontal=True, key="dvol_asset")
+    feat = dvol_features(asset)
+    if feat.empty:
+        st.error(
+            "No local DVOL series. Build it once with "
+            "`.venv/bin/python3 backfill_dvol_parquet.py --hourly` — it pulls "
+            "Deribit's public index straight to this machine."
+        )
+        return
 
-    # Synthetic price data
-    returns = np.random.normal(0.001, 0.02, 365)
-    # Make returns more volatile when DVOL is high
-    returns = returns * (1 + (dvol - 50) / 100)
-    price = 50000 * np.cumprod(1 + returns)
+    live = feat.dropna(subset=["dvol"]).iloc[-1]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric(f"{asset} DVOL", f"{live['dvol']:.2f}",
+              f"{live['d24h']:+.2f} (24h)" if pd.notna(live["d24h"]) else None)
+    c2.metric("Band (absolute)", str(live["abs_band"]),
+              help="The bands the live IV gate uses: LOW <45, MED 45-64, HIGH >=65.")
+    c3.metric("30d percentile", f"{live['pct30']:.0%}" if pd.notna(live["pct30"]) else "—",
+              help="Where today sits inside the trailing 30 days — trailing, so it "
+                   "never sees its own future.")
+    c4.metric("90d percentile", f"{live['pct90']:.0%}" if pd.notna(live["pct90"]) else "—")
 
-    threshold = st.slider("DVOL threshold for regime shift", 30, 90, 55, key="dvol_thresh",
-                          help="Volatility level that triggers a regime shift. Higher threshold = less frequent regime switching. Lower = more responsive but more whipsaws.")
-
-    fig_dvol = go.Figure()
-
-    # DVOL line
-    fig_dvol.add_trace(go.Scatter(
-        x=dates, y=dvol, mode="lines", name="DVOL",
-        line=dict(color="#FF9800", width=2),
-    ))
-
-    # Threshold line
-    fig_dvol.add_hline(y=threshold, line_dash="dash", line_color="red",
-                       annotation_text=f"Threshold: {threshold}")
-
-    # Shade high-vol periods
-    in_high = dvol > threshold
-    start = None
-    for i in range(len(dates)):
-        if in_high[i] and start is None:
-            start = dates[i]
-        elif not in_high[i] and start is not None:
-            fig_dvol.add_vrect(
-                x0=start, x1=dates[i],
-                fillcolor="rgba(244, 67, 54, 0.1)", line_width=0,
+    if pd.notna(live["pct30"]):
+        absb, pctb = str(live["abs_band"]), f"{live['pct30']:.0%}"
+        if absb == "LOW" and live["pct30"] > 0.7:
+            st.caption(
+                f"**Read the two together.** {asset} is `{absb}` on the absolute ruler "
+                f"({live['dvol']:.1f}) but at the **{pctb}** of its own last 30 days — "
+                "calm by the yardstick, tense by its own recent standard. This is why "
+                "the atlas carries both: a fixed threshold set in one volatility era "
+                "quietly stops meaning anything in the next."
             )
-            start = None
 
-    fig_dvol.update_layout(
-        template="plotly_dark", height=350,
-        xaxis_title="Date", yaxis_title="DVOL",
-        title="DVOL Time Series with Regime Bands",
-    )
-    st.plotly_chart(fig_dvol, use_container_width=True)
+    # ── the series itself ────────────────────────────────────────────────────
+    lookback = st.select_slider("Window", options=[30, 90, 180, 365, 730, 9999],
+                                value=365, format_func=lambda d: "all" if d > 5000 else f"{d}d",
+                                key="dvol_lb")
+    view = feat if lookback > 5000 else feat[feat["ts_utc"] >= feat["ts_utc"].max() - pd.Timedelta(days=lookback)]
 
-    # Impact on strategy parameters
-    st.markdown("### How DVOL Adjusts Our Strategies")
-    adj_data = pd.DataFrame({
-        "DVOL Range": ["< 40 (Calm)", "40-55 (Normal)", "55-70 (Elevated)", "> 70 (High)"],
-        "Min Sweep Depth": ["0.20 ATR", "0.30 ATR", "0.40 ATR", "0.50 ATR"],
-        "R:R Scale": ["1.0x", "1.0x", "1.2x", "1.5x"],
-        "Interpretation": [
-            "Tight markets — small sweeps are significant",
-            "Normal — standard parameters",
-            "Elevated fear — need deeper sweeps to confirm",
-            "Panic — only trade very deep sweeps with wider targets",
-        ],
-    })
-    st.dataframe(adj_data, use_container_width=True, hide_index=True)
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=view["ts_utc"], y=view["dvol"], mode="lines",
+                             name=f"{asset} DVOL", line=dict(color="#FF9800", width=1.6)))
+    for name, lo, hi in ABS_BANDS:
+        if np.isfinite(lo):
+            fig.add_hline(y=lo, line_dash="dot", line_color="#888",
+                          annotation_text=f"{name} floor {lo:g}", annotation_position="right")
+    fig.update_layout(template="plotly_dark", height=340, xaxis_title=None,
+                      yaxis_title="DVOL", margin=dict(l=10, r=10, t=30, b=10),
+                      title=f"{asset} DVOL — Deribit index, hourly "
+                            f"({feat['ts_utc'].min():%Y-%m-%d} to {feat['ts_utc'].max():%Y-%m-%d}, "
+                            f"{len(feat):,} bars)")
+    st.plotly_chart(fig, use_container_width=True)
 
-    # Signal count by DVOL regime
-    low_signals = np.sum(dvol < 40)
-    mid_signals = np.sum((dvol >= 40) & (dvol < threshold))
-    high_signals = np.sum(dvol >= threshold)
+    # ── time spent in each band, measured not assumed ────────────────────────
+    cA, cB = st.columns(2)
+    with cA:
+        mix = feat["abs_band"].value_counts().reindex([b[0] for b in ABS_BANDS]).fillna(0)
+        f2 = go.Figure(go.Bar(x=mix.index.tolist(), y=mix.to_numpy(),
+                              marker_color=["#4CAF50", "#FFC107", "#F44336"],
+                              text=[f"{v/len(feat):.0%}" for v in mix], textposition="auto"))
+        f2.update_layout(template="plotly_dark", height=280, yaxis_title="hours",
+                         title="Time in each absolute band (whole history)")
+        st.plotly_chart(f2, use_container_width=True)
+    with cB:
+        rr = load_rr25()
+        rr = rr[rr["asset"] == asset] if not rr.empty else rr
+        if rr.empty:
+            st.caption("No `rr25` series locally — run `backfill_vol_tier3.py`.")
+        else:
+            f3 = go.Figure()
+            f3.add_trace(go.Scatter(x=rr["ts_utc"], y=rr["rr25"], mode="lines",
+                                    name="RR25", line=dict(color="#42A5F5", width=1.4)))
+            f3.add_hline(y=0, line_dash="dot", line_color="#888")
+            f3.update_layout(template="plotly_dark", height=280, yaxis_title="RR25 (vol pts)",
+                             title=f"{asset} 25-delta risk reversal — calls minus puts")
+            st.plotly_chart(f3, use_container_width=True)
+            st.caption("Above zero the market pays up for calls, below zero for puts. "
+                       "Whether that *predicts* anything is tested on the Cross-Asset "
+                       "page's Fleet tab — with the mirrored bracket beside it.")
 
-    fig_bar = go.Figure()
-    fig_bar.add_trace(go.Bar(
-        x=["Calm (< 40)", f"Normal (40-{threshold})", f"Elevated (> {threshold})"],
-        y=[low_signals, mid_signals, high_signals],
-        marker_color=["#4CAF50", "#FFC107", "#F44336"],
-        text=[low_signals, mid_signals, high_signals],
-        textposition="auto",
-    ))
-    fig_bar.update_layout(
-        template="plotly_dark", height=300,
-        yaxis_title="Days in Regime",
-        title="Time Spent in Each DVOL Regime",
-    )
-    st.plotly_chart(fig_bar, use_container_width=True)
+    # ── the question the gate actually rests on ──────────────────────────────
+    st.markdown("### Does a fear spike move the alts, or only BTC?")
+    with st.spinner("Measuring realized vol per band…"):
+        rb = realized_by_band()
+    if rb.empty:
+        st.caption("Local 15m bars unavailable — cannot measure.")
+    else:
+        piv = rb.pivot(index="symbol", columns="band", values="rv_annual_pct")
+        order = [c for c in ("P_LOW", "P_MID", "P_HIGH") if c in piv.columns]
+        piv = piv[order]
+        f4 = go.Figure()
+        for band in order:
+            f4.add_trace(go.Bar(name=band, x=piv.index.tolist(), y=piv[band].to_numpy()))
+        f4.update_layout(template="plotly_dark", height=330, barmode="group",
+                         yaxis_title="realized vol, annualised %",
+                         title="Realized volatility by BTC-DVOL percentile band")
+        st.plotly_chart(f4, use_container_width=True)
+        if {"P_LOW", "P_HIGH"} <= set(piv.columns):
+            ratio = (piv["P_HIGH"] / piv["P_LOW"]).dropna()
+            st.success(
+                f"**Every asset moves more, by almost the same multiple.** From the "
+                f"calm quartile to the tense one, realized vol rises "
+                f"{ratio.min():.2f}x–{ratio.max():.2f}x (median {ratio.median():.2f}x) "
+                f"across all {len(ratio)} fleet assets. BTC's DVOL is a **fleet-wide** "
+                "fear gauge, not a BTC-specific one — the whole board gets louder "
+                "together, so a 'calm' parameter set is wrong everywhere at once, not "
+                "just on BTC."
+            )
 
-    st.success(
-        "**Why it matters:** DVOL gates prevent our strategies from trading "
-        "with parameters calibrated for calm markets during volatile periods. "
-        "When DVOL spikes, we automatically require deeper sweeps and set wider "
-        "targets — adapting to the new reality rather than fighting it."
+    st.warning(
+        "**This page measures; it does not gate.** The live IV filter is a "
+        "BLOCK list on the absolute bands, and where the series is missing it "
+        "reads `n/a` and silently does nothing — which is exactly why the series "
+        "has to reach the end of the backtest window. Whether R actually depends "
+        "on the band is a separate question, answered with a family-wise bar on "
+        "the Cross-Asset page."
     )
 
 

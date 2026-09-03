@@ -21,6 +21,214 @@ _BASE = Path(__file__).resolve().parent.parent.parent
 if str(_BASE) not in sys.path:
     sys.path.insert(0, str(_BASE))
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MODE — the backtest's cross-asset story, or the LIVE market's (WS2)
+# ══════════════════════════════════════════════════════════════════════════════
+# The WFO sections below stop early whenever no results are loaded, so the fleet
+# atlas lives ahead of them: it depends on the local price store and the Deribit
+# index, never on a WFO run.
+_mode = st.radio(
+    "View", ["WFO robustness (backtests)", "Fleet — the live market (WS2)"],
+    horizontal=True, key="cross_asset_mode",
+    help="The second view measures the market the fleet actually trades in: how "
+         "correlated its assets are, whether BTC leads them, and whether implied "
+         "volatility changes any of it.",
+)
+
+if _mode.startswith("Fleet"):
+    import numpy as _np
+    from data.vol_atlas import (FLEET, beta_by_band, correlation_matrix, fleet_band_fwer,
+                                fleet_fills_with_dvol, fleet_r_by_band, lead_lag,
+                                rolling_correlation, skew_direction)
+
+    st.caption(
+        "Everything here is computed on THIS machine from the local 15-minute "
+        "store and Deribit's public volatility index — nothing is cached on the "
+        "VPS. *An atlas, not a gate: it tells you where the ground is soft, it "
+        "does not tell you where to step.*"
+    )
+
+    t_corr, t_lead, t_band, t_fleet, t_skew = st.tabs(
+        ["Correlation", "Lead / lag", "Beta by DVOL band", "Fleet R by band", "Skew"])
+
+    # ── correlation ──────────────────────────────────────────────────────────
+    with t_corr:
+        win = st.select_slider("Correlation window (days)", [3, 7, 14, 30], value=7,
+                               key="ws2_corr_win")
+        with st.spinner("Correlating 15-minute returns…"):
+            roll = rolling_correlation(window_days=win)
+            mat = correlation_matrix(window_days=win)
+        if roll.empty:
+            st.error("No local 15m bars — nothing to correlate.")
+        else:
+            cur = float(roll["mean_rho"].iloc[-1])
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Mean pairwise ρ, latest window", f"{cur:.3f}")
+            c2.metric("Median over all windows", f"{roll['mean_rho'].median():.3f}")
+            c3.metric("Range", f"{roll['mean_rho'].min():.2f} – {roll['mean_rho'].max():.2f}")
+            fig = go.Figure(go.Scatter(x=roll["window_end"], y=roll["mean_rho"],
+                                       mode="lines", line=dict(color="#42A5F5", width=1.4),
+                                       name="mean ρ"))
+            fig.add_trace(go.Scatter(x=roll["window_end"], y=roll["max_rho"], mode="lines",
+                                     line=dict(color="#EF5350", width=1, dash="dot"),
+                                     name="max pair ρ"))
+            fig.update_layout(template="plotly_dark", height=320, yaxis_title="ρ",
+                              margin=dict(l=10, r=10, t=30, b=10),
+                              title=f"Mean pairwise correlation of 15m returns, "
+                                    f"{win}-day trailing window")
+            st.plotly_chart(fig, use_container_width=True, key="ws2_roll_corr")
+            st.warning(
+                f"**This is the sizing number, not a signal.** In the median week the "
+                f"fleet's {len(FLEET)} assets move together at ρ ≈ "
+                f"{roll['mean_rho'].median():.2f}, and the worst week reached "
+                f"{roll['mean_rho'].max():.2f}. *Two seats long two different alts in a "
+                "0.9-correlation week are one bet wearing two tickets* — the effective-n "
+                "haircut on page 31 applies within a family; this is the same problem "
+                "ACROSS them."
+            )
+            if not mat.empty:
+                fig2 = go.Figure(go.Heatmap(
+                    z=mat.values, x=mat.columns.tolist(), y=mat.index.tolist(),
+                    text=[[f"{v:.2f}" for v in row] for row in mat.values],
+                    texttemplate="%{text}", textfont=dict(size=10),
+                    colorscale="RdBu_r", zmin=-1, zmax=1))
+                fig2.update_layout(template="plotly_dark",
+                                   height=max(340, 34 * len(mat)),
+                                   margin=dict(l=10, r=10, t=30, b=10),
+                                   title=f"Latest {win}-day correlation matrix")
+                st.plotly_chart(fig2, use_container_width=True, key="ws2_corr_mat")
+
+    # ── lead / lag ───────────────────────────────────────────────────────────
+    with t_lead:
+        with st.spinner("Cross-correlating…"):
+            ll = lead_lag()
+        if ll.empty:
+            st.error("No local 15m bars.")
+        else:
+            show = ll[["symbol", "n", "rho_0", "btc_leads_1", "alt_leads_1",
+                       "btc_leads_2", "alt_leads_2"]]
+            st.dataframe(show.style.format({"rho_0": "{:.4f}", "btc_leads_1": "{:+.4f}",
+                                            "alt_leads_1": "{:+.4f}", "btc_leads_2": "{:+.4f}",
+                                            "alt_leads_2": "{:+.4f}"}),
+                         use_container_width=True, hide_index=True)
+            n = int(ll["n"].max())
+            se = 1 / _np.sqrt(n)
+            biggest = float(_np.abs(ll[["btc_leads_1", "alt_leads_1"]].to_numpy()).max())
+            st.success(
+                f"**Nothing leads anything.** Contemporaneous ρ runs "
+                f"{ll['rho_0'].min():.2f}–{ll['rho_0'].max():.2f}, but at one bar ahead the "
+                f"largest |ρ| in either direction is {biggest:.4f} — against a standard "
+                f"error of {se:.4f} at n={n:,}. Detectable, and worth roughly nothing: "
+                f"|ρ| that small explains under {100*biggest**2:.2g}% of the next bar's "
+                "variance, while a round trip costs 0.15–0.35R. *A whisper you can only "
+                "hear in a soundproof room, and the door charges admission.*"
+            )
+            st.caption(
+                "Both directions are shown deliberately. If anything the alts lead BTC "
+                "slightly more often than the reverse — the opposite of the folk story — "
+                "and the two-bar column is NEGATIVE for every asset both ways, which is "
+                "bid-ask bounce and mean reversion, not information flow."
+            )
+
+    # ── beta by band ─────────────────────────────────────────────────────────
+    with t_band:
+        with st.spinner("Fitting beta inside each DVOL band…"):
+            bb = beta_by_band()
+        if bb.empty:
+            st.error("No local 15m bars or no DVOL series.")
+        else:
+            order = [b for b in ("P_LOW", "P_MID", "P_HIGH") if b in set(bb["band"])]
+            for metric, title, fmt in (("beta", "Beta to BTC", "{:.3f}"),
+                                       ("r2", "R² — share of the alt's move that IS BTC", "{:.3f}"),
+                                       ("resid_vol_annual_pct", "Residual vol (annualised %)", "{:.1f}")):
+                piv = bb.pivot(index="symbol", columns="band", values=metric)[order]
+                st.markdown(f"**{title}**")
+                # No `background_gradient` here: it needs matplotlib, which this
+                # dashboard does not install — the styler raises at render time
+                # rather than degrading, and nothing else on the page depends on it.
+                st.dataframe(piv.style.format(fmt), use_container_width=True)
+            piv_r2 = bb.pivot(index="symbol", columns="band", values="r2")
+            if {"P_LOW", "P_HIGH"} <= set(piv_r2.columns):
+                rose = int((piv_r2["P_HIGH"] > piv_r2["P_LOW"]).sum())
+                st.warning(
+                    f"**Beta barely moves; R² rises in {rose} of {len(piv_r2)} assets** "
+                    f"(mean {piv_r2['P_LOW'].mean():.3f} → {piv_r2['P_HIGH'].mean():.3f}). "
+                    "Diversification does not fail because the alts start swinging harder "
+                    "relative to BTC — it fails because a larger *share* of each alt's move "
+                    "becomes BTC's move. *The orchestra doesn't change instruments when it "
+                    "gets loud; it stops playing separate parts.* Concentration risk is "
+                    "highest exactly when the book is most exposed."
+                )
+
+    # ── fleet R by band, with the family-wise bar ────────────────────────────
+    with t_fleet:
+        st.caption(
+            "Every fleet fill tagged with the DVOL state that had **closed** by its "
+            "entry (Deribit stamps a bar at its open, so a fill at 10:30 sees the "
+            "09:00 bar and no later). R is per BET, not per row — the page-31 haircut."
+        )
+        with st.spinner("Joining fills to the DVOL tape…"):
+            fills = fleet_fills_with_dvol()
+        if fills.empty:
+            st.error("No fleet books readable locally.")
+        else:
+            band_col = st.radio("Split by", ["pct_band", "abs_band", "d24h_sign"],
+                                horizontal=True, key="ws2_bandcol",
+                                format_func=lambda c: {"pct_band": "DVOL percentile band",
+                                                       "abs_band": "Absolute band (the live gate's)",
+                                                       "d24h_sign": "DVOL rising vs falling"}[c])
+            tbl = fleet_r_by_band(band_col=band_col, fills=fills)
+            st.dataframe(tbl.style.format({"mean_r": "{:+.3f}", "sum_r": "{:+.1f}", "t": "{:+.2f}"}),
+                         use_container_width=True, hide_index=True, height=420)
+            if st.button("Run the family-wise bar (permutation, ~10s)", key="ws2_fwer"):
+                with st.spinner("Permuting band labels in day-sized blocks…"):
+                    fw = fleet_band_fwer(band_col=band_col, fills=fills)
+                st.dataframe(fw.style.format({"max_abs_t": "{:.2f}", "p_fwer": "{:.4f}",
+                                              "alpha_bonferroni": "{:.4f}"}),
+                             use_container_width=True, hide_index=True)
+                tested = int(fw["p_fwer"].notna().sum())
+                cleared = int(fw["clears"].sum())
+                refused = len(fw) - tested
+                st.info(
+                    f"**{cleared} of {tested} testable families clear the bar**"
+                    + (f"; {refused} refused — too few distinct day-blocks for the "
+                       "permutation null to mean anything." if refused else ".")
+                )
+                st.caption(
+                    "The statistic is a **contrast** — each band against the family's own "
+                    "mean — so a book that simply loses in every band scores zero here. "
+                    "Labels are permuted in day-sized blocks because DVOL barely moves "
+                    "inside a day; shuffling fill by fill would compare real, clustered "
+                    "data against a null that never clusters and hand back significance "
+                    "for free."
+                )
+
+    # ── skew ─────────────────────────────────────────────────────────────────
+    with t_skew:
+        a = st.radio("Asset", ["BTC", "ETH"], horizontal=True, key="ws2_skew_asset")
+        res = skew_direction(a)
+        if res.get("status") != "ok":
+            st.info(f"Not measurable yet: {res.get('status')}")
+        else:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Observations", f"{res['n']:,}")
+            c2.metric("mean 24h return | RR25 > 0", f"{res['mean_fwd_bps_rr_pos']:+.0f} bps")
+            c3.metric("mean 24h return | RR25 ≤ 0", f"{res['mean_fwd_bps_rr_neg']:+.0f} bps")
+            st.error(
+                f"**Read this against the baseline, not against 50%.** Unconditionally, "
+                f"price touches +{res['bracket_pct']:.0f}% before −{res['bracket_pct']:.0f}% "
+                f"only {res['up_rate_unconditional']:.1%} of the time on this tape — the "
+                f"BRACKET is already asymmetric before any signal is applied. Conditional "
+                f"on RR25 the rate is {res['up_rate_rr_pos']:.1%} (positive skew) versus "
+                f"{res['up_rate_rr_neg']:.1%} (negative). *On a driftless path any bracket "
+                "looks like a prediction; the mirror is what tells you whether you found "
+                "one.* The sample is ~5 weeks of rr25 — far too short for a verdict."
+            )
+
+    st.stop()
+
+
 from backtrader_framework.optimization.persistence import list_wfo_results
 from backtrader_framework.optimization.cross_asset_robustness import (
     CrossAssetAnalyzer,
