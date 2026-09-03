@@ -67,6 +67,7 @@ _vps_patches/
 research_output/
 adaptive_rr_study/
 meta_conductor/
+fleet_features/
 # 2026-08-09: funding-carry study — SPEC/REPORT enumerate our closures + fee tiers.
 # NB: a trailing inline comment would become part of the PATTERN and match nothing.
 funding_carry/

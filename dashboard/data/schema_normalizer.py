@@ -441,7 +441,8 @@ def normalize_fleet_book(db_path: Path, book) -> pd.DataFrame:
     try:
         uri = f"file:{db_path}?mode=ro"
         with sqlite3.connect(uri, uri=True) as conn:
-            raw = pd.read_sql_query(build_history_sql(book), conn)
+            cols = {r[1] for r in conn.execute(f"PRAGMA table_info({book.table})").fetchall()}
+            raw = pd.read_sql_query(build_history_sql(book, available_cols=cols), conn)
     except Exception as e:
         logger.warning(f"fleet book {book.key} ({db_path.name}) unreadable: {e}")
         return pd.DataFrame(columns=TRADE_SCHEMA_COLS)

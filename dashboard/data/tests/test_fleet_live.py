@@ -584,9 +584,14 @@ def test_history_sql_carries_the_unified_fields_and_passes_the_guard():
         assert "LIMIT" not in sql and "-7 day" not in sql     # whole ledger, no window
 
 
+KNIFE_FIXTURE_COLS = {"symbol", "direction", "level", "sl", "tp", "qty", "risk_usd",
+                      "placed_at_utc", "filled_at_utc", "closed_at_utc", "exit_price",
+                      "exit_reason", "r_multiple", "pnl_usd"}
+
+
 def test_history_rows_against_a_real_shaped_book(tmp_path):
     db = _knife_book(tmp_path)
-    rows = _run(db, build_history_sql(BOOKS_BY_KEY["knife_100k"]))
+    rows = _run(db, build_history_sql(BOOKS_BY_KEY["knife_100k"], available_cols=KNIFE_FIXTURE_COLS))
     assert len(rows) == 3                          # closed rows only, lifetime
     assert [r["symbol"] for r in rows] == ["SOLUSDT", "BTCUSDT", "ETHUSDT"]  # oldest first
     assert rows[1]["entry_ts"] == _t(hours=26)     # the FILL time, not the arm time
@@ -602,3 +607,38 @@ def test_lr_paper_books_are_registered_but_nq_is_left_to_the_legacy_map():
 
 def test_family_symbols_come_from_literal_symbol_columns():
     assert set(family_symbols("Liquidity Raid")) >= {"BTC", "ETH", "SOL"}
+
+
+
+def test_recorded_columns_a_book_lacks_are_dropped_not_fatal(tmp_path):
+    """An older knife arm predates the OI columns; lr_wide's seats never had
+    `ltype`. A recorded pre-fill column is a bonus, never a requirement."""
+    from data.fleet_registry import build_fills_sql
+    b = BOOKS_BY_KEY["knife_100k"]
+    assert "regime5" in b.recorded_pit                    # the book normally records it
+    sql = build_history_sql(b, available_cols=KNIFE_FIXTURE_COLS)
+    assert "pit__regime5" not in sql and "post__max_fav_r" not in sql
+    full = build_history_sql(b)                           # no column set → everything requested
+    assert "pit__regime5" in full and "post__max_fav_r" in full
+    db = _knife_book(tmp_path)
+    rows = _run(db, build_fills_sql(b, available_cols=KNIFE_FIXTURE_COLS))
+    assert {r["symbol"] for r in rows} == {"BTCUSDT", "ETHUSDT", "SOLUSDT", "BCHUSDT"}  # filled, open or closed
+    assert all("row_key" in r for r in rows)
+
+
+def test_pit_and_post_blocks_are_labelled_by_provenance():
+    b = BOOKS_BY_KEY["knife_100k"]
+    sql = build_history_sql(b)
+    assert " AS pit__mtf_score" in sql and " AS post__absorb_imb" in sql
+    # a post-fill measure must never be filed as pre-fill
+    assert "pit__max_fav_r" not in sql and "post__regime5" not in sql
+
+
+def test_spine_status_reads_the_collector_row_or_reports_absence():
+    from data.fleet_live import SPINE_STATUS_QUERY, spine_status
+    rc._assert_readonly(SPINE_STATUS_QUERY["sql"])            # a read, like everything else
+    raw = {"results": {"spine::status": {"ok": True, "cols": ["fills", "outcomes", "forward_fills", "last_cycle_utc", "era"],
+                                         "rows": [[1200, 900, 300, "2026-09-03T12:00:00Z", "ff1"]]}}}
+    assert spine_status(raw)["fills"] == 1200
+    assert spine_status({"results": {"spine::status": {"ok": False, "missing": True}}}) is None
+    assert spine_status({}) is None

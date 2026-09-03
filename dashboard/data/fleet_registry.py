@@ -22,6 +22,7 @@ R conventions, per the house standard:
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -85,6 +86,19 @@ class Book:
     entry_ts: Optional[str] = None
     exit_reason: Optional[str] = None
 
+    # Columns the BOT ITSELF recorded at the fill, split by when they were
+    # knowable. `recorded_pit` = pre-fill (regime at the prior bar, MTF score,
+    # funding, OI delta before entry…); `recorded_post` = post-fill (max
+    # favourable excursion, absorption measured over the fill window…). The
+    # fleet feature spine reads both and labels them; the dashboard never shows
+    # a post-fill column as a gate. Canonical name → SQL expression.
+    recorded_pit: dict = field(default_factory=dict)
+    recorded_post: dict = field(default_factory=dict)
+    # A stable per-row identity for "tag a fill once" semantics. Defaults to the
+    # SQLite rowid, which is stable for tables without INTEGER PRIMARY KEY
+    # reuse; books with a natural key name it here.
+    row_key: Optional[str] = None
+
     # The env-file seat whose ByBit account this book trades ("desk_demo/desk_demo").
     # Only set where it is KNOWN — reconciliation treats an unknown seat as
     # "cannot check", never as "orphan".
@@ -121,6 +135,21 @@ _KNIFE = dict(
                    "AND closed_at_utc IS NULL AND COALESCE(exit_reason,'')=''",
     working_ts="placed_at_utc",
     family="Knife", exit_reason="exit_reason",
+    recorded_pit={
+        "regime5": "regime5", "mtf_score": "mtf_score", "daily_bias": "daily_bias",
+        "h4_structure": "h4_structure", "atr_pct": "atr_pct", "er20": "er20",
+        "funding_rate": "funding_rate", "oi_delta_pct": "oi_delta_pct",
+        "oi_delta_5": "oi_delta_5", "oi_delta_10": "oi_delta_10",
+        "oi_delta_240": "oi_delta_240", "cvd_imb": "cvd_imb",
+        "self_ret_15m": "self_ret_15m", "btc_ret_15m": "btc_ret_15m",
+        "htf_4h_bias": "htf_4h_bias", "lvl_touches_24h": "lvl_touches_24h",
+        "favored": "favored", "entry_mode": "entry_mode",
+    },
+    recorded_post={
+        "max_fav_r": "max_fav_r", "absorb_size": "absorb_size",
+        "absorb_opp": "absorb_opp", "absorb_imb": "absorb_imb",
+        "of_break_aggr_30": "of_break_aggr_30", "of_vel_60": "of_vel_60",
+    },
 )
 
 _SEATS = dict(  # desk / retest / lr_wide / lrr_short share the `seats` shape
@@ -130,6 +159,8 @@ _SEATS = dict(  # desk / retest / lr_wide / lrr_short share the `seats` shape
     open_filter="fill_time IS NOT NULL AND closed_at IS NULL",
     open_ts="fill_time", open_entry="fill_px", open_sl="sl", open_tp="tp",
     open_qty="qty", open_risk="risk_usd", exit_reason="close_reason",
+    recorded_pit={"regime5": "regime5", "ltype": "ltype", "dist_atr": "dist_atr",
+                  "mass": "mass", "tf": "tf"},
 )
 
 _SMC = dict(
@@ -139,6 +170,8 @@ _SMC = dict(
     open_filter="real_fill_time IS NOT NULL AND closed_at IS NULL",
     open_ts="real_fill_time", open_entry="real_fill_price", open_sl="stop",
     open_tp="tp", open_qty="qty", family="SMC", exit_reason="close_reason",
+    recorded_pit={"regime5": "regime5", "fv_node_density": "fv_node_density",
+                  "fv_dist_ppoc_atr": "fv_dist_ppoc_atr"},
 )
 
 _DEPTH_ORDERS = dict(
@@ -293,6 +326,9 @@ BOOKS: list[Book] = [
          open_entry="avg_fill_price", open_sl="sl", open_tp="tp", open_qty="final_qty",
          working_filter="status='placed' AND fill_ts IS NULL", working_ts="placed_at",
          family="OFCS", exit_reason="close_reason",
+         recorded_pit={"regime5": "regime5", "htf_dir": "htf_dir", "cell": "cell",
+                       "absorption_proxy": "absorption_proxy", "cross_count": "cross_count",
+                       "ml_p": "ml_p", "era": "era"},
          note="one book, era-scoped: challenge rules from 2026-09-01"),
     Book(key="london_raid", label="london-raid-demo", tier=1,
          seat="london_raid_demo/london_raid_demo",
@@ -304,7 +340,9 @@ BOOKS: list[Book] = [
          open_qty="qty", open_risk="risk_usd",
          working_filter="order_id IS NOT NULL AND fill_ts IS NULL AND status NOT IN "
                         "('cancelled','closed','orphaned')", working_ts="placed_at",
-         family="London Raid", exit_reason="note"),
+         family="London Raid", exit_reason="note",
+         recorded_pit={"asia_high": "asia_high", "asia_low": "asia_low",
+                       "asia_bars": "asia_bars", "sl_dist": "sl_dist", "atr": "atr"}),
     Book(key="london_raid_taker", label="london-raid-taker", tier=1,
          db="london_raid_taker_demo/london_raid_taker_demo.db", table="trades",
          ts="exit_ts", closed_filter="realized_r IS NOT NULL", r="realized_r",
@@ -404,6 +442,10 @@ BOOKS: list[Book] = [
          symbol="symbol", entry="entry_fill", exit="exit_fill",
          open_filter="status='slated'", open_ts="created_utc", open_qty="qty",
          family="Analyst Drift", exit_reason="reason",
+         recorded_pit={"sent": "sent", "pit_rank": "pit_rank", "pit_quarter": "pit_quarter",
+                       "beta": "beta", "oc_spy": "oc_spy", "era": "era", "eff_date": "eff_date"},
+         recorded_post={"m_gross": "m_gross", "m_fill": "m_fill",
+                        "slip_open_bps": "slip_open_bps", "slip_close_bps": "slip_close_bps"},
          note="US equities, Alpaca paper — $ book, no stop-defined R"),
 
     # ── Tier 3 · shadow / record-only (dimensionless R) ──────────────────────
@@ -537,13 +579,36 @@ def build_trades_sql(b: Book, days: int = 7, limit: int = 500) -> str:
     )
 
 
-def build_history_sql(b: Book) -> str:
+_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _recorded_block(b: Book, available_cols=None) -> str:
+    """The `pit__` / `post__` projection, limited to columns the book HAS.
+
+    Books of one shape drift apart over time (an older knife arm predates the
+    OI columns; lr_wide's seats never had `ltype`). A recorded column is a
+    bonus, never a requirement: when `available_cols` is given, a bare-name
+    expression that is not in it is dropped rather than breaking the read.
+    """
+    def keep(expr: str) -> bool:
+        if available_cols is None:
+            return True
+        return (not _IDENT.match(expr)) or (expr in available_cols)
+    extra = "".join(f", {v} AS pit__{k}" for k, v in b.recorded_pit.items() if keep(v))
+    extra += "".join(f", {v} AS post__{k}" for k, v in b.recorded_post.items() if keep(v))
+    return extra
+
+
+def build_history_sql(b: Book, available_cols=None) -> str:
     """Every closed row with the unified-schema fields — no window, no cap.
 
     Meant for a LOCAL synced copy (the unified trade pages), never for the SSH
     round trip: it is the whole ledger, not this week's page of it.
+    `available_cols` (the table's PRAGMA column set) makes the recorded
+    pit/post block tolerant of books that lack some of those columns.
     """
     entry_ts = b.entry_ts or b.open_ts
+    extra = _recorded_block(b, available_cols)
     return (
         f"SELECT {_expr(entry_ts)} AS entry_ts, {b.ts} AS exit_ts,"
         f" {_expr(b.symbol)} AS symbol, {_expr(b.side)} AS side,"
@@ -551,9 +616,38 @@ def build_history_sql(b: Book) -> str:
         f" {_expr(b.open_sl)} AS sl, {_expr(b.open_tp)} AS tp,"
         f" {_expr(b.open_qty)} AS qty, {_expr(b.open_risk)} AS risk_usd,"
         f" {_expr(b.r)} AS r, {_expr(b.pnl)} AS pnl,"
-        f" {_expr(b.exit_reason)} AS exit_reason"
+        f" {_expr(b.exit_reason)} AS exit_reason{extra}"
         f" FROM {b.table} WHERE {b.closed_filter}"
         f" ORDER BY datetime({b.ts})"
+    )
+
+
+def build_fills_sql(b: Book, since_ts: Optional[str] = None, limit: int = 5000,
+                    available_cols=None) -> str:
+    """Every FILLED row (open or closed) newer than a watermark — the fleet
+    feature spine's intake query. Same projection as the history query so the
+    two never disagree about a column, plus a stable per-row key."""
+    entry_ts = b.entry_ts or b.open_ts
+    key = b.row_key or "rowid"
+    extra = _recorded_block(b, available_cols)
+    where = f"{_expr(entry_ts)} IS NOT NULL"
+    if b.open_filter or b.closed_filter != "1=1":
+        parts = [f"({b.closed_filter})"] if b.closed_filter != "1=1" else []
+        if b.open_filter:
+            parts.append(f"({b.open_filter})")
+        where += " AND (" + " OR ".join(parts) + ")"
+    if since_ts:
+        where += f" AND datetime({_expr(entry_ts)}) > datetime('{since_ts}')"
+    return (
+        f"SELECT {key} AS row_key, {_expr(entry_ts)} AS entry_ts, {b.ts} AS exit_ts,"
+        f" {_expr(b.symbol)} AS symbol, {_expr(b.side)} AS side,"
+        f" {_expr(b.entry)} AS entry, {_expr(b.exit)} AS exit_px,"
+        f" {_expr(b.open_sl)} AS sl, {_expr(b.open_tp)} AS tp,"
+        f" {_expr(b.open_qty)} AS qty, {_expr(b.open_risk)} AS risk_usd,"
+        f" {_expr(b.r)} AS r, {_expr(b.pnl)} AS pnl,"
+        f" {_expr(b.exit_reason)} AS exit_reason{extra}"
+        f" FROM {b.table} WHERE {where}"
+        f" ORDER BY datetime({_expr(entry_ts)}) LIMIT {int(limit)}"
     )
 
 

@@ -102,12 +102,17 @@ positions = exchange_positions_frame(raw)
 orders = exchange_orders_frame(raw)
 seats = seat_status_frame(raw)
 
-n_fail = sum(1 for v in raw.get("results", {}).values() if not v.get("ok"))
+n_fail = sum(1 for v in raw.get("results", {}).values()
+             if not v.get("ok") and not v.get("missing"))
+sp = spine_status(raw)
 st.caption(
     f"VPS clock **{raw.get('server_utc', '?')} UTC** · {len(books)} books read · "
     f"{n_fail} query error(s) · balances "
     f"{'read in ' + str(raw.get('balances', {}).get('elapsed_s', '?')) + 's' if with_bal else 'skipped'} · "
     f"cached 60s (local {datetime.now().strftime('%H:%M:%S')})"
+    + (f" · feature spine: **{sp['fills']:,} fills / {sp['outcomes']:,} outcomes**, "
+       f"{sp['forward_fills']:,} forward, last cycle {sp['last_cycle_utc']} ({sp['era']})"
+       if sp else " · feature spine: not deployed")
 )
 if n_fail:
     with st.expander(f"⚠️ {n_fail} book quer(y/ies) failed — these bots are missing below"):

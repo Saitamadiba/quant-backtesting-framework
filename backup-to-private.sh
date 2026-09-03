@@ -60,6 +60,8 @@ rsync -a --delete "${RX[@]}" feature_lab books_indicator_battery liquidity_surf 
 # private copy actually exists.
 for d in knife_prefill_indicator_scan vps_infra scratchpad; do
   [ -d "$d" ] && rsync -a --delete "${RX[@]}" "$d" "$PRIV/"
+# 2026-09-03: fleet_features/ — the fleet feature spine (WS0); gitignored in public in the same change.
+[ -d fleet_features ] && rsync -a --delete "${RX[@]}" --exclude='tests/__pycache__' fleet_features "$PRIV/"
 done
 # root-level proprietary scripts (no subdir deletion semantics needed)
 cp -p replay_*.py replay_*.sh deploy_*.sh session_pnl_snapshot.sh backup-to-private.sh backup-secrets.sh "$PRIV/" 2>/dev/null || true

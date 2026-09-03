@@ -48,6 +48,24 @@ ALPACA = {
 
 _REMOTE_PY = "./venv/bin/python3"
 
+# The fleet feature spine (fleet_features/, WS0): one read-only status row.
+SPINE_STATUS_QUERY = {
+    "id": "spine::status", "db": "HyroTrader/fleet_features.db",
+    "sql": ("SELECT (SELECT COUNT(*) FROM fills) AS fills, (SELECT COUNT(*) FROM outcomes) AS outcomes,"
+            " (SELECT COUNT(*) FROM fills WHERE backfill=0) AS forward_fills,"
+            " (SELECT v FROM meta WHERE k='last_cycle_utc') AS last_cycle_utc,"
+            " (SELECT v FROM meta WHERE k='era') AS era"),
+}
+
+
+def spine_status(raw: dict) -> Optional[dict]:
+    """fills / outcomes / last cycle of the fleet feature spine, or None if the
+    spine is not deployed yet (its DB is simply absent)."""
+    r = (raw.get("results") or {}).get("spine::status")
+    if not r or not r.get("ok") or not r.get("rows"):
+        return None
+    return dict(zip(r["cols"], r["rows"][0]))
+
 
 def _ssh_cmd(timeout: int) -> list[str]:
     return [
@@ -79,7 +97,7 @@ def fetch_raw(days: int = 7, with_balances: bool = True, trade_limit: int = 500,
     if not VPS_HOST:
         return {"ok": False, "error": "VPS_HOST not configured (dashboard/.env)."}
     spec = {
-        "plan": build_spec(days=days, trade_limit=trade_limit) if plan is None else plan,
+        "plan": (build_spec(days=days, trade_limit=trade_limit) + [SPINE_STATUS_QUERY]) if plan is None else plan,
         "balances": {"enabled": bool(with_balances), "env_globs": ENV_GLOBS,
                      "skip": ENV_SKIP, "workers": 6, "only_alpaca": bool(only_alpaca)},
         "alpaca": ALPACA,
