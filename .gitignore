@@ -42,6 +42,7 @@ fvg_shadow/
 ifvg_shadow/
 fib618_shadow/
 fomc_shadow/
+news_shadow/
 ofcs_shadow/
 ofcs_demo/
 sweep_engine/
@@ -68,6 +69,13 @@ research_output/
 adaptive_rr_study/
 meta_conductor/
 fleet_features/
+# 2026-09-04: both were already mirrored to the private repo by backup-to-private.sh
+# but were NOT ignored here — the exact paired miss the fomc/news_shadow rule names.
+# phantom_conductor/ is a Tier-1 demo-challenge EXECUTOR (bot, systemd units, env
+# template); us_markets/ is the analyst-drift seat, its preregs and its Alpaca code.
+# Until this line they would have landed in the PUBLIC repo on any `git add -A`.
+phantom_conductor/
+us_markets/
 # 2026-08-09: funding-carry study — SPEC/REPORT enumerate our closures + fee tiers.
 # NB: a trailing inline comment would become part of the PATTERN and match nothing.
 funding_carry/

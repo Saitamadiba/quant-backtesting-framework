@@ -46,10 +46,23 @@ rsync -a --delete "${RX[@]}" feature_lab books_indicator_battery liquidity_surf 
 # them (e.g. the OFCS skipped-trade tick reconstruction). Gitignored in public,
 # and until now mirrored nowhere, so a study lived only in the working tree.
 [ -d research_output ] && rsync -a --delete "${RX[@]}" research_output "$PRIV/"
+# 2026-08-24: fleet adaptive-RR study (scripts + panels + verdicts; parquet/klines excluded by RX)
+[ -d adaptive_rr_study ] && rsync -a --delete "${RX[@]}" adaptive_rr_study "$PRIV/"
+[ -d meta_conductor ] && rsync -a --delete "${RX[@]}" meta_conductor "$PRIV/"
 # 2026-08-09: funding_carry/ — the perp funding-carry study. Gitignored in public
 # in the SAME change that added it here, per the 08-07 "routing to private only
 # counts if the private copy exists" rule.
 [ -d funding_carry ] && rsync -a --delete "${RX[@]}" funding_carry "$PRIV/"
+[ -d us_markets ] && rsync -a --delete "${RX[@]}" --exclude='bars_1d/' --exclude='bars_1m/' --exclude='cmdty_1d/' us_markets "$PRIV/"
+[ -d phantom_conductor ] && rsync -a --delete "${RX[@]}" phantom_conductor "$PRIV/"
+# 2026-09-03: fleet_features/ — the fleet feature spine (WS0); gitignored in public in the same change.
+[ -d fleet_features ] && rsync -a --delete "${RX[@]}" --exclude='tests/__pycache__' fleet_features "$PRIV/"
+# 2026-08-30: news_shadow/ — Tier-3 PIT news-state recorder (scope + future code);
+# gitignored in public in the SAME change, per the fomc_shadow paired-mistake rule.
+[ -d news_shadow ] && rsync -a --delete "${RX[@]}" news_shadow "$PRIV/"
+# broadcaster/ is deliberately NOT mirrored here: it is its own git repo
+# (github.com/Saitamadiba/quant-broadcaster) — that repo is its version control
+# and backup; rsyncing it in would only embed a gitlink (verified 2026-08-31).
 [ -d overnight_drift ] && rsync -a --delete "${RX[@]}" overnight_drift "$PRIV/"
 [ -d wyckoff_volume ] && rsync -a --delete "${RX[@]}" wyckoff_volume "$PRIV/"
 [ -d momentum_rotation ] && rsync -a --delete "${RX[@]}" momentum_rotation "$PRIV/"
@@ -60,8 +73,6 @@ rsync -a --delete "${RX[@]}" feature_lab books_indicator_battery liquidity_surf 
 # private copy actually exists.
 for d in knife_prefill_indicator_scan vps_infra scratchpad; do
   [ -d "$d" ] && rsync -a --delete "${RX[@]}" "$d" "$PRIV/"
-# 2026-09-03: fleet_features/ — the fleet feature spine (WS0); gitignored in public in the same change.
-[ -d fleet_features ] && rsync -a --delete "${RX[@]}" --exclude='tests/__pycache__' fleet_features "$PRIV/"
 done
 # root-level proprietary scripts (no subdir deletion semantics needed)
 cp -p replay_*.py replay_*.sh deploy_*.sh session_pnl_snapshot.sh backup-to-private.sh backup-secrets.sh "$PRIV/" 2>/dev/null || true
@@ -78,8 +89,11 @@ cp -p *_PREREG.md *_RUNBOOK.md *_SPEC.md *_STANDARD.md *_MAP.md *_PLAN.md *_DESI
 # 2026-08-17: root-level study runners ADDED — every run_*.py / replay_*.py
 # at the repo root is gitignored (public repo) and was in NO mirror manifest,
 # i.e. backed up NOWHERE (the same paired-miss the fomc intake caught).
+# 2026-09-03: backfill_*.py joins them — backfill_ohlcv{,_forward}.py,
+# backfill_nq_ohlcv.py and backfill_dvol_parquet.py are gitignored in public
+# and were mirrored nowhere either; only backfill_*.sh was on the manifest.
 # NO --delete: a runner deleted locally stays recoverable in the mirror.
-rsync -a "${RX[@]}" $(ls run_*.py replay_*.py 2>/dev/null) "$PRIV/" 2>/dev/null || true
+rsync -a "${RX[@]}" $(ls run_*.py replay_*.py backfill_*.py 2>/dev/null) "$PRIV/" 2>/dev/null || true
 
 # Edge-bearing files inside packages that are OTHERWISE PUBLIC. -R keeps the path;
 # NO --delete, so the private copy never prunes a sibling it does not mirror.

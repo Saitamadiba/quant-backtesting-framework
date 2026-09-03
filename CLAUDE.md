@@ -250,6 +250,27 @@ The full policy is `HYROTRADER_RISK_STANDARD.md`; the short version, non-negotia
   recorded signal has a defined native SL + RR. A funded-viability *replay* overlay is
   optional and must never alter the raw R.
 
+- **Sizing floor — the qualifying rule (2026-08-07, fleet-normalized).** The HyroTrader
+  ruleset counts a trading day ONLY if the trade's PnL can reach **±1% of the INITIAL
+  balance** — so any bot that places ByBit orders sizes at **1% minimum** (target 1%,
+  ceiling 2%, min-notional 5% of initial; all inside Hyro's 3% hard cap). Sub-1% dials
+  (0.25–0.5% "conservative" settings, Kelly blends, or dimmer/confidence/vol multipliers
+  stacking below the floor) are structurally NON-compliant — the 2026-08-07 audit found
+  five seats broken this way. Dimmers modulate trade SELECTION or size within [1%, 2%],
+  never below the floor: **fewer trades, not smaller ones.** The LR core enforces this
+  mechanically (`clamp_to_risk_band` in `Liquidity_Raid/core/position_manager.py`);
+  guard-driven bots via `HYRO_RISK_PCT>=0.01` (env files: NO inline comments — systemd
+  keeps them and the value stops parsing).
+- **Telegram notification standard (ALWAYS for new bots).** Every new bot's alerts use
+  the knife/trial3maker layout via the seat's designated bot (iQuant for research seats):
+  sectioned ENTRY message (Direction / Entry Price / Position Size, `🛡️ Risk Management`
+  with SL/TP/Risk Amount, `🎯 Setup Analysis`, `💼 Account Status`, `🚀 <strategy label>`,
+  `🕒 <ts> UTC`) and `🏁 TRADE CLOSED ✅💰/❌💸` close with **ByBit-sourced money figures —
+  never recomputed** (entry/exit = avg fill prices, PnL = closedPnl; never publish
+  zeros/placeholders — retry until authoritative numbers exist). One alert per
+  (trade, action). Reference: `knife_bybit_funded.py`; compact template:
+  `ferryman_bot.py::fmt_entry/fmt_close`.
+
 This is checked at `infra-security-audit` intake for every new bot, and composes with the
 diff-first-deploy + sanitize + security rules above.
 

@@ -152,9 +152,59 @@ def resolve_be(o, h, l, c, start, side, entry, stop, tp, max_hold,
 IDLE, AWAIT_CHOCH, AWAIT_FVG, AWAIT_FILL = 0, 1, 2, 3
 
 
+STORED_TFS = {"5m": 5, "15m": 15, "1h": 60, "4h": 240}
+
+
+def tf_minutes(tf: str) -> int:
+    """'5m'/'30m'/'2h'/'1d'/'3d'/'1w' -> minutes. Data plumbing, not strategy."""
+    tf = tf.strip().lower()
+    unit, mult = tf[-1], int(tf[:-1])
+    return mult * {"m": 1, "h": 60, "d": 1440, "w": 10080}[unit]
+
+
+def bars_any(symbol: str, tf: str) -> pd.DataFrame:
+    """OHLCV at ANY timeframe: stored ones straight, the rest resampled up
+    from the finest stored base that divides them exactly.
+
+    Generalizes the old hardcoded {5m,15m,1h} x {1h,4h,1d} lookups so the TF
+    ladder can be swept end to end (2026-08-04). Identical output for the
+    stored TFs, and for 1d it reproduces the previous 4h->1D resample.
+    """
+    if tf in STORED_TFS:
+        return load_bars(symbol, tf)
+    want = tf_minutes(tf)
+    base = None
+    for cand, m in sorted(STORED_TFS.items(), key=lambda kv: kv[1]):
+        if want % m == 0:
+            df = load_bars(symbol, cand)
+            if not df.empty:
+                base = df
+                break
+    # 1d historically came off 4h — keep that exact provenance
+    if tf == "1d":
+        base = load_bars(symbol, "4h")
+    if base is None or base.empty:
+        return pd.DataFrame()
+    rule = ("W-MON" if tf.endswith("w")
+            else f"{want // 1440}D" if want % 1440 == 0
+            else f"{want}min")
+    out = (base.set_index("timestamp").resample(rule, label="left",
+                                                closed="left")
+           .agg(open=("open", "first"), high=("high", "max"),
+                low=("low", "min"), close=("close", "last"),
+                volume=("volume", "sum"))
+           .dropna().reset_index())
+    pc = out["close"].shift(1)
+    tr = pd.concat([(out["high"] - out["low"]), (out["high"] - pc).abs(),
+                    (out["low"] - pc).abs()], axis=1).max(axis=1)
+    out["atr_14"] = tr.ewm(alpha=1.0 / 14, adjust=False).mean()
+    out["ema_200"] = out["close"].ewm(span=200, adjust=False).mean()
+    return out
+
+
 def run_symbol(symbol: str, cfg: SMCConfig | None = None) -> pd.DataFrame:
     cfg = cfg or SMCConfig(costs=TransactionCosts.for_asset(symbol))
-    ltf = load_bars(symbol, cfg.ltf_tf)
+    ltf = bars_any(symbol, cfg.ltf_tf)
     if cfg.htf_tf == "1d":
         raw = load_bars(symbol, "4h").set_index("timestamp")
         htf = (raw.resample("1D")
@@ -166,11 +216,11 @@ def run_symbol(symbol: str, cfg: SMCConfig | None = None) -> pd.DataFrame:
                         (htf["low"] - pc).abs()], axis=1).max(axis=1)
         htf["atr_14"] = tr.ewm(alpha=1.0 / 14, adjust=False).mean()
     else:
-        htf = load_bars(symbol, cfg.htf_tf)
+        htf = bars_any(symbol, cfg.htf_tf)
     if ltf.empty or htf.empty:
         return pd.DataFrame()
-    tf_min = {"5m": 5, "15m": 15, "1h": 60}[cfg.ltf_tf]
-    htf_min = {"1h": 60, "4h": 240, "1d": 1440}[cfg.htf_tf]
+    tf_min = tf_minutes(cfg.ltf_tf)
+    htf_min = tf_minutes(cfg.htf_tf)
 
     htf_atr = htf["atr_14"].to_numpy()
     zones = find_fvgs(htf, htf_atr, cfg.min_zone_atr)
