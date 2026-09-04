@@ -367,3 +367,11 @@ def test_an_unscoreable_shuffle_is_not_counted_as_evidence():
     src = inspect.getsource(va.band_permutation_test)
     assert "scored_bands >= 2" in src, "a one-band statistic is not a comparison"
     assert "is not evidence" in src, "an unscoreable draw must be skipped, not counted"
+
+
+def test_fleet_frame_blocks_by_the_fills_own_day():
+    """The DVOL bar behind a fill can sit in the previous day. The permutation
+    block is a trading day's fills, so it must key on the fill, not the bar."""
+    import inspect
+    src = inspect.getsource(va.fleet_fills_with_dvol)
+    assert 'allf["fill_ts"]' in src and "dvol_ts" not in src.split('allf["day"]')[1][:200]

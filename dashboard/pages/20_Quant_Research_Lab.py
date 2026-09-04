@@ -132,82 +132,146 @@ def _render_wfo():
 # Tool 2: HMM Regime Detection
 # ═══════════════════════════════════════════════════════════════════════════════
 def _render_hmm():
-    st.header("HMM Regime Detection")
+    st.header("HMM Regime Detection — walk-forward, on the fleet's own tape")
 
     st.info(
-        '**Metaphor:** "A weather forecaster that classifies the market as '
-        "'sunny' (calm) or 'stormy' (volatile) — and adjusts your umbrella size.\"\n\n"
-        "A Hidden Markov Model (HMM) assumes the market switches between hidden "
-        "'states' (regimes) that we can't directly observe, but whose effects "
-        "(returns and volatility) we can measure."
+        '**Metaphor:** "A weather service that may use yesterday\'s sky and '
+        "never tomorrow's. It labels today calm or stormy from what has already "
+        'happened, and is graded on what happens next."'
     )
 
-    st.markdown("### The Two Market Regimes")
+    from data.regime_hmm import (BARS_PER_DAY, PRIMARY_FEATURES, btc_features,
+                                 cached_states, conditional_outcome_table,
+                                 empirical_transitions, fills_with_state,
+                                 n_step_ahead, state_outcome_table)
 
-    # Generate synthetic two-regime data
-    np.random.seed(42)
-    calm_returns = np.random.normal(0.001, 0.01, 500)
-    volatile_returns = np.random.normal(-0.0005, 0.035, 500)
+    K = st.radio("States (K)", [2, 3], horizontal=True, key="hmm_k",
+                 help="K=2 is the primary model (calm / turbulent). K=3 is reported "
+                      "alongside and counted in the multiple-comparison bar.")
+    path = cached_states(n_states=K)
+    if path.states.empty:
+        st.warning(
+            "No cached walk-forward path yet. Build it once with:\n\n"
+            "```\n.venv/bin/python3 -c \"import sys; sys.path.insert(0,'dashboard'); "
+            "from data.regime_hmm import cached_states; cached_states(2); cached_states(3)\"\n```"
+        )
+        return
 
-    x = np.linspace(-0.15, 0.15, 300)
+    s = path.states
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Out-of-sample bars", f"{len(s):,}")
+    c2.metric("Rolling refits", f"{path.n_windows}")
+    c3.metric("Span", f"{s['close_ts'].min():%Y-%m-%d} → {s['close_ts'].max():%Y-%m-%d}")
+    c4.metric("Features", str(len(path.features)))
 
-    # Manual Gaussian PDFs
-    def _norm_pdf(x, mu, sigma):
-        return np.exp(-0.5 * ((x - mu) / sigma) ** 2) / (sigma * np.sqrt(2 * np.pi))
-
-    calm_pdf = _norm_pdf(x, 0.001, 0.01)
-    volatile_pdf = _norm_pdf(x, -0.0005, 0.035)
-
-    fig_hmm = go.Figure()
-    fig_hmm.add_trace(go.Scatter(
-        x=x * 100, y=calm_pdf, mode="lines", name="Calm Regime",
-        fill="tozeroy", line=dict(color="#4CAF50"),
-        fillcolor="rgba(76, 175, 80, 0.3)",
-    ))
-    fig_hmm.add_trace(go.Scatter(
-        x=x * 100, y=volatile_pdf, mode="lines", name="Volatile Regime",
-        fill="tozeroy", line=dict(color="#F44336"),
-        fillcolor="rgba(244, 67, 54, 0.3)",
-    ))
-    fig_hmm.update_layout(
-        template="plotly_dark", height=350,
-        xaxis_title="Return (%)", yaxis_title="Probability Density",
-        title="Return Distributions by Regime",
+    st.caption(
+        f"Fit on the trailing **{path.train_days} days**, forward-filtered over the next "
+        f"**{path.step_days}**, stepped {path.n_windows} times. Every labelled bar was "
+        "scored by a model estimated before it existed, using **filtered** probabilities "
+        "only — no Viterbi, no smoothing. *The forecast may use yesterday's sky.*"
     )
-    st.plotly_chart(fig_hmm, use_container_width=True)
 
-    st.markdown("### Position Sizing by Regime")
-    sizing_data = pd.DataFrame({
-        "Regime": ["Calm", "Reduced", "Uncertain", "Defensive"],
-        "Size Multiplier": [1.0, 0.7, 0.5, 0.3],
-        "Description": [
-            "Full position — market is well-behaved",
-            "Slightly elevated vol — reduce exposure",
-            "Mixed signals — half position",
-            "Storm mode — minimal exposure",
-        ],
-    })
+    tr = empirical_transitions(s, K)
 
-    fig_sizing = go.Figure()
-    colors = ["#4CAF50", "#FFC107", "#FF9800", "#F44336"]
-    fig_sizing.add_trace(go.Bar(
-        x=sizing_data["Regime"], y=sizing_data["Size Multiplier"],
-        marker_color=colors,
-        text=[f"{v:.0%}" for v in sizing_data["Size Multiplier"]],
-        textposition="auto",
-    ))
-    fig_sizing.update_layout(
-        template="plotly_dark", height=300,
-        yaxis_title="Position Size Multiplier",
-        yaxis_tickformat=".0%",
+    # ── the state strip ──────────────────────────────────────────────────────
+    st.markdown("### Where the regimes actually fell")
+    lb = st.select_slider("Window", [90, 180, 365, 730, 99999], value=365,
+                          format_func=lambda d: "all" if d > 5000 else f"{d}d",
+                          key="hmm_lb")
+    view = s if lb > 5000 else s[s["close_ts"] >= s["close_ts"].max() - pd.Timedelta(days=lb)]
+    feat = btc_features(start=str(view["close_ts"].min().date()))
+    px = feat.set_index("close_ts")["close"].reindex(view["close_ts"], method="ffill")
+    palette = ["#4CAF50", "#FF9800", "#F44336", "#7E57C2"]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=view["close_ts"], y=px.to_numpy(), mode="lines",
+                             name="BTC", line=dict(color="#90A4AE", width=1)))
+    for k in range(K):
+        m = view["state"] == k
+        fig.add_trace(go.Scatter(x=view.loc[m, "close_ts"], y=px[m.to_numpy()],
+                                 mode="markers", name=f"state {k}",
+                                 marker=dict(size=2.5, color=palette[k % len(palette)])))
+    fig.update_layout(template="plotly_dark", height=380, yaxis_title="BTC",
+                      margin=dict(l=10, r=10, t=30, b=10),
+                      title="Filtered state over price (state 0 = calmest)")
+    st.plotly_chart(fig, use_container_width=True)
+
+    # ── sequencing ───────────────────────────────────────────────────────────
+    st.markdown("### Switch sequencing")
+    a, b = st.columns([1.2, 1])
+    with a:
+        lab = [f"state {i}" for i in range(K)]
+        fig2 = go.Figure(go.Heatmap(
+            z=tr["transition"], x=lab, y=lab, colorscale="Blues", zmin=0, zmax=1,
+            text=[[f"{v:.3f}" for v in row] for row in tr["transition"]],
+            texttemplate="%{text}"))
+        fig2.update_layout(template="plotly_dark", height=300,
+                           margin=dict(l=10, r=10, t=30, b=10),
+                           title="P(state at t → state at t+1), same day only",
+                           xaxis_title="to", yaxis_title="from")
+        st.plotly_chart(fig2, use_container_width=True)
+        st.caption(
+            f"{tr['n_transitions']:,} within-day transitions over {tr['n_days']:,} days. "
+            "A gap between days is not a switch the tape made, so it is not counted. "
+            "The 90% interval comes from resampling whole DAYS — resampling bar by bar "
+            "would treat an hours-long state as dozens of observations and return an "
+            "interval far too tight."
+        )
+    with b:
+        dwell = pd.DataFrame({"state": lab, "dwell (hours)": tr["dwell_hours"].round(2),
+                              "occupancy": (tr["occupancy"] * 100).round(1)})
+        st.dataframe(dwell, use_container_width=True, hide_index=True)
+        st.markdown("**P(state at t+h | state now)**")
+        st.dataframe(n_step_ahead(tr["transition"]).round(3),
+                     use_container_width=True, hide_index=True, height=240)
+        longest = int(np.argmax(tr["dwell_hours"]))
+        st.caption(
+            f"State {longest} is the stickiest at "
+            f"{tr['dwell_hours'][longest]:.1f}h expected dwell. Read the n-step table as "
+            "*how fast the memory of today's regime decays* — where the rows converge, "
+            "knowing the state stops telling you anything."
+        )
+
+    # ── the fleet read, against the frozen bar ───────────────────────────────
+    st.markdown("### Does the fleet's R depend on the state?")
+    st.caption(
+        "The kill bar for this question was frozen in `WS3_HMM_REGIME_PREREG.md` "
+        "**before the first fit**: separation must clear a day-blocked permutation at "
+        "α/(families × K), beat the conductor's RV24 rule by ≥0.10R per trade on the "
+        "same fills, hold in both halves, and rest on ≥40 effective bets. All four, or "
+        "the HMM is an atlas and the conductor's frozen rules stand."
     )
-    st.plotly_chart(fig_sizing, use_container_width=True)
+    if st.button("Run the fleet read (~30s)", key="hmm_fleet"):
+        with st.spinner("Joining fills to the filtered state…"):
+            tagged = fills_with_state(path, feat=btc_features())
+        if tagged.empty:
+            st.error("No fleet fills overlap the filtered path.")
+        else:
+            st.markdown("**R by state, per family** (per bet, not per row)")
+            st.dataframe(state_outcome_table(tagged).style.format(
+                {"mean_r": "{:+.3f}", "t": "{:+.2f}"}),
+                use_container_width=True, hide_index=True, height=320)
+            st.markdown("**R by (state, what the tape switched into next)**")
+            cond = conditional_outcome_table(tagged)
+            if cond.empty:
+                st.caption("No (state, next-switch) cell has ≥20 effective bets yet.")
+            else:
+                st.dataframe(cond.style.format(
+                    {"mean_r": "{:+.3f}", "t": "{:+.2f}",
+                     "median_bars_to_switch": "{:.0f}"}),
+                    use_container_width=True, hide_index=True)
+                st.caption(
+                    "`next_switch_to` is the ONE forward-looking column in this "
+                    "workstream. It labels an outcome — *what kind of entries paid when "
+                    "calm was about to break* — and can never be a gate, because at "
+                    "entry nobody knows which way calm breaks."
+                )
 
-    st.success(
-        "**Why it matters:** During volatile regimes, our bots automatically "
-        "reduce position sizes to 30% of normal. This protects capital during "
-        "adverse conditions while staying fully invested during calm markets."
+    st.warning(
+        "**Reading, not gating.** Even a passing result here is a *gate candidate* that "
+        "still owes a pre-registered forward shadow. The conductor's own read (≥400 "
+        "tagged fills with ≥25% each side, or 2026-11-01) is not pre-empted by this."
     )
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

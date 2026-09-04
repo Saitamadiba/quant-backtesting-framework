@@ -483,6 +483,7 @@ def fleet_fills_with_dvol(tiers: Sequence[int] = (1, 2, 3)) -> pd.DataFrame:
         if ts is None or len(ts) != s.n:
             continue
         j = dvol_asof(feat, ts)
+        j["fill_ts"] = pd.to_datetime(ts, utc=True).to_numpy()
         j["r"] = s.r
         j["cluster"] = s.clusters
         j["family"] = s.family
@@ -499,7 +500,9 @@ def fleet_fills_with_dvol(tiers: Sequence[int] = (1, 2, 3)) -> pd.DataFrame:
     allf["d24h_sign"] = np.where(d24.isna(), None,
                                  np.where(d24 > 0, "rising",
                                           np.where(d24 < 0, "falling", "flat")))
-    allf["day"] = pd.to_datetime(allf["dvol_ts"], utc=True, errors="coerce").dt.floor("D")
+    # Block by the FILL's day, not the DVOL bar's: they differ by up to an hour
+    # and the block is meant to hold a trading day's fills together.
+    allf["day"] = pd.to_datetime(allf["fill_ts"], utc=True, errors="coerce").dt.floor("D")
     return allf
 
 
