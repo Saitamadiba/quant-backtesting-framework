@@ -225,6 +225,45 @@ class GaussianHMM:
 
         return np.exp(log_alpha)
 
+    def log_likelihood(self, X: np.ndarray,
+                       init_state_probs: Optional[np.ndarray] = None) -> float:
+        """log P(x_1..T) under the fitted parameters — the forward recursion's
+        normaliser, on data the model may never have seen.
+
+        `fit()` already computes this internally to test convergence, but only
+        for its own training set. Held-out likelihood is the only honest way to
+        compare two HMM configurations that differ in the NUMBER of states: a
+        3-state model has strictly more freedom than a 2-state one and will
+        always fit the training window better, so an in-sample comparison
+        answers "which has more parameters", not "which describes the tape".
+        """
+        if not self.fitted:
+            raise ValueError("HMM not fitted. Call fit() first.")
+        X = np.asarray(X, dtype=float)
+        if X.size == 0:
+            return float("nan")
+        log_B = self._log_emission(X)
+        log_A = np.log(self.A + 1e-300)
+        if init_state_probs is None:
+            log_alpha = np.log(self.pi + 1e-300) + log_B[0]
+        else:
+            prev = np.asarray(init_state_probs, dtype=float)
+            prev = prev / prev.sum()
+            log_alpha = np.log(prev @ self.A + 1e-300) + log_B[0]
+        # Scaled forward recursion: normalise at EVERY step (including the
+        # first) and accumulate the normalisers. A single running product
+        # underflows to zero long before T reaches a useful length.
+        total = _logsumexp(log_alpha)
+        log_alpha = log_alpha - total
+        for t in range(1, X.shape[0]):
+            m = log_alpha[:, None] + log_A
+            mx = m.max(axis=0)
+            log_alpha = mx + np.log(np.exp(m - mx).sum(axis=0)) + log_B[t]
+            c = _logsumexp(log_alpha)
+            total += c
+            log_alpha -= c
+        return float(total)
+
     def transition_summary(self) -> Dict:
         """The switch-sequencing view of a fitted model: P(A→B), expected dwell
         time per state (1/(1−A_ii) bars), and the stationary distribution."""
