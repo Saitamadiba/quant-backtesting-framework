@@ -183,6 +183,12 @@ Black_Scholes_Implementation.odt
 # ── Root-level ML scripts (reference proprietary training data) ─────────────
 ml_*.py
 backfill_*.py
+# 2026-09-04: strategy-specific ML rebuild tooling. build_lr_ml_dataset.py encodes
+# the LR feature set and the banned trade-parameter list; train_lr_ml_model.py its
+# kill bar. The reusable audit machinery stays PUBLIC in dashboard/data/fleet_ml.py —
+# only the strategy-specific halves are routed private ("when unsure, private").
+build_*.py
+train_*.py
 gamma_regime.py
 deepseek\ backtest.py
 5min\ breakout\ backtesting.py

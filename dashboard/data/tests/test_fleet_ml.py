@@ -284,3 +284,29 @@ def test_module_never_touches_the_vps():
                            "urllib", "http"}, f"can reach off-machine: {imported}"
     calls = {ast.unparse(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
     assert not {c for c in calls if "system" in c or "popen" in c.lower()}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  The permutation budget must be able to reject something
+# ══════════════════════════════════════════════════════════════════════════════
+def test_scan_is_falsifiable_helper():
+    """16 features give alpha = 0.003125; 300 permutations floor at 0.003322."""
+    assert fm.scan_is_falsifiable(n_features=16, n_perm=300) is False
+    assert fm.scan_is_falsifiable(n_features=16, n_perm=2000) is True
+    assert fm.scan_is_falsifiable(n_features=8, n_perm=300) is True
+
+
+def test_an_unfalsifiable_scan_says_so_rather_than_returning_false():
+    """A column of `clears=False` from a test that could never say True is not a
+    null result, it is no result."""
+    rng = np.random.default_rng(2)
+    n = 900
+    df = _episodes(n, seed=2)
+    for i in range(14):
+        df[f"pre__f{i}"] = rng.normal(0, 1, n)
+    cols = [c for c in df.columns if c.startswith("pre__")]
+    out = fm.univariate_scan(df, cols, n_perm=50)
+    scored = int(out["p_fwer"].notna().sum())
+    if scored and (1 / 51) >= (0.05 / scored):
+        assert not out["clears"].any()
+        assert out["note"].str.contains("UNFALSIFIABLE").any()

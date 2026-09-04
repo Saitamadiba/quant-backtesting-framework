@@ -209,9 +209,17 @@ def cpcv_auc(X: pd.DataFrame, y: np.ndarray, day: pd.Series,
 
 
 def auc_day_bootstrap(res: Dict, n_boot: int = 500, seed: int = 0) -> Tuple[float, float]:
-    """90% interval on the pooled OOS AUC, resampling whole DAYS with their
+    """90% interval on the POOLED OOS AUC, resampling whole DAYS with their
     multiplicity — the same correction WS3 needed after the naive version both
-    ran at 6s a call and silently dropped a repeated day."""
+    ran at 6s a call and silently dropped a repeated day.
+
+    NOTE the estimator: this brackets the AUC of all OOS predictions pooled,
+    which is NOT the same quantity as `auc_oos_mean` (the mean of per-fold
+    AUCs). The two can differ by more than the interval's width — on the LR
+    rebuild the mean-of-folds was 0.5673 against a pooled interval of
+    [0.5468, 0.5615]. Quoting the fold mean *inside* this interval would be
+    comparing two different estimators and calling one the other's error bar.
+    """
     if res.get("status") != "ok" or "_oos" not in res:
         return (float("nan"), float("nan"))
     y, p, idx, days_sorted = res["_oos"]
@@ -366,7 +374,34 @@ def univariate_scan(df: pd.DataFrame, cols: Sequence[str], n_perm: int = 500,
     scored = int(out["p_fwer"].notna().sum())
     out["alpha"] = 0.05 / max(scored, 1)
     out["clears"] = out["p_fwer"].notna() & (out["p_fwer"] < out["alpha"])
+    # RESOLUTION GUARD. A permutation test's smallest possible p-value is
+    # 1/(n_perm+1). If that floor sits at or above the Bonferroni alpha, NO
+    # feature can clear however strong it is — the test is unfalsifiable and a
+    # column of "False" means nothing. Measured on the LR rebuild: 16 features
+    # give alpha = 0.003125 while 300 permutations floor at 0.003322, and every
+    # single p-value came back pinned to that floor.
+    floor = 1.0 / (n_perm + 1)
+    alpha = 0.05 / max(scored, 1)
+    if scored and floor >= alpha:
+        out["clears"] = False
+        out["note"] = out["note"].astype(str) + (
+            f" | UNFALSIFIABLE: p-floor {floor:.6f} >= alpha {alpha:.6f}; "
+            f"need > {int(1 / alpha)} permutations")
+        logger.warning("univariate_scan: p-floor %.6f >= alpha %.6f — the FWER "
+                       "test cannot reject anything; raise n_perm above %d",
+                       floor, alpha, int(1 / alpha))
     return out.sort_values("p_fwer", na_position="last").reset_index(drop=True)
+
+
+def scan_is_falsifiable(n_features: int, n_perm: int) -> bool:
+    """Could ANY feature clear the bar with this permutation budget?
+
+    Cheap to check and easy to forget: the answer is no whenever
+    1/(n_perm+1) >= 0.05/n_features.
+    """
+    if n_features <= 0:
+        return False
+    return (1.0 / (n_perm + 1)) < (0.05 / n_features)
 
 
 def half_split_auc(df: pd.DataFrame, cols: Sequence[str], seed: int = 0) -> Dict:

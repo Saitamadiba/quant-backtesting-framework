@@ -93,7 +93,7 @@ cp -p *_PREREG.md *_RUNBOOK.md *_SPEC.md *_STANDARD.md *_MAP.md *_PLAN.md *_DESI
 # backfill_nq_ohlcv.py and backfill_dvol_parquet.py are gitignored in public
 # and were mirrored nowhere either; only backfill_*.sh was on the manifest.
 # NO --delete: a runner deleted locally stays recoverable in the mirror.
-rsync -a "${RX[@]}" $(ls run_*.py replay_*.py backfill_*.py 2>/dev/null) "$PRIV/" 2>/dev/null || true
+rsync -a "${RX[@]}" $(ls run_*.py replay_*.py backfill_*.py build_*.py train_*.py 2>/dev/null) "$PRIV/" 2>/dev/null || true
 
 # Edge-bearing files inside packages that are OTHERWISE PUBLIC. -R keeps the path;
 # NO --delete, so the private copy never prunes a sibling it does not mirror.
