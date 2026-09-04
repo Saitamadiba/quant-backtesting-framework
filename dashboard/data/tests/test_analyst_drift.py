@@ -51,8 +51,9 @@ def test_counting_report_shows_both_readings_and_the_ratio():
     assert r["overcount_ratio"] == pytest.approx(8 / 3)
 
 
-def test_the_gate_progresses_slower_by_bets_than_by_rows():
-    """Counting rows would open a frozen gate on a smaller sample than it claims."""
+def test_the_standard_unit_progresses_slower_than_the_shadow():
+    """Counting headlines would open the gate on a smaller sample than it claims;
+    since amendment 1 the standard unit is the slower, stricter one."""
     r = ad.counting_report(_events())
     assert r["gate_progress_by_bets"] < r["gate_progress_by_rows"]
 
@@ -154,3 +155,105 @@ def test_module_never_touches_the_vps():
         elif isinstance(n, ast.ImportFrom) and n.module:
             imported.add(n.module.split(".")[0])
     assert not imported & {"subprocess", "paramiko", "socket", "requests", "urllib"}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  AMENDMENT 1 (2026-09-04, SIGHTED): symbol-days standard, headlines shadow
+# ══════════════════════════════════════════════════════════════════════════════
+def test_the_standard_unit_is_symbol_days():
+    out = ad.dual_read(_events())
+    assert "symbol, eff_date" in out["gate_unit"] and "STANDARD" in out["gate_unit"]
+    assert out["n_gate"] == 3, "the gate counts distinct symbol-days"
+
+
+def test_headlines_are_now_the_record_only_shadow():
+    out = ad.dual_read(_events())
+    assert "record-only" in out["shadow_unit"] and "headlines" in out["shadow_unit"]
+    assert out["n_shadow"] == 8
+    assert out["ratio"] == pytest.approx(8 / 3)
+
+
+def test_the_amendment_makes_the_gate_harder_not_easier():
+    """A sighted amendment that makes a gate EASIER is the dangerous kind. This
+    one delays the review: fewer standard units accrue per calendar day."""
+    out = ad.dual_read(_events())
+    assert out["gate_pct"] < out["shadow_pct"]
+
+
+def test_both_series_stay_visible_so_the_ratio_can_be_watched():
+    r = ad.counting_report(_events())
+    assert r["closed_rows"] == 8 and r["distinct_bets"] == 3
+    assert r["overcount_ratio"] == pytest.approx(8 / 3)
+
+
+def test_the_shadow_series_takes_m_gross_once_because_it_is_identical():
+    sd = ad.symbol_day_series(_events())
+    snow = sd[sd.symbol == "SNOW"].iloc[0]
+    assert snow["m_gross"] == pytest.approx(-0.059)
+    assert snow["headlines"] == 5
+
+
+def test_m_fill_is_notional_weighted_not_a_plain_mean():
+    """A 300-share fill and a 3-share fill must not speak equally about what the
+    book actually captured."""
+    ev = _events(spec=(("XYZ", "2026-09-02", 2),))
+    ev["qty"] = [1.0, 99.0]
+    ev["entry_fill"] = [100.0, 100.0]
+    sd = ad.symbol_day_series(ev)
+    m = sd["m_fill"].iloc[0]
+    plain = ev["m_fill"].mean()
+    assert m != pytest.approx(plain)
+    assert m == pytest.approx((0.01 * 100 + 0.011 * 9900) / 10000)
+
+
+def test_the_shadow_series_is_derived_not_a_second_store():
+    """Persisting a recomputable view adds a place to drift out of sync without
+    adding information."""
+    src = Path(ad.__file__).read_text()
+    assert "DERIVED view, not a second store" in src
+    assert "to_parquet" not in src and "sqlite3.connect" not in src
+
+
+def test_the_frozen_aggregation_rule_is_written_down():
+    assert ad.SHADOW_AGG["m_gross"].startswith("first")
+    assert "notional" in ad.SHADOW_AGG["m_fill"]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  The risk face of the same clustering
+# ══════════════════════════════════════════════════════════════════════════════
+def test_concentration_is_measured_against_the_design_target():
+    ev = _events(spec=(("SNOW", "2026-09-03", 5),))
+    ev["qty"] = [100.0] * 5
+    ev["entry_fill"] = [120.0] * 5
+    rep = ad.concentration_report(ev)
+    assert rep["x_design"].iloc[0] == pytest.approx(60000 / ad.DESIGN_NOTIONAL_PER_EVENT)
+    assert rep["headlines"].iloc[0] == 5
+
+
+def test_concentration_reports_share_of_the_book():
+    ev = _events(spec=(("SNOW", "2026-09-03", 5),))
+    ev["qty"] = [100.0] * 5
+    ev["entry_fill"] = [120.0] * 5
+    rep = ad.concentration_report(ev)
+    assert 0.5 < rep["pct_of_book"].iloc[0] < 0.7
+    assert ad.DESIGN_NOTIONAL_PER_EVENT == 10_000.0
+
+
+def test_the_amendment_is_recorded_as_sighted_in_the_prereg():
+    """An amendment made after looking at data must say so, so a reader can
+    discount it. Precedent: the FVG era-3 kill-bar amendment."""
+    pre = _ROOT / "us_markets" / "ANALYST_DRIFT_PAPER_PREREG.md"
+    if not pre.exists():
+        pytest.skip("prereg not in this checkout")
+    txt = pre.read_text()
+    assert "AMENDMENT 1" in txt and "SIGHTED" in txt
+    assert "no era break is taken" in txt
+    assert "harder" in txt.lower(), "the direction of the change must be stated"
+
+
+def test_the_seats_trading_rules_are_untouched_by_the_amendment():
+    """The amendment is a reading rule. Sizing, halts and the metric are
+    era-break-protected and must not appear as changed."""
+    assert ad.GATE_N == 1000 and ad.GATE_M_PP == 0.05
+    assert ad.DESIGN_NOTIONAL_PER_EVENT == 10_000.0

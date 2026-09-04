@@ -6,20 +6,33 @@ n ≥ 300**. The seat's own frozen review gate (n ≥ 1,000 member events;
 M ≥ +0.05pp ∧ day-clustered t ≥ 1.5 ∧ paper net P&L > 0) is untouched, and
 nothing here shortens it.
 
-**The finding that matters is a counting one.** The store holds 22 closed rows
-with 22 distinct `news_id` — but only **13 distinct (symbol, eff_date)** pairs,
-and `m_gross` is identical inside each pair. Five separate headlines about SNOW
-on 2026-09-03 are five rows, five news ids, and **one bet on one stock's
-overnight drift on one day**. Counting rows runs the seat's gate **1.69× too
-fast**.
+**Two series, roles set by AMENDMENT 1 (2026-09-04, marked SIGHTED in the
+seat's prereg).** The review gate's standard unit is now **distinct
+(symbol, eff_date) — "symbol-days"**; the **deduped-headline count is recorded
+in parallel, record-only**, and reported beside it at every look.
 
-The seat's prereg already specifies a *day-clustered t*, so the clustering is
-anticipated for the statistic — what is ambiguous is the **n**. Raising that at
-n=22 costs nothing; discovering it at n≈1,000 would mean the gate opened on a
-sample 40% smaller than it claimed. This module therefore reports both countings
-side by side and defaults to the clustered one.
+The amendment was made after looking at data and is logged as sighted, following
+the FVG era-3 precedent. What makes it acceptable mid-era is its DIRECTION:
+1,000 symbol-days takes ~1.69x longer to accrue than 1,000 headlines, so the
+change **delays** the review and demands strictly more independent evidence. A
+sighted amendment that makes a gate easier is the dangerous kind. No trade the
+seat takes is affected — the classifier, universe rule, metric M, sizing and
+halts are untouched, so no era break is taken.
 
-*Picture: five reporters filing the same story is five bylines and one event.*
+Why both are worth having: five separate headlines about SNOW on 2026-09-03 are
+five member events by the prereg's definition (every gap clears the 30-minute
+dedupe: 51.8, 81.6, 33.2, 30.4 minutes — the dedupe is working exactly as
+specified), and they all measure the **identical** open→close realisation —
+`m_gross` is literally the same number five times. Day-clustering already
+protects the *t-statistic*; it does not touch the *counter*. The two units also
+give different ANSWERS — headlines read −2.163pp at a 31.8% hit rate against
+symbol-days' −1.376pp at 38.5%, because the most-covered names happened to be
+the losers — so the choice is not cosmetic. Headlines measure the seat's
+opportunity rate; symbol-days measure how many independent draws of the drift it
+has actually seen, which is what a review gate is asking about.
+
+*Picture: five reporters filing the same story is five bylines and one event —
+and you may legitimately want to count either, so long as you say which.*
 """
 from __future__ import annotations
 
@@ -78,8 +91,11 @@ def closed_events(df: Optional[pd.DataFrame] = None,
 def counting_report(df: Optional[pd.DataFrame] = None) -> Dict:
     """Both readings of "n", side by side, with the ratio between them.
 
-    The seat's gate says "n ≥ 1,000 member events" without defining whether a
-    member event is a row or a bet. At the moment those differ by 1.69x.
+    Since amendment 1 the STANDARD unit is `distinct_bets` (symbol-days) and
+    `closed_rows` (deduped headlines) is the record-only shadow. Both are kept
+    on the report so the ratio stays visible: if duplication ever collapses to
+    1.0x the two series converge, and if it climbs the shadow drifts further
+    from what the gate is actually counting.
     """
     d = df if df is not None else load_events()
     rows = closed_events(d, cluster=False)
@@ -199,4 +215,100 @@ def equities_block(df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     out = out.rename(columns={"sent": "pre__sent", "pit_rank": "pre__pit_rank",
                               "beta": "pre__beta", "dow": "pre__dow",
                               "oc_spy": "post__oc_spy"})
+    return out
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  The shadow series — symbol-days, recorded alongside the gate's headline count
+# ══════════════════════════════════════════════════════════════════════════════
+# Frozen aggregation (2026-09-04). `m_gross` is IDENTICAL across a symbol-day
+# group by construction, so taking it once is exact rather than an average.
+# `m_fill` genuinely differs per fill, and the seat put a full $10k behind each,
+# so it is weighted by NOTIONAL — a simple mean would let a 300-share fill and a
+# 3-share fill speak equally about what the book actually captured.
+SHADOW_AGG = {"m_gross": "first (identical within the group)",
+              "m_fill": "notional-weighted mean",
+              "pnl_usd": "sum", "notional": "sum"}
+DESIGN_NOTIONAL_PER_EVENT = 10_000.0
+BOOK_BASELINE = 100_099.67          # era baseline from the seat's prereg
+
+
+def symbol_day_series(df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+    """The STANDARD series since amendment 1: one row per distinct (symbol, eff_date).
+
+    This is a DERIVED view, not a second store. Every column is recomputable
+    exactly from the seat's own `events` table, so persisting it would add a
+    place to drift out of sync without adding information. It is recorded in
+    the sense that matters — a frozen aggregation rule, reported at every look
+    beside the gate's own count.
+    """
+    d = df if df is not None else load_events()
+    c = closed_events(d, cluster=False)
+    if c.empty:
+        return pd.DataFrame()
+    c = c.copy()
+    c["notional"] = (pd.to_numeric(c.get("qty"), errors="coerce")
+                     * pd.to_numeric(c.get("entry_fill"), errors="coerce"))
+    rows = []
+    for (sym, date), g in c.groupby(["symbol", "eff_date"]):
+        w = g["notional"].fillna(0.0)
+        wsum = float(w.sum())
+        mf = pd.to_numeric(g["m_fill"], errors="coerce")
+        rows.append({
+            "symbol": sym, "eff_date": date,
+            "headlines": int(len(g)),
+            "m_gross": float(pd.to_numeric(g["m_gross"], errors="coerce").iloc[0]),
+            "m_fill": float((mf * w).sum() / wsum) if wsum > 0 else float(mf.mean()),
+            "pnl_usd": float(pd.to_numeric(g["pnl_usd"], errors="coerce").sum()),
+            "notional": wsum,
+            "beta": float(pd.to_numeric(g["beta"], errors="coerce").iloc[0]),
+            "pit_rank": float(pd.to_numeric(g["pit_rank"], errors="coerce").iloc[0]),
+        })
+    return pd.DataFrame(rows).sort_values(["eff_date", "symbol"]).reset_index(drop=True)
+
+
+def concentration_report(df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+    """Notional per symbol-day against the design's $10,000-per-EVENT target.
+
+    The same clustering that inflates the counter has a risk face. The prereg
+    sizes **per event** and caps **concurrent positions** (20) — it has no
+    per-SYMBOL cap, so N headlines about one stock stack N x $10k into one name.
+    That is inside the letter of the design and outside what "$10,000 target
+    notional per event" plainly imagines.
+    """
+    sd = symbol_day_series(df)
+    if sd.empty:
+        return sd
+    out = sd[["eff_date", "symbol", "headlines", "notional", "pnl_usd"]].copy()
+    out["x_design"] = out["notional"] / DESIGN_NOTIONAL_PER_EVENT
+    out["pct_of_book"] = out["notional"] / BOOK_BASELINE
+    return out.sort_values("notional", ascending=False).reset_index(drop=True)
+
+
+def dual_read(df: Optional[pd.DataFrame] = None) -> Dict:
+    """Both series side by side — the gate's unit and the shadow unit.
+
+    The gate is unchanged and authoritative; the shadow series is reported
+    beside it so the difference is visible at every interim look rather than
+    discovered at n=1,000.
+    """
+    d = df if df is not None else load_events()
+    rows = closed_events(d, cluster=False)
+    sd = symbol_day_series(d)
+    if rows.empty:
+        return {"status": "no closed rows"}
+    out = {"status": "ok",
+           "gate_unit": "distinct (symbol, eff_date) — STANDARD (amendment 1)",
+           "shadow_unit": "deduped headlines (member events) — record-only",
+           "n_gate": int(len(sd)),
+           "n_shadow": int(len(rows)),
+           "ratio": float(len(rows) / max(len(sd), 1)),
+           "gate_pct": float(len(sd) / GATE_N),
+           "shadow_pct": float(len(rows) / GATE_N)}
+    for unit, frame in (("gate", sd), ("shadow", rows)):
+        v = pd.to_numeric(frame["m_gross"], errors="coerce").dropna() * 100.0
+        if len(v) >= 2:
+            out[f"{unit}_mean_pp"] = float(v.mean())
+            out[f"{unit}_median_pp"] = float(v.median())
+            out[f"{unit}_hit_rate"] = float((v > 0).mean())
     return out
