@@ -338,3 +338,9 @@ fairvalue_gate/livebooks.py
 backtrader_framework/optimization/strategy_adapters/ifvg_sweep_adapter.py
 backtrader_framework/optimization/strategy_adapters/lr_level_sweep_adapter.py
 backtrader_framework/optimization/strategy_adapters/rsi_bb_supertrend_adapter.py
+
+# 2026-09-05: the WFO campaign supervisor + its launchd agents. Routed PRIVATE for
+# the same reason /run_*.py is: they are the campaign's runner, not generic tooling.
+# Mirrored to the private repo by backup-to-private.sh.
+/campaign_chain.sh
+/launchd/
