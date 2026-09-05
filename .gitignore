@@ -344,3 +344,4 @@ backtrader_framework/optimization/strategy_adapters/rsi_bb_supertrend_adapter.py
 # Mirrored to the private repo by backup-to-private.sh.
 /campaign_chain.sh
 /launchd/
+/migrate_quant_off_desktop.sh
