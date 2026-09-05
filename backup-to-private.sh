@@ -80,7 +80,7 @@ cp -p replay_*.py replay_*.sh deploy_*.sh session_pnl_snapshot.sh backup-to-priv
 # 2026-09-05: campaign_chain.sh + launchd/ ADDED — the WFO campaign supervisor and
 # its launchd agents. Without this they would live only on this one laptop, which is
 # the failure the supervisor exists to prevent.
-cp -p campaign_chain.sh migrate_quant_off_desktop.sh "$PRIV/" 2>/dev/null || true
+cp -p campaign_chain.sh migrate_quant_off_desktop.sh materialize_repo.sh "$PRIV/" 2>/dev/null || true
 rsync -a "${RX[@]}" launchd "$PRIV/" 2>/dev/null || true
 cp -p review_*.sh audit_*.sh phase2_*.sh prep_*.sh archive_*.sh move_*.sh backfill_*.sh \
       vps_prune_ticks.sh vps_tick_repack.py logrotate_trading_bots.conf "$PRIV/" 2>/dev/null || true

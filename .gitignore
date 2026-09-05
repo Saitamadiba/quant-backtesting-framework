@@ -345,3 +345,4 @@ backtrader_framework/optimization/strategy_adapters/rsi_bb_supertrend_adapter.py
 /campaign_chain.sh
 /launchd/
 /migrate_quant_off_desktop.sh
+/materialize_repo.sh
