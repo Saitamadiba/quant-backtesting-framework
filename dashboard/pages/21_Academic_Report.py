@@ -491,7 +491,7 @@ Backtesting/                         # Project root (Git repository)
 - `requirements.txt` and `pyproject.toml` define dependencies
 - `.env` file stores local API keys
 
-**Path:** `~/Desktop/Quant/Backtesting/`
+**Path:** `~/Quant/Backtesting/`
 """)
     with c2:
         st.markdown("**VPS (Production Server)**")
