@@ -46,6 +46,13 @@ rsync -a --delete "${RX[@]}" feature_lab books_indicator_battery liquidity_surf 
 # them (e.g. the OFCS skipped-trade tick reconstruction). Gitignored in public,
 # and until now mirrored nowhere, so a study lived only in the working tree.
 [ -d research_output ] && rsync -a --delete "${RX[@]}" research_output "$PRIV/"
+# 2026-09-07: reports/ ADDED — the per-study REPORT.md verdicts. reports/ is
+# gitignored in public and was mirrored NOWHERE, so every study write-up (the
+# distilled, least-reproducible artifact of each one) lived only in this working
+# tree. RX already drops the heavy parquet/db/log payloads, so only the prose
+# verdicts travel. Same failure the HyroTrader core and research_output/ lines
+# above were each added to fix.
+[ -d reports ] && rsync -a --delete "${RX[@]}" reports "$PRIV/"
 # 2026-08-24: fleet adaptive-RR study (scripts + panels + verdicts; parquet/klines excluded by RX)
 [ -d adaptive_rr_study ] && rsync -a --delete "${RX[@]}" adaptive_rr_study "$PRIV/"
 [ -d meta_conductor ] && rsync -a --delete "${RX[@]}" meta_conductor "$PRIV/"
