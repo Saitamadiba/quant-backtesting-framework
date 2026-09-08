@@ -14,7 +14,8 @@ LEAK DISCIPLINE (reusing backtrader_framework/optimization/hmm_regime.py):
   posterior carried across seams; states re-labelled each window by a fixed rule
   so the semantic label is stable across refits.
 """
-import sys; sys.path.insert(0,'/Users/saitamadiba/Quant/Backtesting')
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np, pandas as pd
 from backtrader_framework.optimization.hmm_regime import GaussianHMM
 from vwap_value_area.engine import load_cached, load_crypto, _add_atr

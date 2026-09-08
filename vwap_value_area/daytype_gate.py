@@ -6,7 +6,8 @@ the value areas and rides"): the share of pre-window bars closing inside the
 bar before the first tradeable bar. Produced the "his filter makes it worse"
 result in reports/vwap_value_area/REPORT.md.
 """
-import sys; sys.path.insert(0,'/Users/saitamadiba/Quant/Backtesting')
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pandas as pd, numpy as np
 from zoneinfo import ZoneInfo
 from vwap_value_area.engine import (_anchored_vwap,_session_sd,_sess_groups,_add_atr,

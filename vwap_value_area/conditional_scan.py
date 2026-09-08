@@ -5,7 +5,8 @@ wild-cluster-bootstrap family-wise bar across the whole scan, half-split
 stability, and a shuffled-label placebo. Produced the "no conditional structure,
 one era" result in reports/vwap_value_area/REPORT.md.
 """
-import sys; sys.path.insert(0,'/Users/saitamadiba/Quant/Backtesting')
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from vwap_value_area.analyze import *
 import pandas as pd, numpy as np
 RNGS=np.random.default_rng(7)
