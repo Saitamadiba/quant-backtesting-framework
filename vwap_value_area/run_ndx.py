@@ -6,7 +6,7 @@ import numpy as np, pandas as pd
 
 _BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _BASE)
-from vwap_value_area.engine import (Cfg, DATA_DIR, _add_atr, _anchored_vwap,   # noqa
+from vwap_value_area.engine import (Cfg, blackout_status, DATA_DIR, _add_atr, _anchored_vwap,   # noqa
                                     _sess_groups, _session_sd, run_symbol)
 
 SRC = ("/private/tmp/claude-501/-Users-saitamadiba-Quant-Backtesting/"
@@ -47,6 +47,7 @@ def validate(d):
 
 if __name__ == "__main__":
     d = build()
+    print(f"news blackout: {blackout_status()}", flush=True)
     print(f"NDX 5m: n={len(d):,}  {d.timestamp.min()} -> {d.timestamp.max()}")
     print("\n=== CFD VOLUME-PROXY VALIDATION vs real CME volume ===")
     validate(d)

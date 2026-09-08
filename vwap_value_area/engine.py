@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import sys
+import warnings
 from dataclasses import dataclass, field
 from datetime import date
 from zoneinfo import ZoneInfo
@@ -35,11 +36,34 @@ DATA_DIR = os.path.join(_BASE, "research_output", "vwap_value_area")
 CRYPTO = ["BTC", "ETH", "SOL", "XRP", "ADA", "BNB", "LINK", "LTC",
           "DOGE", "DOT", "AVAX", "BCH"]
 
+# The real FOMC statement dates live in fomc_shadow/, which is gitignored here and
+# routed to the private mirror. A public checkout therefore has no calendar. That is
+# survivable but it CHANGES THE BACKTEST, so it must never pass unnoticed: warn at
+# import, and stamp `fomc_cal` onto every emitted trade so the degradation travels
+# with the data into whatever reads it later.
 try:
     from fomc_shadow.calendar import is_statement_day as _is_fomc
+    FOMC_CALENDAR = True
 except Exception:                                          # pragma: no cover
+    FOMC_CALENDAR = False
+
     def _is_fomc(d: date) -> bool:
         return False
+
+    warnings.warn(
+        "fomc_shadow/calendar.py is unavailable, so the news blackout is DEGRADED: "
+        "first-Friday payrolls and the 08:30 ET release window still apply, but the "
+        "eight real FOMC statement days a year DO NOT. Results will not match the "
+        "published run. Every emitted trade carries fomc_cal=False so this stays "
+        "visible downstream.",
+        RuntimeWarning, stacklevel=2)
+
+
+def blackout_status() -> str:
+    """One line describing what the news blackout actually covers in this checkout."""
+    return ("full - real FOMC calendar + first-Friday NFP + 08:30 ET window"
+            if FOMC_CALENDAR else
+            "DEGRADED - NFP + 08:30 ET window only, NO FOMC dates (fomc_shadow absent)")
 
 
 # ---------------------------------------------------------------- config ----
@@ -435,7 +459,7 @@ def _emit_trade(trades, symbol, cfg, df, i, side, entry, stop, m, s_, a,
 
     trades.append({
         "symbol": symbol, "confirm": cfg.confirm, "target": cfg.target,
-        "bands": cfg.bands, "anchor": cfg.anchor,
+        "bands": cfg.bands, "anchor": cfg.anchor, "fomc_cal": FOMC_CALENDAR,
         "date": dts[i], "entry_time": df["timestamp"].iloc[i],
         "side": "long" if side == 1 else "short",
         "entry": entry, "stop": stop, "tp_final": final,

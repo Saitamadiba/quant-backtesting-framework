@@ -13,7 +13,7 @@ _BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _BASE)
 
 from backtrader_framework.optimization.wfo_engine import TransactionCosts   # noqa: E402
-from vwap_value_area.engine import (Cfg, CRYPTO, DATA_DIR, load_cached,      # noqa: E402
+from vwap_value_area.engine import (Cfg, blackout_status, CRYPTO, DATA_DIR, load_cached,      # noqa: E402
                                     load_crypto, run_symbol)
 
 OUT = os.path.join(DATA_DIR, "trades")
@@ -61,6 +61,7 @@ def work(sym: str) -> str:
 
 if __name__ == "__main__":
     syms = CRYPTO + ["NQ", "QQQ"]
+    print(f"news blackout: {blackout_status()}", flush=True)
     with Pool(min(len(syms), os.cpu_count() or 4)) as p:
         for line in p.imap_unordered(work, syms):
             print(line, flush=True)
