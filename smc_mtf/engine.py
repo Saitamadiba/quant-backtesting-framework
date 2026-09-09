@@ -297,10 +297,17 @@ def run_symbol(symbol: str, cfg: SMCConfig | None = None) -> pd.DataFrame:
                               (c[j] - z["top"]) * side < 0
                 zone_top = z["top"] if side == 1 else z["bot"]
                 zone_far = z["bot"] if side == 1 else z["top"]
-                if (c[j] - (zone_far - side * atr[j])) * side < 0 \
-                        and np.isfinite(atr[j]):
-                    continue  # deep close through the zone — dead
                 st = ep["state"]
+                # 2026-09-09 LOOK-AHEAD FIX: a resting limit fills at its TOUCH, whatever the bar later closes. The
+                # close-based invalidations below used to run BEFORE the touch check, cancelling ~27-33% of would-be
+                # fills — exactly the ones closing through the gap (mean −0.8R) — and manufacturing +0.3..+0.5R of
+                # gross on every rung in crypto AND US (research_output/us_wfo_campaign_2026-09-09/
+                # smc_lookahead_cancel_{us,crypto}.md). Same class as the fib_bos trap (2026-07-16).
+                _touch_now = (st == AWAIT_FILL and j != ep["fvg_i"] and (j - ep["fvg_i"]) <= cfg.fill_window
+                              and ((l[j] <= ep["ce"]) if side == 1 else (h[j] >= ep["ce"])))
+                if (not _touch_now) and (c[j] - (zone_far - side * atr[j])) * side < 0 \
+                        and np.isfinite(atr[j]):
+                    continue  # deep close through the zone — dead (only when the limit was NOT touched this bar)
 
                 if st == IDLE:
                     touched = (l[j] <= zone_top) if side == 1 else (h[j] >= zone_top)
@@ -375,10 +382,10 @@ def run_symbol(symbol: str, cfg: SMCConfig | None = None) -> pd.DataFrame:
                         continue
                     if j - ep["fvg_i"] > cfg.fill_window:
                         continue
-                    if (c[j] - ep["fvg_far"]) * side < 0:
-                        continue  # LTF FVG invalidated on a close
                     ce, stop = ep["ce"], ep["stop"]
                     touched = (l[j] <= ce) if side == 1 else (h[j] >= ce)
+                    if (not touched) and (c[j] - ep["fvg_far"]) * side < 0:
+                        continue  # LTF FVG invalidated on a close (only when NOT touched this bar — see fix above)
                     if not touched:
                         # leg may keep extending while we wait
                         ep["leg_hi"] = (max(ep["leg_hi"], h[j]) if side == 1

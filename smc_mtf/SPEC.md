@@ -64,3 +64,15 @@ MAE/MFE.
    targets is the milder cousin)
 4. Crypto vs NQ — does the framework transfer to the asset it was taught on?
 5. Standard regime map + winner/loser anatomy.
+
+
+## 2026-09-09 — SAME-BAR LOOK-AHEAD FOUND AND FIXED (engine.py, AWAIT_FILL)
+Within bar j the engine evaluated two close-based invalidations (HTF zone "deep close through" = dead; LTF FVG
+"invalidated on a close") BEFORE the intrabar limit touch. A bar that touched the CE limit and then closed through the
+gap was therefore CANCELLED instead of FILLED. Those fills are 26–33% of all fills and average −0.68..−0.86R. Booking
+them (touch first, invalidations only for un-touched episodes) collapses every rung to ≈ 0 gross:
+crypto 12h→4h +0.388 → +0.062 (t 1.05), 1d→1h +0.287 → −0.017; US stocks 12h→4h +0.322 → 0.000, 1d→1h +0.256 →
+−0.043, indices 12h→6h +0.552 → +0.109 (t 1.25). Every SMC-MTF result produced before this date (07-17 desk report,
+08-04 ladder + smc12h4h prereg, the "single cell clearing the 130-cell bar") is contaminated. The live bots'
+`smc_demo/engine_frozen.py` carries the same lines, but on the exchange the resting limit fills at the touch
+regardless, so live behaviour ≈ the FIXED engine — consistent with the seats' negative books.
