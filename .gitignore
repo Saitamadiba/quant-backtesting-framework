@@ -296,6 +296,7 @@ vps_infra/
 /archive_*.sh
 /move_*.sh
 /backfill_*.sh
+/check_*.sh
 /replay_*.sh
 # maps where every secret lives, even though it holds none itself
 /backup-secrets.sh

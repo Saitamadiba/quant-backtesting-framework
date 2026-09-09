@@ -82,7 +82,7 @@ for d in knife_prefill_indicator_scan vps_infra scratchpad; do
   [ -d "$d" ] && rsync -a --delete "${RX[@]}" "$d" "$PRIV/"
 done
 # root-level proprietary scripts (no subdir deletion semantics needed)
-cp -p replay_*.py replay_*.sh deploy_*.sh session_pnl_snapshot.sh backup-to-private.sh backup-secrets.sh "$PRIV/" 2>/dev/null || true
+cp -p replay_*.py replay_*.sh deploy_*.sh check_*.sh session_pnl_snapshot.sh backup-to-private.sh backup-secrets.sh "$PRIV/" 2>/dev/null || true
 # operator / audit / migration shell tooling + VPS maintenance
 # 2026-09-05: campaign_chain.sh + launchd/ ADDED — the WFO campaign supervisor and
 # its launchd agents. Without this they would live only on this one laptop, which is
