@@ -60,7 +60,7 @@ rsync -a --delete "${RX[@]}" feature_lab books_indicator_battery liquidity_surf 
 # in the SAME change that added it here, per the 08-07 "routing to private only
 # counts if the private copy exists" rule.
 [ -d funding_carry ] && rsync -a --delete "${RX[@]}" funding_carry "$PRIV/"
-[ -d us_markets ] && rsync -a --delete "${RX[@]}" --exclude='bars_1d/' --exclude='bars_1m/' --exclude='bars_15m/' --exclude='cmdty_1d/' --exclude='idx_cfd_5m/' us_markets "$PRIV/"
+[ -d us_markets ] && rsync -a --delete "${RX[@]}" --exclude='bars_1d/' --exclude='bars_1m/' --exclude='bars_15m/' --exclude='cmdty_1d/' --exclude='idx_cfd_5m*/' us_markets "$PRIV/"
 [ -d phantom_conductor ] && rsync -a --delete "${RX[@]}" phantom_conductor "$PRIV/"
 # 2026-09-03: fleet_features/ — the fleet feature spine (WS0); gitignored in public in the same change.
 [ -d fleet_features ] && rsync -a --delete "${RX[@]}" --exclude='tests/__pycache__' fleet_features "$PRIV/"
