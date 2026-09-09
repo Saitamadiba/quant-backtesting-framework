@@ -60,7 +60,7 @@ rsync -a --delete "${RX[@]}" feature_lab books_indicator_battery liquidity_surf 
 # in the SAME change that added it here, per the 08-07 "routing to private only
 # counts if the private copy exists" rule.
 [ -d funding_carry ] && rsync -a --delete "${RX[@]}" funding_carry "$PRIV/"
-[ -d us_markets ] && rsync -a --delete "${RX[@]}" --exclude='bars_1d/' --exclude='bars_1m/' --exclude='cmdty_1d/' us_markets "$PRIV/"
+[ -d us_markets ] && rsync -a --delete "${RX[@]}" --exclude='bars_1d/' --exclude='bars_1m/' --exclude='bars_15m/' --exclude='cmdty_1d/' --exclude='idx_cfd_5m/' us_markets "$PRIV/"
 [ -d phantom_conductor ] && rsync -a --delete "${RX[@]}" phantom_conductor "$PRIV/"
 # 2026-09-03: fleet_features/ — the fleet feature spine (WS0); gitignored in public in the same change.
 [ -d fleet_features ] && rsync -a --delete "${RX[@]}" --exclude='tests/__pycache__' fleet_features "$PRIV/"
@@ -87,7 +87,8 @@ cp -p replay_*.py replay_*.sh deploy_*.sh session_pnl_snapshot.sh backup-to-priv
 # 2026-09-05: campaign_chain.sh + launchd/ ADDED — the WFO campaign supervisor and
 # its launchd agents. Without this they would live only on this one laptop, which is
 # the failure the supervisor exists to prevent.
-cp -p campaign_chain.sh migrate_quant_off_desktop.sh materialize_repo.sh "$PRIV/" 2>/dev/null || true
+cp -p campaign_chain.sh rebalance_campaign.sh migrate_quant_off_desktop.sh materialize_repo.sh "$PRIV/"
+cp -p "$HOME/.rebalance_after_migration.sh" "$PRIV/rebalance_after_migration.sh" 2>/dev/null || true
 rsync -a "${RX[@]}" launchd "$PRIV/" 2>/dev/null || true
 cp -p review_*.sh audit_*.sh phase2_*.sh prep_*.sh archive_*.sh move_*.sh backfill_*.sh \
       vps_prune_ticks.sh vps_tick_repack.py logrotate_trading_bots.conf "$PRIV/" 2>/dev/null || true
@@ -114,6 +115,81 @@ rsync -aR "${RX[@]}" smc_mtf/tf_ladder_sweep.py fairvalue_gate/livebooks.py \
       backtrader_framework/optimization/strategy_adapters/lr_level_sweep_adapter.py \
       backtrader_framework/optimization/strategy_adapters/rsi_bb_supertrend_adapter.py \
       "$PRIV/" 2>/dev/null || true
+
+# 2026-09-08: claude_memory/ ADDED — SANITIZED. The research memory
+# (~/.claude/projects/<slug>/memory, 648 entries back to 2026-05-07) existed in
+# exactly ONE copy: no git, no Time Machine destination configured, not in
+# iCloud, no launchd/cron job, no VPS copy. It is the least reproducible artifact
+# we hold — code can be regenerated, four months of refutations cannot — and it
+# is the closure library CLAUDE.md requires every new backtest to consult first.
+#
+# It CANNOT be mirrored raw: it carries the live VPS host IP (22 files),
+# WireGuard endpoints, 9-digit ByBit UIDs (30 hits) and Telegram CHAT_IDs.
+# So: stage -> redact -> VERIFY -> publish, and ABORT the whole backup if a
+# forbidden literal survives. Host/port are read from the gitignored env-file at
+# runtime and never written into this script, which lives in the PUBLIC repo.
+MEM_SRC="$HOME/.claude/projects/-Users-saitamadiba-Quant-Backtesting/memory"
+if [ -d "$MEM_SRC" ]; then
+  # Layer 1: commit the LOCAL history net first, so one command keeps both
+  # layers current. Parallel Claude sessions write here continuously, and on
+  # 2026-09-08 one of them silently truncated a MEMORY.md line to 160 chars —
+  # git history is what makes that diffable and restorable. This repo is local
+  # only (a pre-push hook refuses to publish it); it holds the UNSANITIZED text.
+  if [ -d "$MEM_SRC/.git" ]; then
+    if [ -n "$(git -C "$MEM_SRC" status --porcelain)" ]; then
+      git -C "$MEM_SRC" add -A
+      git -C "$MEM_SRC" commit -q -m "memory: snapshot $(date -u +%Y-%m-%dT%H:%MZ)"
+      echo "claude_memory: local history committed ($(git -C "$MEM_SRC" rev-list --count HEAD) commits)"
+    fi
+  fi
+
+  MEM_STAGE="$(mktemp -d -t claudemem)"
+  trap 'rm -rf "$MEM_STAGE"' EXIT
+  rsync -a --include='*/' --include='*.md' --exclude='*' "$MEM_SRC/" "$MEM_STAGE/"
+
+  # ── redact ────────────────────────────────────────────────────────────────
+  # IPv4 (keeping loopback/wildcard, which identify nothing), 9-digit exchange
+  # UIDs, Telegram chat ids. BSD sed: POSIX ERE, so no \b — the parenthesised
+  # forms below are anchored on their key instead.
+  find "$MEM_STAGE" -type f -name '*.md' -print0 | xargs -0 /usr/bin/sed -i '' -E \
+    -e 's/127\.0\.0\.1/@@LOOPBACK@@/g' \
+    -e 's/0\.0\.0\.0/@@WILDCARD@@/g' \
+    -e 's/[0-9]{1,3}(\.[0-9]{1,3}){3}/<IP-REDACTED>/g' \
+    -e 's/@@LOOPBACK@@/127.0.0.1/g' \
+    -e 's/@@WILDCARD@@/0.0.0.0/g' \
+    -e 's/([Uu][Ii][Dd][^0-9]{0,3})[0-9]{8,10}/\1<UID-REDACTED>/g' \
+    -e 's/(CHAT_IDS?[^0-9-]{0,3})-?[0-9]{6,}/\1<CHAT_ID-REDACTED>/g' \
+    -e 's/([Cc][Hh][Aa][Tt][^0-9a-zA-Z_-]{0,3})-?[0-9]{6,}/\1<CHAT_ID-REDACTED>/g' \
+    -e 's/(<IP-REDACTED>):[0-9]{2,5}/\1:<PORT-REDACTED>/g'
+  # NOTE: bare unkeyed digit runs (epoch stamps, row counts, 9-digit numbers with
+  # no adjacent 'uid'/'chat' label) are deliberately KEPT. Redacting every long
+  # number would gut the research figures this mirror exists to preserve, and an
+  # identifier with no label identifies nothing. The hard guarantee below is on
+  # host/IP; ids are redacted wherever they are actually labelled as ids.
+
+  # port only in host/ssh context, built at runtime from the env-file
+  if [ -f "$HOME/.config/quant/deploy.env" ]; then
+    # shellcheck disable=SC1090
+    VPS_PORT="$(/usr/bin/grep -E '^VPS_PORT=' "$HOME/.config/quant/deploy.env" | cut -d= -f2 | tr -d '"'"'"'\r ')"
+    VPS_HOST="$(/usr/bin/grep -E '^VPS_HOST=' "$HOME/.config/quant/deploy.env" | cut -d= -f2 | tr -d '"'"'"'\r ')"
+    [ -n "${VPS_PORT:-}" ] && find "$MEM_STAGE" -type f -name '*.md' -print0 \
+      | xargs -0 /usr/bin/sed -i '' -E -e "s/(-p |[Pp]ort[ =:]+)${VPS_PORT}([^0-9]|\$)/\1<PORT-REDACTED>\2/g"
+  fi
+
+  # ── VERIFY, fail CLOSED ───────────────────────────────────────────────────
+  LEAK=0
+  if [ -n "${VPS_HOST:-}" ] && /usr/bin/grep -rqF "$VPS_HOST" "$MEM_STAGE" 2>/dev/null; then
+    echo "ABORT: VPS host survived redaction in the memory mirror"; LEAK=1; fi
+  if /usr/bin/grep -rqE '[0-9]{1,3}(\.[0-9]{1,3}){3}' --include='*.md' "$MEM_STAGE" 2>/dev/null; then
+    if /usr/bin/grep -rhoE '[0-9]{1,3}(\.[0-9]{1,3}){3}' --include='*.md' "$MEM_STAGE" 2>/dev/null \
+       | sort -u | /usr/bin/grep -qvE '^(127\.0\.0\.1|0\.0\.0\.0)$'; then
+      echo "ABORT: a non-loopback IPv4 survived redaction in the memory mirror"; LEAK=1; fi
+  fi
+  [ "$LEAK" = "0" ] || { echo "  (nothing was published; fix the redaction above)"; exit 1; }
+
+  rsync -a --delete "$MEM_STAGE/" "$PRIV/claude_memory/"
+  echo "claude_memory: $(find "$PRIV/claude_memory" -name '*.md' | wc -l | tr -d ' ') entries mirrored (sanitized + verified)"
+fi
 
 # SAFETY: never let a real secret env-file into the backup
 if git -C "$PRIV" status --porcelain | grep -qE '\.env$'; then

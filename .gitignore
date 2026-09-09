@@ -343,6 +343,7 @@ backtrader_framework/optimization/strategy_adapters/rsi_bb_supertrend_adapter.py
 # the same reason /run_*.py is: they are the campaign's runner, not generic tooling.
 # Mirrored to the private repo by backup-to-private.sh.
 /campaign_chain.sh
+/rebalance_campaign.sh
 /launchd/
 /migrate_quant_off_desktop.sh
 /materialize_repo.sh
