@@ -306,6 +306,7 @@ vps_infra/
 /k1b_*.py
 /k2_*.py
 /analyze_*.py
+/depth_*.py
 /*_refit.py
 /eth_lr_*.py
 /lr_asia_*.py
