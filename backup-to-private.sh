@@ -93,7 +93,7 @@ rsync -a "${RX[@]}" launchd "$PRIV/" 2>/dev/null || true
 cp -p review_*.sh audit_*.sh phase2_*.sh prep_*.sh archive_*.sh move_*.sh backfill_*.sh \
       vps_prune_ticks.sh vps_tick_repack.py logrotate_trading_bots.conf "$PRIV/" 2>/dev/null || true
 # research runners, replays and their OUTPUT (the edge, in code and in numbers)
-cp -p k1_*.py k1b_*.py k2_*.py analyze_*.py depth_*.py *_refit.py eth_lr_*.py lr_asia_*.py regime_gate.py \
+cp -p k1_*.py k1b_*.py k2_*.py analyze_*.py depth_*.py liq_*.py *_refit.py eth_lr_*.py lr_asia_*.py regime_gate.py \
       filter_replay_*.csv filter_replay_*.md reports_*.jsonl "$PRIV/" 2>/dev/null || true
 # standing research docs: preregistrations, runbooks, specs, standards (secret-free
 # bar documents — 2026-07-28: PATTERN_GATE_PREREG etc. were previously mirrored NOWHERE)
