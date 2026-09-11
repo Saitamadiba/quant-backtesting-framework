@@ -425,13 +425,17 @@ BOOKS: list[Book] = [
          closed_filter="realized_r IS NOT NULL AND COALESCE(era,1)<2",
          r="realized_r", symbol="asset", side="direction", entry="entry",
          exit="exit_price", family="OFCS", entry_ts="entry_ts", exit_reason="exit_reason"),
-    Book(key="ofcs_paper_e2", label="ofcs-paper(net,era2)", tier=2, in_recap=True,
+    # era>=2, not era=2: eras 2/3/4 share ONE scoring rule (fixed entry basis +
+    # drift gate + fees) and differ only in anchor (3) and detection venue (4).
+    # An `era=2` filter silently hid every era-3 row from the recap; era 4 would
+    # have vanished the same way. Era 1 stays separate — it is GROSS.
+    Book(key="ofcs_paper_e2", label="ofcs-paper(net,era2+)", tier=2, in_recap=True,
          db="ofcs_shadow/ofcs_paper_book.db", table="ofcs_paper_trades",
          ts="replace(resolved_at,' UTC','')",
-         closed_filter="realized_r IS NOT NULL AND era=2",
+         closed_filter="realized_r IS NOT NULL AND era>=2",
          r="realized_r", symbol="asset", side="direction", entry="entry",
          exit="exit_price",
-         open_filter="realized_r IS NULL AND era=2 AND status NOT IN ('rejected','skipped')",
+         open_filter="realized_r IS NULL AND era>=2 AND status NOT IN ('rejected','skipped')",
          open_ts="entry_ts", open_entry="COALESCE(effective_entry,entry)",
          open_sl="sl", open_tp="tp", open_qty="qty", family="OFCS",
          exit_reason="exit_reason"),
